@@ -1,7 +1,7 @@
 [project]
 name = "better-auth-py"
 version = "0.1.0"
-description = "Comprehensive, framework-agnostic authentication for Python — a port of better-auth, with first-class FastAPI integration."
+description = "Framework-agnostic authentication for Python, ported from better-auth, with a FastAPI integration."
 readme = "README.md"
 authors = [
     { name = "Oumar Barry" }
@@ -27,6 +27,12 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.urls]
+Homepage = "https://github.com/oumarbarry/better-auth-py"
+Repository = "https://github.com/oumarbarry/better-auth-py"
+Issues = "https://github.com/oumarbarry/better-auth-py/issues"
+Changelog = "https://github.com/oumarbarry/better-auth-py/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 fastapi = ["fastapi>=0.110"]
 sqlalchemy = ["sqlalchemy[asyncio]>=2.0"]
@@ -40,6 +46,8 @@ dev = [
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20",
     "uvicorn>=0.30",
+    "ty>=0.0.57",
+    "pre-commit>=4.6.0",
 ]
 
 [build-system]
