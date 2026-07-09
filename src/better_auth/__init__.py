@@ -1,6 +1,6 @@
-"""better-auth-py — comprehensive, framework-agnostic authentication for Python.
+"""better-auth-py: framework-agnostic authentication for Python.
 
-A port of `better-auth <https://better-auth.com>`_ with first-class FastAPI integration.
+A port of `better-auth <https://better-auth.com>`_ with a FastAPI integration.
 """
 
 from .adapters import BaseAdapter, MemoryAdapter, Where

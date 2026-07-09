@@ -1,8 +1,10 @@
 # better-auth-py
 
-**Comprehensive, framework-agnostic authentication for Python — a port of [better-auth](https://better-auth.com), with first-class [FastAPI](https://fastapi.tiangolo.com) integration.**
+[![CI](https://github.com/oumarbarry/better-auth-py/actions/workflows/ci.yml/badge.svg)](https://github.com/oumarbarry/better-auth-py/actions/workflows/ci.yml)
 
-Own your auth. No third-party service, no per-user pricing: users, sessions and accounts live in *your* database, behind the same battle-tested API surface as the TypeScript original.
+**Authentication for Python, ported from [better-auth](https://better-auth.com). Ships with a FastAPI integration.**
+
+Your users, sessions and accounts live in your own database. There is no hosted service to depend on and no per-user pricing, and the API surface is the one the TypeScript original has proven in production.
 
 ```python
 from better_auth import BetterAuth, EmailAndPassword
@@ -24,31 +26,31 @@ async def me(result: dict = Depends(ba.require_session)):
     return result["user"]
 ```
 
-That's a working auth server: sign-up, sign-in, sessions, sign-out, password reset, email verification, social login — the same routes, JSON shapes and error codes as better-auth.
+These twenty lines are a working auth server. Sign-up, sign-in, sessions, sign-out, password reset, email verification and social login are mounted under `/api/auth`, with the same routes, JSON shapes and error codes as better-auth.
 
 ## Features
 
-- **Email & password** — sign-up, sign-in, change/set password, reset flows, email verification
-- **Social sign-in (OAuth2/OIDC)** — GitHub, Google, Discord built in; custom providers in a few lines; PKCE, single-use DB-backed state, account linking with verified-email guard
-- **Sessions** — DB-backed, HMAC-signed cookies, sliding expiry (`expires_in`/`update_age`), `rememberMe`, multi-session management (list/revoke), bearer-token support for API clients
-- **Database adapters** — in-memory (dev/tests) and SQLAlchemy 2 async (SQLite/PostgreSQL/MySQL — works with SQLModel engines too); tiny 5-method protocol for custom adapters
-- **Plugins** — add routes, extend the DB schema, hook before/after every request
-- **Secure defaults** — scrypt password hashing, CSRF origin checks, open-redirect protection on every `callbackURL`, timing-equalized sign-in, rate limiting with better-auth's per-path rules
-- **Framework-agnostic core** — the FastAPI layer is ~80 lines over plain request/response dataclasses; Litestar/Django/Flask integrations can follow the same pattern
+- Email and password: sign-up, sign-in, change/set/verify password, reset flow, email verification.
+- Social sign-in (OAuth2/OIDC): GitHub, Google and Discord built in, custom providers in a few lines. PKCE, single-use database-backed state, and account linking guarded by provider email verification.
+- Sessions in your database: HMAC-signed cookies, sliding expiry (`expires_in`/`update_age`), `rememberMe`, list and revoke endpoints, bearer tokens for API clients.
+- Two adapters out of the box: in-memory for dev and tests, SQLAlchemy 2 async for SQLite, PostgreSQL and MySQL (SQLModel engines work as-is). A custom adapter is five methods.
+- Plugins can add routes, extend the database schema, and hook before and after every request.
+- Secure defaults: scrypt password hashing, CSRF origin checks, open-redirect protection on every `callbackURL`, timing-equalized sign-in, rate limiting with better-auth's per-path rules.
+- The core is framework-agnostic. The FastAPI layer is about 80 lines over plain request/response dataclasses, so Litestar or Django integrations can follow the same pattern.
 
 ## Compatibility with better-auth (TypeScript)
 
-The wire protocol and storage format follow the TS implementation closely — a Python service can sit on the **same database** as a TS better-auth app:
+The wire protocol and storage format follow the TypeScript implementation closely. A Python service can share a database with a TypeScript better-auth app:
 
 | | |
 |---|---|
-| Routes & JSON shapes | Same paths (`/sign-in/email`, `/get-session`, `/callback/{provider}`, …), same success/error bodies and codes (`USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL` 422, `INVALID_EMAIL_OR_PASSWORD` 401, …) |
-| DB schema | Identical `user` / `session` / `account` / `verification` tables, camelCase columns |
-| Password hashes | Exact scrypt format (`N=16384, r=16, p=1, dkLen=64`, NFKC, hex `salt:key`) — **existing TS-created passwords verify in Python and vice-versa** |
+| Routes and JSON shapes | Same paths (`/sign-in/email`, `/get-session`, `/callback/{provider}`, ...), same success and error bodies, same codes (`USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL` 422, `INVALID_EMAIL_OR_PASSWORD` 401, ...) |
+| Database schema | Identical `user` / `session` / `account` / `verification` tables, camelCase columns |
+| Password hashes | Exact scrypt format (`N=16384, r=16, p=1, dkLen=64`, NFKC, hex `salt:key`). Passwords created by the TypeScript library verify in Python, and vice versa. |
 | Session cookies | Same name (`better-auth.session_token`, `__Secure-` over HTTPS) and signing scheme (HMAC-SHA256, base64, URI-encoded `token.sig`) |
-| IDs & tokens | Same alphabets/lengths (62-char IDs, 64-char state/verification tokens) |
+| IDs and tokens | Same alphabets and lengths (62-character IDs, 64-character state and verification tokens) |
 
-Known divergences (v0.1): email-verification/reset tokens are DB-backed (TS uses signed JWTs for verify-email), bearer auth is built in (a plugin in TS), cookie cache & secondary storage not yet implemented.
+Known divergences in v0.1: email-verification and reset tokens are stored in the database (the TypeScript library signs verify-email tokens as JWTs), bearer auth is built into the core (a plugin over there), and cookie cache plus secondary storage are not implemented yet.
 
 ## Install
 
@@ -57,7 +59,7 @@ uv add better-auth-py[fastapi,sqlalchemy]
 # or: pip install "better-auth-py[fastapi,sqlalchemy]"
 ```
 
-The core has a single dependency (`httpx`). Extras: `fastapi`, `sqlalchemy`.
+The core has a single dependency, `httpx`. The `fastapi` and `sqlalchemy` extras pull in the rest.
 
 ## Quickstart
 
@@ -84,7 +86,7 @@ curl -s -b /tmp/jar localhost:8000/me
 curl -s -b /tmp/jar -c /tmp/jar -X POST localhost:8000/api/auth/sign-out
 ```
 
-API clients can skip cookies entirely: `Authorization: Bearer <token>` with the `token` returned by sign-in/sign-up.
+API clients can skip cookies entirely and send `Authorization: Bearer <token>` with the `token` returned by sign-in or sign-up.
 
 ## Configuration
 
@@ -137,10 +139,10 @@ from better_auth.adapters.sqlalchemy import SQLAlchemyAdapter
 engine = create_async_engine("postgresql+asyncpg://...")  # or sqlite+aiosqlite, mysql+aiomysql
 adapter = SQLAlchemyAdapter(engine)
 auth = BetterAuth(secret=..., adapter=adapter, ...)
-await adapter.create_tables()  # dev convenience — use Alembic & co. in production
+await adapter.create_tables()  # dev convenience; use Alembic in production
 ```
 
-A custom adapter implements five async methods over dict rows — see `better_auth.adapters.base.BaseAdapter` (`create`, `find_one`, `find_many`, `update`, `delete_many`).
+A custom adapter implements five async methods over dict rows. See `better_auth.adapters.base.BaseAdapter` (`create`, `find_one`, `find_many`, `update`, `delete_many`).
 
 ## Social providers
 
@@ -148,7 +150,7 @@ A custom adapter implements five async methods over dict rows — see `better_au
 social_providers={"github": GitHub(client_id=..., client_secret=...)}
 ```
 
-`POST /api/auth/sign-in/social {"provider": "github", "callbackURL": "/dashboard"}` returns `{"url": ..., "redirect": true}`; send the browser there, and the callback sets the session cookie and redirects to `callbackURL`. Custom providers are one dataclass:
+`POST /api/auth/sign-in/social {"provider": "github", "callbackURL": "/dashboard"}` returns `{"url": ..., "redirect": true}`. Send the browser to that URL; the callback sets the session cookie and redirects to `callbackURL`. A custom provider is one dataclass:
 
 ```python
 from better_auth import OAuthProvider
@@ -162,7 +164,7 @@ gitlab = OAuthProvider(
 )
 ```
 
-Override `fetch_user()` for non-OIDC user payloads (see the GitHub/Discord sources).
+Override `fetch_user()` for providers whose user payload is not OIDC-shaped (see the GitHub and Discord sources).
 
 ## Plugins
 
@@ -187,11 +189,11 @@ class ApiKeys(Plugin):
 
 ## Security notes
 
-- Origin-checked non-GET requests (CSRF) against `base_url` + `trusted_origins`
-- Every `callbackURL`/`redirectTo` is validated against trusted origins (open-redirect protection)
-- Sign-in runs a dummy scrypt on unknown users (timing equalization); unknown email and wrong password return the same 401
-- Rate limiting is in-memory (single process). Behind a multi-worker/proxy setup, also rate-limit at the edge; `x-forwarded-for` is honoured for the client IP.
-- `MemoryAdapter` is the default so quickstarts work — switch to a real adapter for anything persistent.
+- Non-GET requests are origin-checked (CSRF) against `base_url` and `trusted_origins`.
+- Every `callbackURL` and `redirectTo` is validated against trusted origins, which blocks open redirects.
+- Sign-in runs a dummy scrypt when the user does not exist, so unknown email and wrong password take the same time and return the same 401.
+- Rate limiting is in-memory, per process. Behind a multi-worker or proxied setup, also rate-limit at the edge. `x-forwarded-for` is honored for the client IP.
+- `MemoryAdapter` is the default so quickstarts work. Switch to a real adapter for anything persistent.
 
 ## Roadmap
 
@@ -201,10 +203,14 @@ Core: `change-email`, `delete-user`, `link-social`, `refresh-token`/`get-access-
 
 ```bash
 uv sync --all-extras
-uv run pytest            # 84 tests: e2e over ASGI, both adapters, mocked OAuth
+uv run pre-commit install
+uv run pytest            # e2e over ASGI, both adapters, mocked OAuth
 uv run ruff check .
+uv run ty check
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
 
 ## License
 
-[MIT](LICENSE) — inspired by and API-compatible with [better-auth](https://github.com/better-auth/better-auth) (MIT).
+[MIT](LICENSE). Inspired by and API-compatible with [better-auth](https://github.com/better-auth/better-auth), also MIT.
