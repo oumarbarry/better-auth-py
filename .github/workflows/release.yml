@@ -1,0 +1,21 @@
+# Publishes to PyPI via trusted publishing (no token needed) when a v* tag is pushed.
+# One-time setup: on PyPI, add a "trusted publisher" for this repo with
+# workflow name `release.yml` and environment `pypi` (see PUBLISH.md).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # required for PyPI trusted publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - run: uv publish
