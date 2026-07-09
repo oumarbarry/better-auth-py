@@ -12,6 +12,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 from urllib.parse import urlencode
 
 import httpx
@@ -349,7 +350,7 @@ async def _resolve_user(
         )
         return account["userId"], False
 
-    user = await ctx.adapter.find_one("user", [Where("email", email)])
+    user: dict[str, Any] | None = await ctx.adapter.find_one("user", [Where("email", email)])
     if user is not None and not info.email_verified:
         # refuse to auto-link on an unverified provider email (account takeover guard)
         raise _CallbackError("account_not_linked")

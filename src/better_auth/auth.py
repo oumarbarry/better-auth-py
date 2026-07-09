@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -51,7 +51,7 @@ class BetterAuth:
         base_path: str = "/api/auth",
         email_and_password: EmailAndPassword | None = None,
         email_verification: EmailVerification | None = None,
-        social_providers: dict[str, OAuthProvider] | None = None,
+        social_providers: Mapping[str, OAuthProvider] | None = None,
         session: SessionOptions | None = None,
         rate_limit: RateLimit | None = None,
         trusted_origins: list[str] | None = None,
