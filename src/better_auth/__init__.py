@@ -5,10 +5,16 @@ A port of `better-auth <https://better-auth.com>`_ with a FastAPI integration.
 
 from .adapters import BaseAdapter, MemoryAdapter, Where
 from .auth import BetterAuth
-from .config import EmailAndPassword, EmailVerification, RateLimit, SessionOptions
+from .config import (
+    AdvancedDatabase,
+    EmailAndPassword,
+    EmailVerification,
+    RateLimit,
+    SessionOptions,
+)
 from .oauth import Discord, GitHub, Google, OAuthProvider, OAuthTokens, OAuthUserInfo
 from .plugins import Plugin
-from .schema import CORE_SCHEMA, Field, Schema
+from .schema import CORE_SCHEMA, Field, Reference, Schema
 from .types import APIError, AuthRequest, AuthResponse, Ctx
 
 __version__ = "0.1.0"
@@ -16,6 +22,7 @@ __version__ = "0.1.0"
 __all__ = [
     "CORE_SCHEMA",
     "APIError",
+    "AdvancedDatabase",
     "AuthRequest",
     "AuthResponse",
     "BaseAdapter",
@@ -33,6 +40,7 @@ __all__ = [
     "OAuthUserInfo",
     "Plugin",
     "RateLimit",
+    "Reference",
     "Schema",
     "SessionOptions",
     "Where",

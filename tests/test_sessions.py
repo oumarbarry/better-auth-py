@@ -61,7 +61,7 @@ async def test_remember_me_false_sets_browser_session_cookie(client):
 
 async def test_expired_session_is_deleted_and_cookie_cleared(auth, client):
     await sign_up(client)
-    await auth.adapter.update("session", [], {"expiresAt": utcnow() - timedelta(seconds=1)})
+    await auth.adapter.update_many("session", [], {"expiresAt": utcnow() - timedelta(seconds=1)})
     response = await client.get("/api/auth/get-session")
     assert response.json() is None
     cleared = response.headers.get_list("set-cookie")
@@ -73,7 +73,7 @@ async def test_update_age_refresh_extends_expiry(auth, client):
     await sign_up(client)
     options = auth.session_options
     stale_expiry = utcnow() + timedelta(seconds=options.expires_in - options.update_age - 60)
-    await auth.adapter.update("session", [], {"expiresAt": stale_expiry})
+    await auth.adapter.update_many("session", [], {"expiresAt": stale_expiry})
 
     response = await client.get("/api/auth/get-session")
     assert response.json() is not None
