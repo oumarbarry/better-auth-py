@@ -35,13 +35,18 @@ async def test_revoke_sessions_revokes_current_too(client):
     assert (await client.get("/api/auth/get-session")).json() is None
 
 
-async def test_revoke_session_of_another_user_fails(auth, client):
+async def test_revoke_session_of_another_user_is_silent(auth, client):
+    """Wire-compat fix: unknown/foreign tokens are a silent no-op ({"status":true}),
+    never an error — matches TS anti-enumeration semantics (session.ts:812).
+    The old behavior (400 SESSION_NOT_FOUND) was the bug."""
     victim = await sign_up(client)
     async with make_client(auth) as attacker:
         await sign_up(attacker, email="mallory@example.com")
         response = await attacker.post("/api/auth/revoke-session", json={"token": victim["token"]})
-        assert response.status_code == 400
-        assert response.json()["code"] == "SESSION_NOT_FOUND"
+        assert response.status_code == 200
+        assert response.json() == {"status": True}
+        # the foreign token must NOT actually have been revoked
+        assert (await client.get("/api/auth/get-session")).json() is not None
 
 
 async def test_remember_me_false_sets_browser_session_cookie(client):

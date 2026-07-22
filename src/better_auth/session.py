@@ -95,6 +95,19 @@ async def create_session(
     return session, cookies
 
 
+def refresh_session_cookie(auth: BetterAuth, request: AuthRequest, token: str) -> str:
+    """Re-issue the ``session_token`` cookie for an already-valid session.
+
+    better-auth's TS `setSessionCookie` also refreshes the (session_data) cookie
+    cache with the new user payload; that cache isn't implemented here (see gap
+    item 15), so this only re-signs/re-sets the plain session cookie, honouring
+    the existing `dont_remember` (browser-session) marker.
+    """
+    dont_remember = cookie_name(auth, "dont_remember") in request.cookies()
+    max_age = None if dont_remember else auth.session_options.expires_in
+    return build_cookie(auth, sign_value(auth.secret, token), max_age)
+
+
 async def get_session(
     auth: BetterAuth, request: AuthRequest
 ) -> tuple[dict[str, Any] | None, list[str]]:

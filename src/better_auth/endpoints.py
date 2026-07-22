@@ -16,7 +16,7 @@ from .crypto import (
     verify_password,
 )
 from .oauth import oauth_callback, sign_in_social
-from .session import clear_cookie, create_session, get_session, utcnow
+from .session import clear_cookie, create_session, get_session, refresh_session_cookie, utcnow
 from .types import APIError, AuthResponse, Ctx
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -225,13 +225,14 @@ async def list_sessions(ctx: Ctx) -> AuthResponse:
 
 
 async def revoke_session(ctx: Ctx) -> AuthResponse:
+    """POST /revoke-session — anti-enumeration: an unknown or foreign token is a
+    silent no-op, never an error (matches TS `session.ts:812`)."""
     result = await ctx.require_session()
     body = ctx.body()
     require_fields(body, "token")
     session = await ctx.adapter.find_one("session", [Where("token", body["token"])])
-    if session is None or session["userId"] != result["user"]["id"]:
-        raise APIError(400, "SESSION_NOT_FOUND", "Session not found")
-    await ctx.adapter.delete_many("session", [Where("token", body["token"])])
+    if session is not None and session["userId"] == result["user"]["id"]:
+        await ctx.adapter.delete_many("session", [Where("token", body["token"])])
     return AuthResponse(body={"status": True})
 
 
@@ -257,13 +258,30 @@ async def revoke_other_sessions(ctx: Ctx) -> AuthResponse:
 
 
 async def update_user(ctx: Ctx) -> AuthResponse:
+    """POST /update-user — `email` is never updatable here (use /change-email);
+    refreshes the session cookie with the merged user afterwards, matching TS
+    `update-user.ts`'s `setSessionCookie` call.
+
+    Note: TS also throws `BODY_MUST_BE_AN_OBJECT` for a non-dict JSON body, but
+    `ctx.body()`/`AuthRequest.json()` (types.py, out of scope for this change)
+    already rejects non-object bodies earlier with `INVALID_BODY` — that TS
+    error code is unreachable through this stack and is intentionally not
+    duplicated here.
+    """
     result = await ctx.require_session()
     body = ctx.body()
+    if body.get("email"):
+        raise APIError(400, "EMAIL_CAN_NOT_BE_UPDATED", "Email can not be updated")
     updates = {key: body[key] for key in ("name", "image") if key in body}
-    if updates:
-        updates["updatedAt"] = utcnow()
-        await ctx.adapter.update("user", [Where("id", result["user"]["id"])], updates)
-    return AuthResponse(body={"status": True})
+    if not updates:
+        raise APIError(400, "BAD_REQUEST", "No fields to update")
+    updates["updatedAt"] = utcnow()
+    await ctx.adapter.update("user", [Where("id", result["user"]["id"])], updates)
+    response = AuthResponse(body={"status": True})
+    response.set_cookie(
+        refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"])
+    )
+    return response
 
 
 async def change_password(ctx: Ctx) -> AuthResponse:
@@ -285,13 +303,17 @@ async def change_password(ctx: Ctx) -> AuthResponse:
         {"password": hash_password(body["newPassword"]), "updatedAt": utcnow()},
     )
     token = None
+    response = AuthResponse(body=None)
     if body.get("revokeOtherSessions"):
-        await ctx.adapter.delete_many(
-            "session",
-            [Where("userId", user["id"]), Where("token", result["session"]["token"], "ne")],
-        )
-        token = result["session"]["token"]
-    return AuthResponse(body={"token": token, "user": user})
+        # TS semantics: revoke ALL sessions (including the current one), then
+        # mint a brand-new session and set its cookie (update-user.ts:291).
+        await ctx.adapter.delete_many("session", [Where("userId", user["id"])])
+        new_session, cookies = await create_session(ctx.auth, user["id"], ctx.request)
+        token = new_session["token"]
+        for cookie in cookies:
+            response.set_cookie(cookie)
+    response.body = {"token": token, "user": user}
+    return response
 
 
 async def set_password(ctx: Ctx) -> AuthResponse:
@@ -320,13 +342,21 @@ async def set_password(ctx: Ctx) -> AuthResponse:
 
 
 async def verify_password_handler(ctx: Ctx) -> AuthResponse:
+    """POST /verify-password — TS marks this ``scope:"server"`` (server-only,
+    not client-callable) but still HTTP-routable; kept exposed here as the gap
+    spec's documented default (see docs/plans/gap/01-core-http.md, open
+    questions). Wire shape matches TS exactly: ``{status:true}`` on success,
+    throws ``INVALID_PASSWORD`` (never ``{valid:false}``) on mismatch.
+    """
     result = await ctx.require_session()
     body = ctx.body()
     require_fields(body, "password")
     account = await _credential_account(ctx, result["user"]["id"])
     if account is None or not account.get("password"):
         raise APIError(400, "CREDENTIAL_ACCOUNT_NOT_FOUND", "Credential account not found")
-    return AuthResponse(body={"valid": verify_password(account["password"], body["password"])})
+    if not verify_password(account["password"], body["password"]):
+        raise APIError(400, "INVALID_PASSWORD", "Invalid password")
+    return AuthResponse(body={"status": True})
 
 
 # --- password reset -------------------------------------------------------------------
@@ -502,10 +532,16 @@ def _absolute(ctx: Ctx, url: str) -> str:
 async def list_accounts(ctx: Ctx) -> AuthResponse:
     result = await ctx.require_session()
     accounts = await ctx.adapter.find_many("account", [Where("userId", result["user"]["id"])])
-    sanitized = [
-        {key: value for key, value in account.items() if key not in SENSITIVE_ACCOUNT_FIELDS}
-        for account in accounts
-    ]
+    sanitized = []
+    for account in accounts:
+        item = {
+            key: value
+            for key, value in account.items()
+            if key not in SENSITIVE_ACCOUNT_FIELDS and key != "scope"
+        }
+        scope = account.get("scope")
+        item["scopes"] = scope.split(",") if scope else []
+        sanitized.append(item)
     return AuthResponse(body=sanitized)
 
 
