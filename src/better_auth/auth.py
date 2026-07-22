@@ -12,7 +12,13 @@ import httpx
 
 from .adapters.base import BaseAdapter
 from .adapters.memory import MemoryAdapter
-from .config import EmailAndPassword, EmailVerification, RateLimit, SessionOptions
+from .config import (
+    EmailAndPassword,
+    EmailVerification,
+    RateLimit,
+    SessionOptions,
+    UserOptions,
+)
 from .endpoints import ROUTES
 from .oauth import OAuthProvider
 from .plugins import Plugin
@@ -53,6 +59,7 @@ class BetterAuth:
         email_verification: EmailVerification | None = None,
         social_providers: Mapping[str, OAuthProvider] | None = None,
         session: SessionOptions | None = None,
+        user: UserOptions | None = None,
         rate_limit: RateLimit | None = None,
         trusted_origins: list[str] | None = None,
         plugins: list[Plugin] | None = None,
@@ -74,6 +81,7 @@ class BetterAuth:
         self.email_and_password = email_and_password or EmailAndPassword()
         self.email_verification = email_verification or EmailVerification()
         self.session_options = session or SessionOptions()
+        self.user = user or UserOptions()
         self.rate_limit = rate_limit or RateLimit()
         self.trusted_origins = [origin.rstrip("/") for origin in trusted_origins or []]
         self.plugins = list(plugins or [])

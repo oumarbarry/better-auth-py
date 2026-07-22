@@ -10,6 +10,7 @@ from urllib.parse import quote
 import jwt as pyjwt
 
 from .adapters.base import Where
+from .config import UserOptions
 from .crypto import (
     decode_email_verification_token,
     dummy_verify,
@@ -19,7 +20,7 @@ from .crypto import (
     sign_email_verification_token,
     verify_password,
 )
-from .oauth import oauth_callback, sign_in_social
+from .oauth import OAuthTokens, oauth_callback, sign_in_social
 from .session import clear_cookie, create_session, get_session, refresh_session_cookie, utcnow
 from .types import APIError, AuthResponse, Ctx
 
@@ -81,6 +82,17 @@ async def _send_verification_email(ctx: Ctx, user: dict[str, Any], callback_url:
     )
     await cfg.send_verification_email(user, url, token)
     return True
+
+
+def _user_options(ctx: Ctx) -> UserOptions:
+    return ctx.auth.user
+
+
+def _verify_email_url(ctx: Ctx, token: str, callback_url: str) -> str:
+    return (
+        f"{ctx.auth.base_url}{ctx.auth.base_path}/verify-email"
+        f"?token={token}&callbackURL={quote(callback_url, safe='')}"
+    )
 
 
 # --- email & password -----------------------------------------------------------------
@@ -268,6 +280,36 @@ async def revoke_other_sessions(ctx: Ctx) -> AuthResponse:
         ],
     )
     return AuthResponse(body={"status": True})
+
+
+#: session columns managed by the auth core — never settable via /update-session
+#: (TS restricts writes to configured additional session fields).
+_PROTECTED_SESSION_FIELDS = frozenset(
+    {"id", "token", "userId", "expiresAt", "ipAddress", "userAgent", "createdAt", "updatedAt"}
+)
+
+
+async def update_session(ctx: Ctx) -> AuthResponse:
+    """POST /update-session — writes additional (non-core) session fields and
+    refreshes the session cookie (update-session.ts). Core-managed columns are
+    rejected; an empty change set is a 400 "No fields to update".
+
+    ponytail: no `additionalFields` allowlist (gap item 12) — any non-core key is
+    accepted rather than only configured ones; tighten when session field config lands.
+    """
+    result = await ctx.require_session()
+    body = ctx.body()
+    updates = {key: value for key, value in body.items() if key not in _PROTECTED_SESSION_FIELDS}
+    if not updates:
+        raise APIError(400, "BAD_REQUEST", "No fields to update")
+    updates["updatedAt"] = utcnow()
+    updated = await ctx.adapter.update(
+        "session", [Where("token", result["session"]["token"])], updates
+    )
+    new_session = updated or {**result["session"], **updates}
+    response = AuthResponse(body={"session": new_session})
+    response.set_cookie(refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"]))
+    return response
 
 
 # --- user -----------------------------------------------------------------------------
@@ -500,10 +542,10 @@ async def verify_email(ctx: Ctx) -> AuthResponse:
     user still succeeds, matching TS's `if (user.user.emailVerified) return
     {status:true, user:null}` early-out).
 
-    The JWT payload may carry `updateTo`/`requestType` for the change-email flow
-    (email-verification.ts:330-472), but nothing in this port mints such tokens
-    yet — `/change-email` is gap item 8 (missing account/session endpoints,
-    out of scope here) — so that branch is intentionally not implemented.
+    When the JWT carries `updateTo`/`requestType`, this is the change-email flow
+    (email-verification.ts:328-476): the email is moved to `updateTo`, with the
+    two-step confirmation→verification handshake or the legacy immediate-update
+    branch selected by `requestType`.
     """
     token = ctx.request.query.get("token")
     callback_url = ctx.request.query.get("callbackURL")
@@ -517,6 +559,15 @@ async def verify_email(ctx: Ctx) -> AuthResponse:
             return AuthResponse(redirect_to=f"{target}{separator}error={code}")
         raise APIError(401, code, code.replace("_", " ").capitalize())
 
+    def succeed(user: dict[str, Any] | None, cookies: list[str]) -> AuthResponse:
+        if callback_url:
+            response = AuthResponse(redirect_to=_absolute(ctx, callback_url))
+        else:
+            response = AuthResponse(body={"status": True, "user": user})
+        for cookie in cookies:
+            response.set_cookie(cookie)
+        return response
+
     if not token:
         return fail("INVALID_TOKEN")
     try:
@@ -527,9 +578,16 @@ async def verify_email(ctx: Ctx) -> AuthResponse:
         return fail("INVALID_TOKEN")
 
     email = payload.get("email")
+    update_to = payload.get("updateTo")
+    request_type = payload.get("requestType")
     user = await ctx.adapter.find_one("user", [Where("email", email)]) if email else None
     if user is None:
         return fail("USER_NOT_FOUND")
+
+    if update_to:
+        return await _verify_change_email(
+            ctx, user, email, update_to, request_type, callback_url, fail, succeed
+        )
 
     if not user["emailVerified"]:
         await ctx.adapter.update(
@@ -540,17 +598,290 @@ async def verify_email(ctx: Ctx) -> AuthResponse:
     if ctx.auth.email_verification.auto_sign_in_after_verification:
         _session, cookies = await create_session(ctx.auth, user["id"], ctx.request)
 
-    if callback_url:
-        response = AuthResponse(redirect_to=_absolute(ctx, callback_url))
-    else:
-        response = AuthResponse(body={"status": True, "user": None})
-    for cookie in cookies:
-        response.set_cookie(cookie)
-    return response
+    return succeed(None, cookies)
+
+
+async def _verify_change_email(
+    ctx: Ctx,
+    user: dict[str, Any],
+    email: Any,
+    update_to: Any,
+    request_type: Any,
+    callback_url: str | None,
+    fail: Any,
+    succeed: Any,
+) -> AuthResponse:
+    """Change-email confirmation/verification handshake (email-verification.ts:328-476).
+
+    ponytail: `afterEmailVerification` hook is not called — that config field is
+    gap item 8's out-of-scope superset (only `user.changeEmail`/`deleteUser` land
+    this wave); wire it when `EmailVerification` grows the callback.
+    """
+    cfg = ctx.auth.email_verification
+    session = await ctx.get_session()
+    if session is not None and session["user"]["email"] != email:
+        return fail("INVALID_USER")
+
+    async def session_cookies(target_user: dict[str, Any]) -> list[str]:
+        # refresh the existing session cookie, or mint a fresh session when the
+        # link is opened without one (TS creates a session in that case)
+        if session is not None:
+            return [refresh_session_cookie(ctx.auth, ctx.request, session["session"]["token"])]
+        _s, cookies = await create_session(ctx.auth, target_user["id"], ctx.request)
+        return cookies
+
+    if request_type == "change-email-confirmation":
+        # step 1: user confirmed from the OLD address -> email the NEW address a
+        # second token that actually performs the update
+        new_token = sign_email_verification_token(
+            ctx.auth.secret,
+            email,
+            update_to=update_to,
+            expires_in=cfg.expires_in,
+            extra_payload={"requestType": "change-email-verification"},
+        )
+        if cfg.send_verification_email is not None:
+            url = _verify_email_url(ctx, new_token, callback_url or "/")
+            await cfg.send_verification_email({**user, "email": update_to}, url, new_token)
+        # TS returns {status:true} here (no user key), redirecting when a callbackURL is set
+        if callback_url:
+            return AuthResponse(redirect_to=_absolute(ctx, callback_url))
+        return AuthResponse(body={"status": True})
+
+    if request_type == "change-email-verification":
+        # step 2: apply the change, keep the address verified
+        updated = await ctx.adapter.update(
+            "user",
+            [Where("id", user["id"])],
+            {"email": update_to, "emailVerified": True, "updatedAt": utcnow()},
+        )
+        updated_user = updated or {**user, "email": update_to, "emailVerified": True}
+        return succeed(updated_user, await session_cookies(updated_user))
+
+    # legacy single-step flow: update immediately (unverified) then re-verify the new address
+    updated = await ctx.adapter.update(
+        "user",
+        [Where("id", user["id"])],
+        {"email": update_to, "emailVerified": False, "updatedAt": utcnow()},
+    )
+    updated_user = updated or {**user, "email": update_to, "emailVerified": False}
+    if cfg.send_verification_email is not None:
+        new_token = sign_email_verification_token(
+            ctx.auth.secret, update_to, expires_in=cfg.expires_in
+        )
+        url = _verify_email_url(ctx, new_token, callback_url or "/")
+        await cfg.send_verification_email(updated_user, url, new_token)
+    return succeed(updated_user, await session_cookies(updated_user))
 
 
 def _absolute(ctx: Ctx, url: str) -> str:
     return f"{ctx.auth.base_url}{url}" if url.startswith("/") else url
+
+
+async def change_email(ctx: Ctx) -> AuthResponse:
+    """POST /change-email — request an email change (update-user.ts changeEmail).
+
+    Picks one of three flows by session state / config, all returning
+    ``{status:true}`` (never leaking whether the target email exists):
+    immediate update (unverified current email + updateEmailWithoutVerification),
+    a confirmation email to the current address (verified current email +
+    sendChangeEmailConfirmation), or a verification email to the new address.
+    """
+    result = await ctx.require_session()
+    user = result["user"]
+    opts = _user_options(ctx).change_email
+    if not opts.enabled:
+        raise APIError(400, "CHANGE_EMAIL_DISABLED", "Change email is disabled")
+    body = ctx.body()
+    require_fields(body, "newEmail")
+    new_email = validate_email(body["newEmail"])
+    if new_email == user["email"]:
+        raise APIError(400, "BAD_REQUEST", "Email is the same")
+
+    cfg = ctx.auth.email_verification
+    can_update_without_verification = (
+        user["emailVerified"] is not True and opts.update_email_without_verification
+    )
+    can_send_verification = cfg.send_verification_email is not None
+    can_send_confirmation = bool(
+        can_send_verification and user["emailVerified"] and opts.send_change_email_confirmation
+    )
+    if (
+        not can_update_without_verification
+        and not can_send_confirmation
+        and not can_send_verification
+    ):
+        raise APIError(400, "BAD_REQUEST", "Verification email isn't enabled")
+
+    callback_url = body.get("callbackURL") or "/"
+
+    existing = await ctx.adapter.find_one("user", [Where("email", new_email)])
+    if existing is not None:
+        # simulate token generation to keep timing indistinguishable from a fresh email
+        sign_email_verification_token(
+            ctx.auth.secret, user["email"], update_to=new_email, expires_in=cfg.expires_in
+        )
+        return AuthResponse(body={"status": True})
+
+    if can_update_without_verification:
+        await ctx.adapter.update(
+            "user", [Where("id", user["id"])], {"email": new_email, "updatedAt": utcnow()}
+        )
+        response = AuthResponse(body={"status": True})
+        response.set_cookie(
+            refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"])
+        )
+        if can_send_verification:
+            token = sign_email_verification_token(
+                ctx.auth.secret, new_email, expires_in=cfg.expires_in
+            )
+            url = _verify_email_url(ctx, token, callback_url)
+            await cfg.send_verification_email({**user, "email": new_email}, url, token)
+        return response
+
+    if can_send_confirmation:
+        token = sign_email_verification_token(
+            ctx.auth.secret,
+            user["email"],
+            update_to=new_email,
+            expires_in=cfg.expires_in,
+            extra_payload={"requestType": "change-email-confirmation"},
+        )
+        url = _verify_email_url(ctx, token, callback_url)
+        await opts.send_change_email_confirmation(user, new_email, url, token)
+        return AuthResponse(body={"status": True})
+
+    # redundant guard mirroring TS's final `if (!canSendVerification) throw`
+    if cfg.send_verification_email is None:
+        raise APIError(400, "BAD_REQUEST", "Verification email isn't enabled")
+    token = sign_email_verification_token(
+        ctx.auth.secret,
+        user["email"],
+        update_to=new_email,
+        expires_in=cfg.expires_in,
+        extra_payload={"requestType": "change-email-verification"},
+    )
+    url = _verify_email_url(ctx, token, callback_url)
+    await cfg.send_verification_email({**user, "email": new_email}, url, token)
+    return AuthResponse(body={"status": True})
+
+
+# --- user deletion --------------------------------------------------------------------
+
+
+async def _purge_user(ctx: Ctx, user: dict[str, Any], *, cascade_accounts: bool) -> None:
+    opts = _user_options(ctx).delete_user
+    if opts.before_delete is not None:
+        await opts.before_delete(user, ctx.request)
+    await ctx.adapter.delete_many("user", [Where("id", user["id"])])
+    await ctx.adapter.delete_many("session", [Where("userId", user["id"])])
+    if cascade_accounts:
+        await ctx.adapter.delete_many("account", [Where("userId", user["id"])])
+    if opts.after_delete is not None:
+        await opts.after_delete(user, ctx.request)
+
+
+async def _consume_delete_token(ctx: Ctx, user: dict[str, Any], token: str | None) -> None:
+    """Atomically burn a single-use delete token and verify it belongs to ``user``.
+
+    Deletes the row before validating (like reset-password) so concurrent callbacks
+    with the same token can only succeed once; a wrong-owner token is still burned.
+    """
+    identifier = f"delete-account-{token}"
+    row = await ctx.adapter.find_one("verification", [Where("identifier", identifier)])
+    if row is not None:
+        await ctx.adapter.delete_many("verification", [Where("identifier", identifier)])
+    if row is None or row["value"] != user["id"]:
+        raise APIError(404, "INVALID_TOKEN", "Invalid token")
+
+
+def _clear_session(response: AuthResponse, ctx: Ctx) -> None:
+    response.set_cookie(clear_cookie(ctx.auth))
+    response.set_cookie(clear_cookie(ctx.auth, "dont_remember"))
+
+
+async def delete_user(ctx: Ctx) -> AuthResponse:
+    """POST /delete-user — delete the current account (update-user.ts deleteUser).
+
+    Requires `user.deleteUser.enabled` (else 404). A fresh session OR a valid
+    password is required for immediate deletion; when
+    `sendDeleteAccountVerification` is set, emails a callback link instead.
+    """
+    opts = _user_options(ctx).delete_user
+    if not opts.enabled:
+        raise APIError(404, "NOT_FOUND", "Not found")
+    result = await ctx.require_session()
+    user = result["user"]
+    body = ctx.body()
+
+    if body.get("password"):
+        account = await _credential_account(ctx, user["id"])
+        if account is None or not account.get("password"):
+            raise APIError(400, "CREDENTIAL_ACCOUNT_NOT_FOUND", "Credential account not found")
+        if not verify_password(account["password"], body["password"]):
+            raise APIError(400, "INVALID_PASSWORD", "Invalid password")
+
+    if body.get("token"):
+        await _consume_delete_token(ctx, user, body["token"])
+        await _purge_user(ctx, user, cascade_accounts=True)
+        response = AuthResponse(body={"success": True, "message": "User deleted"})
+        _clear_session(response, ctx)
+        return response
+
+    if opts.send_delete_account_verification is not None:
+        now = utcnow()
+        token = generate_random_string(32)
+        await ctx.adapter.create(
+            "verification",
+            {
+                "id": generate_id(),
+                "identifier": f"delete-account-{token}",
+                "value": user["id"],
+                "expiresAt": now + timedelta(seconds=opts.delete_token_expires_in),
+                "createdAt": now,
+                "updatedAt": now,
+            },
+        )
+        url = (
+            f"{ctx.auth.base_url}{ctx.auth.base_path}/delete-user/callback"
+            f"?token={token}&callbackURL={quote(body.get('callbackURL') or '/', safe='')}"
+        )
+        await opts.send_delete_account_verification(user, url, token)
+        return AuthResponse(body={"success": True, "message": "Verification email sent"})
+
+    # no password + no verification email: fall back to session freshness
+    fresh_age = getattr(ctx.auth.session_options, "fresh_age", 86400)
+    if not body.get("password") and fresh_age != 0:
+        age = (utcnow() - result["session"]["createdAt"]).total_seconds()
+        if age >= fresh_age:
+            raise APIError(400, "SESSION_EXPIRED", "Session is not fresh")
+
+    # main path mirrors TS exactly: user + sessions only (accounts are NOT cascaded here)
+    await _purge_user(ctx, user, cascade_accounts=False)
+    response = AuthResponse(body={"success": True, "message": "User deleted"})
+    _clear_session(response, ctx)
+    return response
+
+
+async def delete_user_callback(ctx: Ctx) -> AuthResponse:
+    """GET /delete-user/callback — complete deletion from the emailed token."""
+    opts = _user_options(ctx).delete_user
+    if not opts.enabled:
+        raise APIError(404, "NOT_FOUND", "Not found")
+    result = await ctx.get_session()
+    if result is None:
+        raise APIError(404, "FAILED_TO_GET_USER_INFO", "Failed to get user info")
+    await _consume_delete_token(ctx, result["user"], ctx.request.query.get("token"))
+    await _purge_user(ctx, result["user"], cascade_accounts=True)
+
+    callback_url = ctx.request.query.get("callbackURL")
+    if callback_url:
+        ctx.auth.ensure_trusted_url(callback_url)
+        response = AuthResponse(redirect_to=_absolute(ctx, callback_url))
+    else:
+        response = AuthResponse(body={"success": True, "message": "User deleted"})
+    _clear_session(response, ctx)
+    return response
 
 
 # --- accounts -------------------------------------------------------------------------
@@ -592,6 +923,77 @@ async def unlink_account(ctx: Ctx) -> AuthResponse:
     return AuthResponse(body={"status": True})
 
 
+async def account_info(ctx: Ctx) -> AuthResponse:
+    """GET /account-info — the provider's user-info for one linked account (account.ts).
+
+    Returns ``{user, data}`` (the provider `getUserInfo` shape). Every HTTP caller
+    needs a valid session; the account must belong to the session user.
+
+    ponytail: no token refresh and `data` is ``{}`` — `OAuthProvider.fetch_user`
+    (oauth.py, out of scope) uses the stored access token and discards the raw
+    provider payload; the refresh/`getAccessToken` machinery is Wave 2.
+    """
+    result = await ctx.require_session()
+    user_id = result["user"]["id"]
+    query = ctx.request.query
+    provided_account_id = query.get("accountId")
+    provided_provider_id = query.get("providerId")
+
+    account: dict[str, Any] | None = None
+    if provided_account_id:
+        accounts = await ctx.adapter.find_many("account", [Where("userId", user_id)])
+        matching = [
+            acc
+            for acc in accounts
+            if acc["accountId"] == provided_account_id
+            and (not provided_provider_id or acc["providerId"] == provided_provider_id)
+        ]
+        if len(matching) > 1:
+            raise APIError(
+                400,
+                "AMBIGUOUS_ACCOUNT",
+                "Multiple accounts share this account ID. Pass a providerId to disambiguate.",
+            )
+        account = matching[0] if matching else None
+    # else: account-cookie lookup (storeAccountCookie) is unimplemented → no match
+
+    if account is None:
+        raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
+
+    provider = ctx.auth.social_providers.get(account["providerId"])
+    if provider is None:
+        raise APIError(
+            400,
+            "PROVIDER_NOT_CONFIGURED",
+            "Account is not associated with a configured social provider.",
+        )
+
+    access_token = account.get("accessToken")
+    if not access_token:
+        raise APIError(400, "ACCESS_TOKEN_NOT_FOUND", "Access token not found")
+
+    tokens = OAuthTokens(
+        access_token=access_token,
+        refresh_token=account.get("refreshToken"),
+        id_token=account.get("idToken"),
+        scope=account.get("scope"),
+        access_token_expires_at=account.get("accessTokenExpiresAt"),
+    )
+    info = await provider.fetch_user(tokens, ctx.auth.http)
+    return AuthResponse(
+        body={
+            "user": {
+                "id": info.id,
+                "name": info.name,
+                "email": info.email,
+                "image": info.image,
+                "emailVerified": info.email_verified,
+            },
+            "data": {},
+        }
+    )
+
+
 # --- misc -----------------------------------------------------------------------------
 
 
@@ -631,6 +1033,10 @@ ROUTES: list[tuple[str, str, Any]] = [
     ("POST", "/revoke-sessions", revoke_sessions),
     ("POST", "/revoke-other-sessions", revoke_other_sessions),
     ("POST", "/update-user", update_user),
+    ("POST", "/update-session", update_session),
+    ("POST", "/change-email", change_email),
+    ("POST", "/delete-user", delete_user),
+    ("GET", "/delete-user/callback", delete_user_callback),
     ("POST", "/change-password", change_password),
     ("POST", "/set-password", set_password),
     ("POST", "/verify-password", verify_password_handler),
@@ -642,4 +1048,5 @@ ROUTES: list[tuple[str, str, Any]] = [
     ("GET", "/verify-email", verify_email),
     ("GET", "/list-accounts", list_accounts),
     ("POST", "/unlink-account", unlink_account),
+    ("GET", "/account-info", account_info),
 ]
