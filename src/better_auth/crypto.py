@@ -11,8 +11,12 @@ import base64
 import hashlib
 import hmac
 import secrets
+import time
 import unicodedata
+from typing import Any
 from urllib.parse import quote, unquote
+
+import jwt
 
 # better-auth scrypt config (@better-auth/utils/password)
 _SCRYPT_N = 16384
@@ -89,3 +93,35 @@ def unsign_value(secret: str, signed: str) -> str | None:
     if not hmac.compare_digest(signature, _signature(secret, value)):
         return None
     return value
+
+
+def sign_email_verification_token(
+    secret: str,
+    email: str,
+    update_to: str | None = None,
+    expires_in: int = 3600,
+    extra_payload: dict[str, Any] | None = None,
+) -> str:
+    """HS256 JWT matching better-auth's ``signJWT``/``createEmailVerificationToken``
+    (``crypto/jwt.ts``, ``api/routes/email-verification.ts:15``): payload
+    ``{email, updateTo?, ...extraPayload}`` plus ``iat``/``exp`` claims, signed with
+    the auth secret. No ``aud``/``iss`` — TS's ``signJWT`` doesn't set them either.
+    """
+    payload: dict[str, Any] = {"email": email.lower()}
+    if update_to:
+        payload["updateTo"] = update_to.lower()
+    if extra_payload:
+        payload.update(extra_payload)
+    now = int(time.time())
+    payload["iat"] = now
+    payload["exp"] = now + expires_in
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def decode_email_verification_token(secret: str, token: str) -> dict[str, Any]:
+    """Verify + decode an email-verification JWT (HS256 only, matching TS's
+    ``jwtVerify(token, secret, {algorithms:["HS256"]})``). Raises
+    ``jwt.ExpiredSignatureError`` / ``jwt.InvalidTokenError`` on failure — callers
+    map those to ``TOKEN_EXPIRED`` / ``INVALID_TOKEN``.
+    """
+    return jwt.decode(token, secret, algorithms=["HS256"])

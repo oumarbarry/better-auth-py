@@ -55,13 +55,20 @@ async def test_verify_email_flow():
         assert signed_in.json()["user"]["emailVerified"] is True
 
 
-async def test_verify_email_token_single_use():
+async def test_verify_email_token_is_idempotent():
+    # The token is a stateless JWT (no DB row), so re-verifying an already-verified
+    # user succeeds again instead of erroring — matches TS `email-verification.ts`'s
+    # `if (user.user.emailVerified) return {status:true, user:null}` early-out.
     auth, sent = verification_auth()
     async with make_client(auth) as client:
         await sign_up(client)
         token = sent[0][2]
-        assert (await client.get(f"/api/auth/verify-email?token={token}")).status_code == 200
-        assert (await client.get(f"/api/auth/verify-email?token={token}")).status_code == 400
+        first = await client.get(f"/api/auth/verify-email?token={token}")
+        assert first.status_code == 200
+        assert first.json() == {"status": True, "user": None}
+        second = await client.get(f"/api/auth/verify-email?token={token}")
+        assert second.status_code == 200
+        assert second.json() == {"status": True, "user": None}
 
 
 async def test_invalid_token_redirects_with_error():
@@ -69,7 +76,7 @@ async def test_invalid_token_redirects_with_error():
     async with make_client(auth) as client:
         response = await client.get("/api/auth/verify-email?token=bogus&callbackURL=%2Fwelcome")
         assert response.status_code == 302
-        assert "error=invalid_token" in response.headers["location"]
+        assert "error=INVALID_TOKEN" in response.headers["location"]
 
 
 async def test_auto_sign_in_after_verification():

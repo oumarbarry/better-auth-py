@@ -1,4 +1,5 @@
-from conftest import SIGNUP, make_client, sign_up
+from better_auth import EmailAndPassword
+from conftest import SIGNUP, make_auth, make_client, sign_up
 
 
 async def test_sign_up_returns_token_and_user(client):
@@ -21,6 +22,52 @@ async def test_sign_up_duplicate_email(client):
     response = await client.post("/api/auth/sign-up/email", json=SIGNUP)
     assert response.status_code == 422
     assert response.json()["code"] == "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL"
+
+
+async def test_sign_up_disabled_via_disable_sign_up():
+    # `disableSignUp` blocks /sign-up/email specifically (EMAIL_PASSWORD_SIGN_UP_DISABLED),
+    # distinct from `enabled=False` disabling the whole feature (EMAIL_PASSWORD_DISABLED
+    # on e.g. /sign-in/email) — sign-up.ts's check ORs both conditions into the same code.
+    auth = make_auth(email_and_password=EmailAndPassword(enabled=True, disable_sign_up=True))
+    async with make_client(auth) as client:
+        response = await client.post("/api/auth/sign-up/email", json=SIGNUP)
+        assert response.status_code == 400
+        assert response.json()["code"] == "EMAIL_PASSWORD_SIGN_UP_DISABLED"
+
+
+async def test_sign_up_duplicate_email_enumeration_protection_require_verification():
+    # sign-up.ts:235 — when requireEmailVerification is set, a duplicate sign-up
+    # gets a fabricated user (200, token:null) instead of a 422, so an attacker
+    # can't use /sign-up/email to enumerate registered addresses.
+    auth = make_auth(
+        email_and_password=EmailAndPassword(enabled=True, require_email_verification=True)
+    )
+    async with make_client(auth) as client:
+        await client.post("/api/auth/sign-up/email", json=SIGNUP)
+        response = await client.post("/api/auth/sign-up/email", json=SIGNUP)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["token"] is None
+        assert data["user"]["email"] == SIGNUP["email"]
+        assert data["user"]["name"] == SIGNUP["name"]
+        assert data["user"]["emailVerified"] is False
+        assert data["user"]["id"]  # a fresh synthetic id, not the real user's
+        # the real (unverified) user is untouched — sign-in still blocks on
+        # EMAIL_NOT_VERIFIED, not e.g. INVALID_EMAIL_OR_PASSWORD from a corrupted account
+        real = await client.post("/api/auth/sign-in/email", json=SIGNUP)
+        assert real.status_code == 403
+        assert real.json()["code"] == "EMAIL_NOT_VERIFIED"
+
+
+async def test_sign_up_duplicate_email_enumeration_protection_no_auto_sign_in():
+    # Same protection kicks in when autoSignIn is disabled, even without
+    # requireEmailVerification (sign-up.ts:235's OR condition).
+    auth = make_auth(email_and_password=EmailAndPassword(enabled=True, auto_sign_in=False))
+    async with make_client(auth) as client:
+        await client.post("/api/auth/sign-up/email", json=SIGNUP)
+        response = await client.post("/api/auth/sign-up/email", json=SIGNUP)
+        assert response.status_code == 200
+        assert response.json()["token"] is None
 
 
 async def test_sign_up_invalid_email(client):

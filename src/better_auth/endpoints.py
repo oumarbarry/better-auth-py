@@ -7,12 +7,16 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import quote
 
+import jwt as pyjwt
+
 from .adapters.base import Where
 from .crypto import (
+    decode_email_verification_token,
     dummy_verify,
     generate_id,
     generate_random_string,
     hash_password,
+    sign_email_verification_token,
     verify_password,
 )
 from .oauth import oauth_callback, sign_in_social
@@ -64,22 +68,13 @@ async def _credential_account(ctx: Ctx, user_id: str) -> dict[str, Any] | None:
 
 
 async def _send_verification_email(ctx: Ctx, user: dict[str, Any], callback_url: str) -> bool:
+    """Mints a signed HS256 JWT (no DB row — matches TS `email-verification.ts:15`,
+    `createEmailVerificationToken`), so tokens are stateless and cross-runtime
+    interoperable with a TS better-auth deployment sharing the same secret."""
     cfg = ctx.auth.email_verification
     if cfg.send_verification_email is None:
         return False
-    now = utcnow()
-    token = generate_random_string(32)
-    await ctx.adapter.create(
-        "verification",
-        {
-            "id": generate_id(),
-            "identifier": f"email-verification:{token}",
-            "value": user["id"],
-            "expiresAt": now + timedelta(seconds=cfg.expires_in),
-            "createdAt": now,
-            "updatedAt": now,
-        },
-    )
+    token = sign_email_verification_token(ctx.auth.secret, user["email"], expires_in=cfg.expires_in)
     url = (
         f"{ctx.auth.base_url}{ctx.auth.base_path}/verify-email"
         f"?token={token}&callbackURL={quote(callback_url, safe='')}"
@@ -92,13 +87,35 @@ async def _send_verification_email(ctx: Ctx, user: dict[str, Any], callback_url:
 
 
 async def sign_up_email(ctx: Ctx) -> AuthResponse:
-    _require_email_password_enabled(ctx)
+    cfg = ctx.auth.email_and_password
+    if not cfg.enabled or cfg.disable_sign_up:
+        raise APIError(
+            400, "EMAIL_PASSWORD_SIGN_UP_DISABLED", "Email and password sign up is not enabled"
+        )
     body = ctx.body()
     require_fields(body, "name", "email", "password")
     email = validate_email(body["email"])
     validate_password(ctx, body["password"])
 
-    if await ctx.adapter.find_one("user", [Where("email", email)]) is not None:
+    # sign-up.ts:235 — enumeration protection: when verification is required or
+    # auto-sign-in is disabled, an existing email must be indistinguishable from
+    # a fresh sign-up (fabricated user, 200) rather than leaking existence via 422.
+    should_return_generic_duplicate = cfg.require_email_verification or not cfg.auto_sign_in
+    existing = await ctx.adapter.find_one("user", [Where("email", email)])
+    if existing is not None:
+        hash_password(body["password"])  # equalize timing with the real-signup path
+        if should_return_generic_duplicate:
+            now = utcnow()
+            synthetic_user = {
+                "id": generate_id(),
+                "name": body["name"],
+                "email": email,
+                "emailVerified": False,
+                "image": body.get("image"),
+                "createdAt": now,
+                "updatedAt": now,
+            }
+            return AuthResponse(body={"token": None, "user": synthetic_user})
         raise APIError(
             422, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL", "User already exists. Use another email."
         )
@@ -129,11 +146,10 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
     )
     await ctx.auth.run_hook("user_created_after", user)
 
-    cfg = ctx.auth.email_and_password
     if cfg.require_email_verification or ctx.auth.email_verification.send_on_sign_up:
         await _send_verification_email(ctx, user, body.get("callbackURL") or "/")
 
-    if cfg.require_email_verification or not cfg.auto_sign_in:
+    if should_return_generic_duplicate:  # requireEmailVerification || autoSignIn===false
         return AuthResponse(body={"token": None, "user": user})
 
     session, cookies = await create_session(
@@ -278,9 +294,7 @@ async def update_user(ctx: Ctx) -> AuthResponse:
     updates["updatedAt"] = utcnow()
     await ctx.adapter.update("user", [Where("id", result["user"]["id"])], updates)
     response = AuthResponse(body={"status": True})
-    response.set_cookie(
-        refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"])
-    )
+    response.set_cookie(refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"]))
     return response
 
 
@@ -479,35 +493,48 @@ async def send_verification_email_handler(ctx: Ctx) -> AuthResponse:
 
 
 async def verify_email(ctx: Ctx) -> AuthResponse:
+    """GET /verify-email — token is a stateless HS256 JWT (email-verification.ts:224),
+    decoded rather than looked up. On plain verification success TS returns
+    `{"status": true, "user": null}` (line 484/540) — never the verified user —
+    and the JWT isn't single-use (idempotent: re-verifying an already-verified
+    user still succeeds, matching TS's `if (user.user.emailVerified) return
+    {status:true, user:null}` early-out).
+
+    The JWT payload may carry `updateTo`/`requestType` for the change-email flow
+    (email-verification.ts:330-472), but nothing in this port mints such tokens
+    yet — `/change-email` is gap item 8 (missing account/session endpoints,
+    out of scope here) — so that branch is intentionally not implemented.
+    """
     token = ctx.request.query.get("token")
     callback_url = ctx.request.query.get("callbackURL")
     if callback_url:
         ctx.auth.ensure_trusted_url(callback_url)
 
-    def fail() -> AuthResponse:
+    def fail(code: str) -> AuthResponse:
         if callback_url:
             target = _absolute(ctx, callback_url)
             separator = "&" if "?" in target else "?"
-            return AuthResponse(redirect_to=f"{target}{separator}error=invalid_token")
-        raise APIError(400, "INVALID_TOKEN", "Invalid token")
+            return AuthResponse(redirect_to=f"{target}{separator}error={code}")
+        raise APIError(401, code, code.replace("_", " ").capitalize())
 
     if not token:
-        return fail()
-    identifier = f"email-verification:{token}"
-    row = await ctx.adapter.find_one("verification", [Where("identifier", identifier)])
-    if row is None:
-        return fail()
-    await ctx.adapter.delete_many("verification", [Where("identifier", identifier)])
-    if row["expiresAt"] <= utcnow():
-        return fail()
+        return fail("INVALID_TOKEN")
+    try:
+        payload = decode_email_verification_token(ctx.auth.secret, token)
+    except pyjwt.ExpiredSignatureError:
+        return fail("TOKEN_EXPIRED")
+    except pyjwt.InvalidTokenError:
+        return fail("INVALID_TOKEN")
 
-    user = await ctx.adapter.find_one("user", [Where("id", row["value"])])
+    email = payload.get("email")
+    user = await ctx.adapter.find_one("user", [Where("email", email)]) if email else None
     if user is None:
-        return fail()
-    await ctx.adapter.update(
-        "user", [Where("id", user["id"])], {"emailVerified": True, "updatedAt": utcnow()}
-    )
-    user["emailVerified"] = True
+        return fail("USER_NOT_FOUND")
+
+    if not user["emailVerified"]:
+        await ctx.adapter.update(
+            "user", [Where("id", user["id"])], {"emailVerified": True, "updatedAt": utcnow()}
+        )
 
     cookies: list[str] = []
     if ctx.auth.email_verification.auto_sign_in_after_verification:
@@ -516,7 +543,7 @@ async def verify_email(ctx: Ctx) -> AuthResponse:
     if callback_url:
         response = AuthResponse(redirect_to=_absolute(ctx, callback_url))
     else:
-        response = AuthResponse(body={"status": True, "user": user})
+        response = AuthResponse(body={"status": True, "user": None})
     for cookie in cookies:
         response.set_cookie(cookie)
     return response
