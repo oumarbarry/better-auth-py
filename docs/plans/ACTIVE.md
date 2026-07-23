@@ -127,14 +127,34 @@ inference N/A in Python → no port. open-api stays deferred (end of Wave 5).
       Backlog (parity edges, later wave): TS verification via secondaryStorage
       when storeInDatabase=false; verification.storeIdentifier hashing —
       Python is DB-backed only for verification.
-- [ ] W3-B (after W3-A): 11 plugins via 6 parallel group agents, disjoint
-      files only — src/better_auth/plugins_ext/<name>.py +
-      tests/plugins/test_<name>.py; plugins_ext/__init__ wiring = orchestrator
-      merge commit (W2-B pattern, zero conflicts by design).
-      G1 Sonnet: bearer(resp-side) + last-login-method + custom-session;
-      G2 Sonnet: anonymous + one-time-token; G3 Opus: username + magic-link;
-      G4 Opus: phone-number; G5 Opus: email-otp;
-      G6 Sonnet: captcha + haveibeenpwned.
+- [x] W3-B: DONE, 752 tests (314 plugin tests across 11 plugins), full gate
+      green, ZERO merge conflicts (disjoint files by design). All 6 groups
+      returned complete, TS line-verified, no hard blockers. Concurrency
+      single-winner tests present for magic-link/OTT/phone-number/email-otp.
+      Merge-window fixes by orchestrator (files unowned at that point):
+      (a) endpoints.py sign-up now hashes/checks BEFORE create_user (G6
+          security finding — orphaned user row on rejected password) +
+          regression assertion; (b) anonymous delete-anonymous-user gate
+      fixed to authoritative get_session(disable_cache=True) per G5's TS
+      correction (sensitive ≠ fresh; Fable's G2 dispatch instruction was
+      wrong) + stale-session regression test; (c) EmailVerification.
+      send_on_sign_in added (G3 soft-blocker, option A); (d) plugins_ext
+      __init__ exports all 11. Attempted Plugin.schema ClassVar→instance
+      "root fix" REVERTED — subclasses legitimately use ClassVar and G3's
+      annotated instance declarations already pass ty; base stays ClassVar.
+      Accepted deviations (ponytail-noted in code): sendOTP await-then-
+      suppress; phone-number/anonymous schema-remap kwargs dropped;
+      OTT plain-message errors as {code:"BAD_REQUEST"}; server-only
+      email-otp endpoints unmounted + exposed as methods; require_signature
+      strips unsigned bearer header pre-core-read; custom-session drops TS
+      type-inference-only ctor arg; magic-link errors always redirect
+      (spec's "plain 400" didn't exist in TS).
+      BACKLOG (fold into later waves): thread ctx into create_session's
+      session databaseHooks (last-login-method works around via after-hook);
+      EmailVerification.before/after_email_verification config fields
+      (email-otp reads via getattr); encrypted store_otp → TS XChaCha20 in
+      Wave 4; TS verification-via-secondaryStorage + storeIdentifier hashing;
+      name-based plugin/provider config ergonomics.
 
 ## Wave 4 — Hard plugins (spec: gap/05-plugins-core.md)
 - [ ] Crypto primitives first (XChaCha20 symmetricEncrypt `$ba$` envelope,
@@ -167,6 +187,13 @@ inference N/A in Python → no port. open-api stays deferred (end of Wave 5).
 - 2026-07-23 FIXED c541260: cookie_cache.py compared HMAC signatures with `!=`
   (timing side-channel). Now hmac.compare_digest + type guard. Fixed directly
   by orchestrator (file unowned by any live agent).
+
+- 2026-07-23 FIXED (W3-B merge commit): endpoints.py sign_up_email created
+  the user row BEFORE hash_password_checked ran — a rejected password (e.g.
+  haveibeenpwned PASSWORD_COMPROMISED) left an orphaned user with no
+  credential account; TS hashes first (sign-up.ts:333). Found by G6 during
+  TS verification; fixed by orchestrator in the merge window (hash hoisted
+  above create_user) + no-orphan-row regression assertion.
 
 ## Decision log
 

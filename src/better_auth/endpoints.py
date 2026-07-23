@@ -133,6 +133,9 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
         )
 
     now = utcnow()
+    # check+hash BEFORE any write: a rejected password (e.g. haveibeenpwned) must not
+    # leave an orphaned user row (TS sign-up.ts hashes first)
+    password_hash = await ctx.auth.hash_password_checked(body["password"], ctx.request.path)
     user = {
         "id": generate_id(),
         "name": body["name"],
@@ -150,7 +153,7 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
             "accountId": user["id"],
             "providerId": "credential",
             "userId": user["id"],
-            "password": await ctx.auth.hash_password_checked(body["password"], ctx.request.path),
+            "password": password_hash,
             "createdAt": now,
             "updatedAt": now,
         },

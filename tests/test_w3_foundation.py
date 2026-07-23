@@ -481,6 +481,8 @@ async def test_password_check_blocks_sign_up():
         assert resp.status_code == 400
         assert resp.json()["code"] == "PASSWORD_COMPROMISED"
     assert "/sign-up/email" in plugin.paths  # the seam passed the request path
+    # rejected sign-up must not leave an orphaned user row (TS hashes before create)
+    assert await auth.adapter.find_one("user", [Where("email", "a@x.com")]) is None
 
 
 async def test_password_check_blocks_reset_and_change_and_set():

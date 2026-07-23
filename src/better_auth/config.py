@@ -45,6 +45,9 @@ class EmailAndPassword:
 class EmailVerification:
     send_verification_email: SendEmail | None = None
     send_on_sign_up: bool = False
+    #: send a verification email when an unverified user signs in (TS sendOnSignIn);
+    #: read by /sign-in/email and plugin sign-ins (e.g. username)
+    send_on_sign_in: bool = False
     auto_sign_in_after_verification: bool = False
     expires_in: int = 60 * 60
 
