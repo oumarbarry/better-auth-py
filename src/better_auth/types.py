@@ -87,6 +87,10 @@ class Ctx:
     params: dict[str, str] = field(default_factory=dict)
     #: the outgoing response during after-hooks (None before the handler runs)
     response: Any = None
+    #: ``{"session": ..., "user": ...}`` set when this request created a session (any
+    #: path: email sign-in/up, oauth callback, verify-email auto-sign-in). After-hooks
+    #: read it to react to a fresh login — mirrors TS ``ctx.context.newSession``.
+    new_session: dict[str, Any] | None = None
     _body: dict[str, Any] | None = None
     _session: Any = None
     _session_loaded: bool = False

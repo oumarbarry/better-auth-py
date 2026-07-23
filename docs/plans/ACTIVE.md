@@ -112,16 +112,21 @@ helpers, symmetric_encrypt (AES-GCM interim), fresh_age gate — ALL already
 exist. additional-fields plugin: core support done (W1-E); client-only
 inference N/A in Python → no port. open-api stays deferred (end of Wave 5).
 
-- [ ] W3-A (Opus, foundation leftovers, one agent — shared files):
-      atomic consume_verification_value + update/delete_by_identifier
-      (concurrency race test mandatory); charset generate_random_string +
-      generate_otp + default_key_hasher; new-session response signal +
-      expose-headers merge helper; on_password_reset config + reset wiring;
-      overridable password-hash seam (Q1 default b); Field.transform_input
-      honored on writes; plugin-routes-shadow-core order swap (Q4 default);
-      revoke_unproven_account_access helper (TS semantics); EmailVerification
-      sender init-overridable (mutability); build_cookie attribute overrides
-      (http_only/max_age/inherit). Gate: 406 green + new tests, ruff, ty.
+- [x] W3-A: DONE, validated, 437 tests (31 new). All 10 items landed; Fable
+      spot-checked consume vs TS internal-adapter.ts:1254 — TS gates expiry
+      (expired row deleted, returns null; dispatch prompt's guess was wrong,
+      agent followed TS correctly), per-identifier lock = TS
+      withVerificationConsumeLock. Race test proven load-bearing (25 winners
+      without lock → 1 with). API names for W3-B: consume_verification_value /
+      update_verification_by_identifier / delete_verification_by_identifier /
+      revoke_unproven_account_access (internal_adapter), generate_otp /
+      generate_random_string(alphabet=) / default_key_hasher (crypto),
+      ctx.new_session, add_expose_headers (plugins.py),
+      auth.password_checks + hash_password_checked, Field.transform_input,
+      build_cookie(http_only=), plugin routes shadow core.
+      Backlog (parity edges, later wave): TS verification via secondaryStorage
+      when storeInDatabase=false; verification.storeIdentifier hashing —
+      Python is DB-backed only for verification.
 - [ ] W3-B (after W3-A): 11 plugins via 6 parallel group agents, disjoint
       files only — src/better_auth/plugins_ext/<name>.py +
       tests/plugins/test_<name>.py; plugins_ext/__init__ wiring = orchestrator

@@ -15,6 +15,8 @@ SendEmail = Callable[[dict[str, Any], str, str], Awaitable[None]]
 SendChangeEmail = Callable[[dict[str, Any], str, str, str], Awaitable[None]]
 #: async callback(user, request) run before/after a user is deleted.
 DeleteHook = Callable[[dict[str, Any], Any], Awaitable[None]]
+#: async callback({"user": user}, request) run after a successful password reset.
+PasswordResetHook = Callable[[dict[str, Any], Any], Awaitable[None]]
 
 DAY = 60 * 60 * 24
 
@@ -34,6 +36,9 @@ class EmailAndPassword:
     send_reset_password: SendEmail | None = None
     reset_password_token_expires_in: int = 60 * 60
     revoke_sessions_on_password_reset: bool = False
+    #: async ({"user": user}, request) called after a successful reset (TS onPasswordReset).
+    #: Phone-number / email-otp reset flows will call the same seam.
+    on_password_reset: PasswordResetHook | None = None
 
 
 @dataclass

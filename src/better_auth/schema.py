@@ -53,6 +53,10 @@ class Field:
     default_factory: Callable[[], Any] | None = None
     #: callable re-applied on every update when the value is absent (e.g. ``updatedAt``)
     on_update: Callable[[], Any] | None = None
+    #: normalize a client-supplied value before storage, on create AND update (mirrors
+    #: TS field ``transform.input``; e.g. username lower-casing). Applied to the value,
+    #: then the usual storage coercion runs.
+    transform_input: Callable[[Any], Any] | None = None
     #: override the storage column name (defaults to the field key)
     field_name: str | None = None
     #: hint that the column is sorted/filtered on (varchar vs text at DDL time in TS)

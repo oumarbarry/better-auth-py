@@ -15,6 +15,7 @@ from .types import AuthRequest
 
 if TYPE_CHECKING:
     from .auth import BetterAuth
+    from .types import Ctx
 
 DONT_REMEMBER_EXPIRES_IN = 60 * 60 * 24  # 1 day, like better-auth
 
@@ -29,9 +30,20 @@ def cookie_name(auth: BetterAuth, base: str = "session_token") -> str:
 
 
 def build_cookie(
-    auth: BetterAuth, value: str, max_age: int | None, base: str = "session_token"
+    auth: BetterAuth,
+    value: str,
+    max_age: int | None,
+    base: str = "session_token",
+    *,
+    http_only: bool = True,
 ) -> str:
-    parts = [f"{cookie_name(auth, base)}={value}", "Path=/", "HttpOnly", "SameSite=Lax"]
+    """Build a Set-Cookie value inheriting the session cookie's derived attributes
+    (SameSite/Secure/Domain/prefix). ``http_only=False`` emits a JS-readable cookie
+    (e.g. last-login-method) that still inherits those attributes."""
+    parts = [f"{cookie_name(auth, base)}={value}", "Path=/"]
+    if http_only:
+        parts.append("HttpOnly")
+    parts.append("SameSite=Lax")
     if max_age is not None:
         parts.append(f"Max-Age={max_age}")
     if auth.use_secure_cookies:
@@ -68,11 +80,17 @@ async def create_session(
     request: AuthRequest,
     remember_me: bool = True,
     user: dict[str, Any] | None = None,
+    ctx: Ctx | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Create a DB session and return ``(session, set_cookie_values)``.
 
     When ``user`` is given and the cookie cache is enabled, also emits the signed
     ``session_data`` cache cookie so the next ``/get-session`` can skip the DB.
+
+    When ``ctx`` is given, records ``ctx.new_session = {"session", "user"}`` so
+    after-hooks can detect this request created a session (TS ``setNewSession``).
+    Every core session-creation path funnels through here, so the signal fires on
+    all of them.
     """
     now = utcnow()
     expires_in = auth.session_options.expires_in if remember_me else DONT_REMEMBER_EXPIRES_IN
@@ -105,6 +123,11 @@ async def create_session(
         cache_cookie = set_cookie_cache(auth, session, user, not remember_me)
         if cache_cookie is not None:
             cookies.append(cache_cookie)
+    if ctx is not None:
+        resolved_user = user
+        if resolved_user is None:
+            resolved_user = await auth.adapter.find_one("user", [Where("id", user_id)])
+        ctx.new_session = {"session": session, "user": resolved_user}
     return session, cookies
 
 

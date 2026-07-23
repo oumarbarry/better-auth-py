@@ -223,7 +223,7 @@ async def _id_token_sign_in(
         )
     except OAuthLinkError as err:
         raise APIError(401, "OAUTH_LINK_ERROR", err.code) from None
-    session, cookies = await create_session(ctx.auth, user_id, ctx.request)
+    session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
     user = await ctx.adapter.find_one("user", [Where("id", user_id)])
     response = AuthResponse(
         body={
@@ -468,7 +468,7 @@ async def oauth_callback(ctx: Ctx) -> AuthResponse:
         response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
         return response
 
-    _session, cookies = await create_session(ctx.auth, user_id, ctx.request)
+    _session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
     target = (
         (data.get("newUserURL") or data.get("callbackURL"))
         if is_new_user

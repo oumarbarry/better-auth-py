@@ -35,8 +35,24 @@ def generate_id(size: int = 32) -> str:
     return "".join(secrets.choice(_ID_ALPHABET) for _ in range(size))
 
 
-def generate_random_string(size: int = 32) -> str:
-    return "".join(secrets.choice(_RANDOM_ALPHABET) for _ in range(size))
+def generate_random_string(size: int = 32, alphabet: str | None = None) -> str:
+    """Secure random string. Default alphabet matches TS ``generateRandomString``
+    (``createRandomStringGenerator("a-z","0-9","A-Z","-_")``); pass ``alphabet`` for
+    a custom charset (e.g. ``"0123456789"`` for digit-only OTPs)."""
+    return "".join(secrets.choice(alphabet or _RANDOM_ALPHABET) for _ in range(size))
+
+
+def generate_otp(length: int) -> str:
+    """Digit-only OTP (TS ``generateOTP`` = ``generateRandomString(size, "0-9")``,
+    phone-number/routes.ts:902)."""
+    return generate_random_string(length, "0123456789")
+
+
+def default_key_hasher(token: str) -> str:
+    """base64url-no-pad of SHA-256(utf-8 token) — byte-for-byte with TS
+    ``defaultKeyHasher`` (magic-link/utils.ts, one-time-token/utils.ts), used when a
+    plugin stores tokens with ``storeToken: "hashed"``."""
+    return b64url_encode_nopad(hashlib.sha256(token.encode()).digest())
 
 
 def _scrypt(password: str, salt_hex: str) -> bytes:

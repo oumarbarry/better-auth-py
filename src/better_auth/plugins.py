@@ -29,6 +29,29 @@ Route = tuple[str, str, Handler]  # (method, path, handler) — path like "/my-p
 Matcher = Callable[[Ctx], bool]
 
 
+def add_expose_headers(response: AuthResponse, *names: str) -> None:
+    """Merge header names into ``Access-Control-Expose-Headers`` without clobbering
+    existing values (comma-separated, dedup, order-preserving) — mirrors TS plugins
+    (bearer/one-time-token) that read the existing set, add their header, and re-join
+    with ``", "``. Lets a plugin expose e.g. ``set-auth-token`` for CORS clients."""
+    key = "access-control-expose-headers"
+    idx: int | None = None
+    values: list[str] = []
+    for i, (header, value) in enumerate(response.headers):
+        if header.lower() == key:
+            idx = i
+            values = [part.strip() for part in value.split(",") if part.strip()]
+            break
+    for name in names:
+        if name not in values:
+            values.append(name)
+    merged = ("Access-Control-Expose-Headers", ", ".join(values))
+    if idx is None:
+        response.headers.append(merged)
+    else:
+        response.headers[idx] = merged
+
+
 @dataclass
 class PluginHook:
     """A matched before/after request hook (TS ``{matcher, handler}``).

@@ -16,7 +16,6 @@ from .crypto import (
     dummy_verify,
     generate_id,
     generate_random_string,
-    hash_password,
     sign_email_verification_token,
     verify_password,
 )
@@ -113,7 +112,8 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
     should_return_generic_duplicate = cfg.require_email_verification or not cfg.auto_sign_in
     existing = await ctx.adapter.find_one("user", [Where("email", email)])
     if existing is not None:
-        hash_password(body["password"])  # equalize timing with the real-signup path
+        # equalize timing with the real-signup path (which also runs checks + hash)
+        await ctx.auth.hash_password_checked(body["password"], ctx.request.path)
         if should_return_generic_duplicate:
             now = utcnow()
             synthetic_user = {
@@ -150,7 +150,7 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
             "accountId": user["id"],
             "providerId": "credential",
             "userId": user["id"],
-            "password": hash_password(body["password"]),
+            "password": await ctx.auth.hash_password_checked(body["password"], ctx.request.path),
             "createdAt": now,
             "updatedAt": now,
         },
@@ -164,7 +164,7 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
         return AuthResponse(body={"token": None, "user": ctx.auth.parse_user_output(user)})
 
     session, cookies = await create_session(
-        ctx.auth, user["id"], ctx.request, body.get("rememberMe", True)
+        ctx.auth, user["id"], ctx.request, body.get("rememberMe", True), ctx=ctx
     )
     response = AuthResponse(
         body={"token": session["token"], "user": ctx.auth.parse_user_output(user)}
@@ -200,7 +200,7 @@ async def sign_in_email(ctx: Ctx) -> AuthResponse:
     if callback_url:
         ctx.auth.ensure_trusted_url(callback_url)
     session, cookies = await create_session(
-        ctx.auth, user["id"], ctx.request, body.get("rememberMe", True)
+        ctx.auth, user["id"], ctx.request, body.get("rememberMe", True), ctx=ctx
     )
     response = AuthResponse(
         body={
@@ -368,7 +368,10 @@ async def change_password(ctx: Ctx) -> AuthResponse:
     await ctx.internal.update(
         "account",
         [Where("id", account["id"])],
-        {"password": hash_password(body["newPassword"]), "updatedAt": utcnow()},
+        {
+            "password": await ctx.auth.hash_password_checked(body["newPassword"], ctx.request.path),
+            "updatedAt": utcnow(),
+        },
         ctx=ctx,
     )
     token = None
@@ -377,7 +380,7 @@ async def change_password(ctx: Ctx) -> AuthResponse:
         # TS semantics: revoke ALL sessions (including the current one), then
         # mint a brand-new session and set its cookie (update-user.ts:291).
         await ctx.internal.delete_many("session", [Where("userId", user["id"])], ctx=ctx)
-        new_session, cookies = await create_session(ctx.auth, user["id"], ctx.request)
+        new_session, cookies = await create_session(ctx.auth, user["id"], ctx.request, ctx=ctx)
         token = new_session["token"]
         for cookie in cookies:
             response.set_cookie(cookie)
@@ -402,7 +405,7 @@ async def set_password(ctx: Ctx) -> AuthResponse:
             "accountId": result["user"]["id"],
             "providerId": "credential",
             "userId": result["user"]["id"],
-            "password": hash_password(body["newPassword"]),
+            "password": await ctx.auth.hash_password_checked(body["newPassword"], ctx.request.path),
             "createdAt": now,
             "updatedAt": now,
         },
@@ -504,7 +507,7 @@ async def reset_password(ctx: Ctx) -> AuthResponse:
 
     user_id = row["value"]
     now = utcnow()
-    password_hash = hash_password(body["newPassword"])
+    password_hash = await ctx.auth.hash_password_checked(body["newPassword"], ctx.request.path)
     account = await _credential_account(ctx, user_id)
     if account is None:
         await ctx.adapter.create(
@@ -525,6 +528,11 @@ async def reset_password(ctx: Ctx) -> AuthResponse:
             [Where("id", account["id"])],
             {"password": password_hash, "updatedAt": now},
         )
+    on_password_reset = ctx.auth.email_and_password.on_password_reset
+    if on_password_reset is not None:
+        reset_user = await ctx.adapter.find_one("user", [Where("id", user_id)])
+        if reset_user is not None:
+            await on_password_reset({"user": reset_user}, ctx.request)
     if ctx.auth.email_and_password.revoke_sessions_on_password_reset:
         await ctx.adapter.delete_many("session", [Where("userId", user_id)])
     return AuthResponse(body={"status": True})
@@ -610,7 +618,7 @@ async def verify_email(ctx: Ctx) -> AuthResponse:
 
     cookies: list[str] = []
     if ctx.auth.email_verification.auto_sign_in_after_verification:
-        _session, cookies = await create_session(ctx.auth, user["id"], ctx.request)
+        _session, cookies = await create_session(ctx.auth, user["id"], ctx.request, ctx=ctx)
 
     return succeed(None, cookies)
 
@@ -641,7 +649,7 @@ async def _verify_change_email(
         # link is opened without one (TS creates a session in that case)
         if session is not None:
             return [refresh_session_cookie(ctx.auth, ctx.request, session["session"]["token"])]
-        _s, cookies = await create_session(ctx.auth, target_user["id"], ctx.request)
+        _s, cookies = await create_session(ctx.auth, target_user["id"], ctx.request, ctx=ctx)
         return cookies
 
     if request_type == "change-email-confirmation":

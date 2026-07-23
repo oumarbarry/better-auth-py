@@ -14,6 +14,7 @@ Endpoints, ``session.py``, and the OAuth flow write through this seam (via ``ctx
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable
@@ -143,6 +144,8 @@ class InternalAdapter:
         self.store_session_in_database = store_session_in_database
         #: non-None while inside ``transaction`` — after-hooks are deferred until commit
         self._after_queue: list[Callable[[], Awaitable[None]]] | None = None
+        #: per-identifier locks serializing consume_verification_value (TS consume lock)
+        self._consume_locks: dict[str, asyncio.Lock] = {}
 
     # --- with-hooks core ---------------------------------------------------------------
 
@@ -370,6 +373,82 @@ class InternalAdapter:
 
     async def delete_verification_value(self, verification_id: str) -> None:
         await self._delete("verification", [Where("id", verification_id)])
+
+    async def consume_verification_value(self, identifier: str) -> dict[str, Any] | None:
+        """Atomically consume the single-use verification row(s) for ``identifier``.
+
+        The first concurrent caller receives the *latest* row (``createdAt`` desc);
+        every racer receives ``None``. Consuming invalidates the whole identifier —
+        all its rows are deleted — so stale rows can never be replayed. A row past
+        its ``expiresAt`` is still deleted but returns ``None``, so a non-None return
+        means "valid": callers do NOT need their own expiry gate. This is the race
+        gate every OTP / magic-link / one-time-token single-use guarantee rests on
+        (TS ``internalAdapter.consumeVerificationValue``, db/internal-adapter.ts:1254).
+
+        ponytail: DB-backed only, matching this port's ``find_verification_value``
+        (secondary-storage verification isn't implemented here); the per-identifier
+        lock is the in-process analogue of TS ``withVerificationConsumeLock`` and,
+        together with the adapter transaction, is what makes find-then-delete a
+        single critical section under a scheduler that can interleave real DB awaits.
+        """
+        async with self._verification_consume_lock(identifier):
+
+            async def _consume(tx: InternalAdapter) -> dict[str, Any] | None:
+                rows = await tx.adapter.find_many(
+                    "verification",
+                    [Where("identifier", identifier)],
+                    sort_by={"field": "createdAt", "direction": "desc"},
+                    limit=1,
+                )
+                latest = rows[0] if rows else None
+                if latest is None:
+                    return None
+                await tx._delete_many("verification", [Where("identifier", identifier)])
+                return latest
+
+            consumed = await self.transaction(_consume)
+        if consumed is None or consumed["expiresAt"] < _now():
+            return None
+        return consumed
+
+    def _verification_consume_lock(self, identifier: str) -> asyncio.Lock:
+        lock = self._consume_locks.get(identifier)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._consume_locks[identifier] = lock
+        return lock
+
+    async def update_verification_by_identifier(
+        self, identifier: str, data: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """TS ``updateVerificationByIdentifier`` (db/internal-adapter.ts:1498) — used by
+        email-otp to bump the attempts counter."""
+        return await self._update(
+            "verification", [Where("identifier", identifier)], data, custom_fn=None
+        )
+
+    async def delete_verification_by_identifier(self, identifier: str) -> None:
+        """TS ``deleteVerificationByIdentifier`` (db/internal-adapter.ts:1207) — clears
+        every row for the identifier."""
+        await self._delete_many("verification", [Where("identifier", identifier)])
+
+    async def revoke_unproven_account_access(self, user_id: str) -> None:
+        """Strip every credential and session accrued before control of an email was
+        proven (TS ``revokeUnprovenAccountAccess``, db/revoke-unproven-account-access.ts).
+
+        Called by email-primary proofs (magic-link verify, email-otp sign-in) before
+        flipping ``emailVerified`` and minting the owner's session, so a verified owner
+        inherits no password or session that predates the proof. Re-reads the user so
+        the strip sees current state; no-ops if a concurrent flow already verified it.
+        """
+        user = await self.adapter.find_one("user", [Where("id", user_id)])
+        if user is None or user.get("emailVerified"):
+            return
+        accounts = await self.adapter.find_many("account", [Where("userId", user_id)])
+        for account in accounts:
+            if account.get("providerId") == "credential":
+                await self._delete("account", [Where("id", account["id"])])
+        await self.delete_user_sessions(user_id)
 
     # --- session (secondary-storage aware) ---------------------------------------------
 

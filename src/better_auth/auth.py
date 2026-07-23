@@ -21,6 +21,7 @@ from .config import (
     SessionOptions,
     UserOptions,
 )
+from .crypto import hash_password
 from .endpoints import ROUTES
 from .internal_adapter import InternalAdapter
 from .oauth import OAuthProvider
@@ -172,12 +173,19 @@ class BetterAuth:
 
         self._http = http_client
         self._rate_limiter = RateLimiter(self)
+        # Plugin routes FIRST so a plugin can shadow a same-(method,path) core route
+        # (``_match`` returns the first match; e.g. custom-session overrides GET
+        # /get-session). Unrelated core routes are unaffected.
         self._routes: list[tuple[str, tuple[str, ...], Any]] = []
         for method, path, handler in [
-            *ROUTES,
             *(route for plugin in self.plugins for route in plugin.routes()),
+            *ROUTES,
         ]:
             self._routes.append((method, tuple(path.strip("/").split("/")), handler))
+
+        #: async ``(password, path) -> None`` checks run before every password hash
+        #: (may raise APIError to reject, e.g. haveibeenpwned). Plugins append in init().
+        self.password_checks: list[Callable[[str, str], Awaitable[None]]] = []
 
         for plugin in self.plugins:  # TS init(ctx): may mutate options/state in place
             plugin.init(self)
@@ -243,6 +251,15 @@ class BetterAuth:
         """``{"session": ..., "user": ...}`` for the request, or None. Used by integrations."""
         result, _cookies = await _get_session(self, request)
         return result
+
+    async def hash_password_checked(self, password: str, path: str) -> str:
+        """Run every registered ``password_checks`` (may raise APIError to reject a
+        weak/compromised password), then hash. Every core hash call site routes through
+        this one seam so a plugin (e.g. haveibeenpwned) can gate all of them by
+        appending a check in ``init``."""
+        for check in self.password_checks:
+            await check(password, path)
+        return hash_password(password)
 
     # --- dispatch ---------------------------------------------------------------------
 

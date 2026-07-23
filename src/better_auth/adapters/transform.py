@@ -104,6 +104,9 @@ def transform_input(
             value = out[name]
             if action == "create" and value is None and field.required and field.has_default():
                 value = field.make_default()
+            # field transform.input (factory.ts:254): normalize the value, then coerce
+            if field.transform_input is not None:
+                value = field.transform_input(value)
             out[name] = _coerce_input(value, field, caps)
             continue
         if action == "create" and field.has_default():
