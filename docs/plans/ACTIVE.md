@@ -88,10 +88,18 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
       for prod rate-limiting; schedule with Wave 3).
 
 ## Wave 2 — Social providers (spec: gap/03-social-oauth.md)
-- [~] W2-A: first agent DIED (connection drop) mid-split of oauth.py into
-      oauth/ package — models/machinery/verify.py exist, NO __init__.py, no
-      provider base, suite unimportable. W2-A-bis continuation dispatched.
-      Green baseline to fall back to: c541260 (243 tests).
+- [x] W2-A: DONE (2 agents; continuation after connection-drop crash), commit
+      0ba150c, 262 tests. oauth/ package with declarative ProviderConfig.
+      Deferred (spec-optional): stateless cookie state strategy,
+      storeAccountCookie, oauth-signup verification email (flag for parity
+      review). Token encryption is AES-GCM $bap$ (not TS-XChaCha20-compatible —
+      revisit in Wave 4 crypto task which ports symmetricEncrypt).
+- [~] W2-B: 6 group agents DISPATCHED in parallel (G1-G3 Sonnet standard,
+      G4 apple/facebook/microsoft/paypal, G5 twitter/tiktok/wechat/salesforce,
+      G6 atlassian/cognito/kakao/line/naver/vk — Opus). Each writes ONLY
+      src/better_auth/oauth/providers_ext/<name>.py + tests/providers/test_gN.py.
+      Registry wiring (providers_ext/__init__ + social_providers name map) is
+      the orchestrator's merge commit.
 - [ ] W2-B: 32 provider ports, fan-out (pipeline, Sonnet; apple/paypal/wechat
       and other quirky ones → Opus).
 

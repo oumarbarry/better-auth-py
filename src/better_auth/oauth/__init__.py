@@ -22,9 +22,11 @@ from .flow import (
 from .machinery import OAuthFetchError, oauth_fetch
 from .models import OAuthTokens, OAuthUserInfo
 from .providers import Discord, GitHub, Google, OAuthProvider, ProviderConfig
+from .providers_ext import PROVIDER_REGISTRY
 from .verify import verify_id_token
 
 __all__ = [
+    "PROVIDER_REGISTRY",
     "Discord",
     "GitHub",
     "Google",
