@@ -79,9 +79,11 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
       parse_session_input allowlist; input:false raises FIELD_NOT_ALLOWED
       (verified vs db/schema.ts:155). databaseHook call site adapts to (data)
       or (data, ctx) arity.
-- [ ] W1-F (Opus high): CSRF/origin parity (9) + session freshness (10) +
-      rate-limiter storage backends (14) + cookie cache session_data (15) +
-      onAPIError (16) + misc options (17).
+- [~] W1-F (Opus high): first agent STALLED (600s watchdog) mid-refactor —
+      tree left unimportable (auth.py imports missing rate_limit.py; origin.py
+      + cookie_cache.py created; old _check_origin/_check_rate_limit still
+      present). W1-F-bis continuation dispatched with exact state. Baseline to
+      return to if unrecoverable: cd49200 (202 tests).
 
 ## Wave 2 — Social providers (spec: gap/03-social-oauth.md)
 - [ ] W2-A: oauth2 machinery (16 items: refresh, JWKS/id-token verify,
@@ -119,6 +121,11 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
   allowlist. Fix folded into W1-E's item-12 scope (message sent to the running
   agent): parse_session_input schema-driven allowlist + tests. Validate before
   W1-E commit.
+
+- 2026-07-23 CONFIRMED (uncommitted code): origin.py truthiness bug —
+  disable_origin_check as non-empty list (per-path skip) disabled the origin
+  check globally. Fix folded into W1-F-bis (message sent). Gate before commit:
+  per-path skip tests must exist and pass.
 
 ## Decision log
 

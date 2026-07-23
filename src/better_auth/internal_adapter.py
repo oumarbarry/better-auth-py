@@ -62,13 +62,15 @@ async def _call_hook(fn: Callable[..., Any], data: Any, ctx: Any) -> Any:
     """
     try:
         params = inspect.signature(fn).parameters.values()
-        takes_ctx = any(
-            p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
-        ) or sum(
-            p.kind
-            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-            for p in params
-        ) >= 2
+        takes_ctx = (
+            any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+            or sum(
+                p.kind
+                in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                for p in params
+            )
+            >= 2
+        )
     except (ValueError, TypeError):
         takes_ctx = True
     return await _maybe_await(fn(data, ctx) if takes_ctx else fn(data))
@@ -421,9 +423,7 @@ class InternalAdapter:
         entries: list[dict[str, Any]] = []
         if current:
             entries = [
-                s
-                for s in json.loads(current)
-                if s["expiresAt"] > now_ms and s["token"] != token
+                s for s in json.loads(current) if s["expiresAt"] > now_ms and s["token"] != token
             ]
         entries = sorted(
             [*entries, {"token": token, "expiresAt": expires_ms}], key=lambda s: s["expiresAt"]
@@ -480,9 +480,7 @@ class InternalAdapter:
             return sessions
         return await self.adapter.find_many("session", [Where("userId", user_id)])
 
-    async def update_session(
-        self, token: str, values: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def update_session(self, token: str, values: dict[str, Any]) -> dict[str, Any] | None:
         custom_fn: CustomFn | None = None
         if self.secondary_storage:
 
@@ -492,9 +490,7 @@ class InternalAdapter:
             custom_fn = {"fn": _fn, "execute_main_fn": self.store_session_in_database}
         return await self._update("session", [Where("token", token)], values, custom_fn=custom_fn)
 
-    async def _update_session_kv(
-        self, token: str, data: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _update_session_kv(self, token: str, data: dict[str, Any]) -> dict[str, Any] | None:
         ss = self.secondary_storage
         assert ss is not None
         current = await ss.get(token)

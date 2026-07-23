@@ -80,6 +80,21 @@ def _signature(secret: str, value: str) -> str:
     return base64.b64encode(digest).decode()  # standard base64 WITH padding (44 chars)
 
 
+def sign_hmac_b64url(secret: str, value: str) -> str:
+    """HMAC-SHA256 as base64url WITHOUT padding — better-auth's ``base64urlnopad``
+    signature scheme used by the compact ``session_data`` cookie cache."""
+    digest = hmac.new(secret.encode(), value.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def b64url_encode_nopad(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def b64url_decode_nopad(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
 def sign_value(secret: str, value: str) -> str:
     """better-auth signed-cookie format: encodeURIComponent(`${value}.${base64(hmac)}`)."""
     return quote(f"{value}.{_signature(secret, value)}", safe="")

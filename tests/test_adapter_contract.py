@@ -122,13 +122,9 @@ async def test_single_update_empty_where_returns_none(adapter):
 async def test_find_many_limit_offset_sort(adapter):
     for i in range(5):
         await _user(adapter, email=f"u{i}@example.com", name=f"name{i}")
-    asc = await adapter.find_many(
-        "user", limit=2, sort_by={"field": "name", "direction": "asc"}
-    )
+    asc = await adapter.find_many("user", limit=2, sort_by={"field": "name", "direction": "asc"})
     assert [r["name"] for r in asc] == ["name0", "name1"]
-    desc = await adapter.find_many(
-        "user", limit=2, sort_by={"field": "name", "direction": "desc"}
-    )
+    desc = await adapter.find_many("user", limit=2, sort_by={"field": "name", "direction": "desc"})
     assert [r["name"] for r in desc] == ["name4", "name3"]
     page2 = await adapter.find_many(
         "user", offset=2, limit=2, sort_by={"field": "name", "direction": "asc"}
@@ -179,9 +175,7 @@ async def test_connector_or(adapter):
 
 async def test_mode_insensitive(adapter):
     await _user(adapter, email="Ada@Example.com", name="Ada")
-    row = await adapter.find_one(
-        "user", [Where("email", "ada@example.com", mode="insensitive")]
-    )
+    row = await adapter.find_one("user", [Where("email", "ada@example.com", mode="insensitive")])
     assert row is not None and row["name"] == "Ada"
 
 
@@ -203,9 +197,7 @@ async def test_consume_one_returns_and_deletes(adapter):
 
 async def test_increment_one_guarded(adapter):
     await adapter.create("counter", {"key": "k", "count": 5})
-    row = await adapter.increment_one(
-        "counter", [Where("key", "k")], increment={"count": -1}
-    )
+    row = await adapter.increment_one("counter", [Where("key", "k")], increment={"count": -1})
     assert row["count"] == 4
     # guard: only decrement while count > 0
     await adapter.update("counter", [Where("key", "k")], {"count": 0})

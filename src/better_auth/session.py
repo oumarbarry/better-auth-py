@@ -36,6 +36,8 @@ def build_cookie(
         parts.append(f"Max-Age={max_age}")
     if auth.use_secure_cookies:
         parts.append("Secure")
+    if auth.cookie_domain:
+        parts.append(f"Domain={auth.cookie_domain}")
     return "; ".join(parts)
 
 
@@ -65,8 +67,13 @@ async def create_session(
     user_id: str,
     request: AuthRequest,
     remember_me: bool = True,
+    user: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Create a DB session and return ``(session, set_cookie_values)``."""
+    """Create a DB session and return ``(session, set_cookie_values)``.
+
+    When ``user`` is given and the cookie cache is enabled, also emits the signed
+    ``session_data`` cache cookie so the next ``/get-session`` can skip the DB.
+    """
     now = utcnow()
     expires_in = auth.session_options.expires_in if remember_me else DONT_REMEMBER_EXPIRES_IN
     session = {
@@ -92,6 +99,12 @@ async def create_session(
             build_cookie(auth, signed, None),
             build_cookie(auth, "true", None, "dont_remember"),
         ]
+    if user is not None:
+        from .cookie_cache import set_cookie_cache
+
+        cache_cookie = set_cookie_cache(auth, session, user, not remember_me)
+        if cache_cookie is not None:
+            cookies.append(cache_cookie)
     return session, cookies
 
 
@@ -109,14 +122,28 @@ def refresh_session_cookie(auth: BetterAuth, request: AuthRequest, token: str) -
 
 
 async def get_session(
-    auth: BetterAuth, request: AuthRequest
+    auth: BetterAuth,
+    request: AuthRequest,
+    disable_cache: bool = False,
+    disable_refresh: bool = False,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Validate the request's session.
 
     Returns ``({"session": ..., "user": ...} | None, set_cookie_values)``.
     Expired sessions are deleted (and the cookie cleared); `expiresAt` slides forward
     by `expires_in` once the session is older than `update_age` (better-auth's formula).
+
+    When ``session.cookieCache`` is enabled and a valid ``session_data`` cookie is
+    present, the cached ``{session, user}`` is returned without a DB read (unless
+    ``disable_cache``). On a real DB read the cache is refreshed.
     """
+    if not disable_cache:
+        from .cookie_cache import get_cookie_cache
+
+        cached = get_cookie_cache(auth, request)
+        if cached is not None:
+            return cached, []
+
     token = read_token(auth, request)
     if token is None:
         return None, []
@@ -137,7 +164,7 @@ async def get_session(
         - timedelta(seconds=options.expires_in)
         + timedelta(seconds=options.update_age)
     )
-    if due_at <= now and not dont_remember:
+    if due_at <= now and not dont_remember and not disable_refresh:
         session = (
             await auth.internal.update(
                 "session",
@@ -151,4 +178,12 @@ async def get_session(
     user = await auth.adapter.find_one("user", [Where("id", session["userId"])])
     if user is None:
         return None, [clear_cookie(auth)]
+
+    if options.cookie_cache.enabled:
+        from .cookie_cache import set_cookie_cache
+
+        cache_cookie = set_cookie_cache(auth, session, user, dont_remember)
+        if cache_cookie is not None:
+            cookies.append(cache_cookie)
+
     return {"session": session, "user": user}, cookies

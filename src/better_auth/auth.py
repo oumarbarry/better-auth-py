@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -14,8 +13,10 @@ from .adapters.base import BaseAdapter
 from .adapters.memory import MemoryAdapter
 from .config import (
     AccountOptions,
+    CrossSubDomainCookies,
     EmailAndPassword,
     EmailVerification,
+    OnAPIError,
     RateLimit,
     SessionOptions,
     UserOptions,
@@ -23,7 +24,9 @@ from .config import (
 from .endpoints import ROUTES
 from .internal_adapter import InternalAdapter
 from .oauth import OAuthProvider
+from .origin import check_origin, matches_origin_pattern
 from .plugins import Plugin
+from .rate_limit import RateLimiter
 from .schema import (
     CORE_SCHEMA,
     Field,
@@ -31,6 +34,7 @@ from .schema import (
     filter_output_fields,
     merge_schema,
     parse_input_data,
+    rate_limit_model,
 )
 from .secondary_storage import SecondaryStorage
 from .session import get_session as _get_session
@@ -40,21 +44,6 @@ from .types import APIError, AuthRequest, AuthResponse, Ctx
 RequestHook = Callable[[Ctx], Awaitable[AuthResponse | None]]
 
 logger = logging.getLogger("better_auth")
-
-# better-auth's default special rate-limit rules: (window seconds, max requests)
-_SPECIAL_RATE_RULES: list[tuple[Callable[[str], bool], tuple[int, int]]] = [
-    (
-        lambda p: p.startswith(("/sign-in", "/sign-up", "/change-password", "/change-email")),
-        (10, 3),
-    ),
-    (
-        lambda p: (
-            p in ("/request-password-reset", "/send-verification-email")
-            or p.startswith("/forget-password")
-        ),
-        (60, 3),
-    ),
-]
 
 
 def _path_matches(pattern: str, path: str) -> bool:
@@ -83,7 +72,7 @@ class BetterAuth:
         user: UserOptions | None = None,
         account: AccountOptions | None = None,
         rate_limit: RateLimit | None = None,
-        trusted_origins: list[str] | None = None,
+        trusted_origins: list[str] | Callable[[Any], Any] | None = None,
         plugins: list[Plugin] | None = None,
         hooks: Mapping[str, RequestHook] | None = None,
         database_hooks: dict[str, Any] | None = None,
@@ -92,6 +81,12 @@ class BetterAuth:
         cookie_prefix: str = "better-auth",
         use_secure_cookies: bool | None = None,
         skip_state_cookie_check: bool = False,
+        on_api_error: OnAPIError | None = None,
+        disabled_paths: list[str] | None = None,
+        skip_trailing_slashes: bool = False,
+        disable_csrf_check: bool | None = None,
+        disable_origin_check: bool | list[str] = False,
+        cross_sub_domain_cookies: CrossSubDomainCookies | None = None,
     ):
         if not secret or len(secret) < 32:
             raise ValueError(
@@ -108,7 +103,18 @@ class BetterAuth:
         self.user = user or UserOptions()
         self.account = account or AccountOptions()
         self.rate_limit = rate_limit or RateLimit()
-        self.trusted_origins = [origin.rstrip("/") for origin in trusted_origins or []]
+        #: list of origin patterns (wildcards allowed) or a callable(request) -> list
+        if callable(trusted_origins):
+            self._trusted_origins: Any = trusted_origins
+        else:
+            self._trusted_origins = [o.rstrip("/") for o in trusted_origins or []]
+        self.on_api_error = on_api_error or OnAPIError()
+        self.disabled_paths = {"/" + p.strip("/") for p in disabled_paths or []}
+        self.skip_trailing_slashes = skip_trailing_slashes
+        self._disable_csrf_check_set = disable_csrf_check is not None
+        self.disable_csrf_check = bool(disable_csrf_check)
+        self.disable_origin_check = disable_origin_check
+        self.cross_sub_domain_cookies = cross_sub_domain_cookies or CrossSubDomainCookies()
         self.plugins = list(plugins or [])
         #: request middleware — ``{"before": fn(ctx), "after": fn(ctx)}`` (TS ``options.hooks``).
         self.hooks: Mapping[str, RequestHook] = dict(hooks or {})
@@ -135,12 +141,15 @@ class BetterAuth:
         self.schema: Schema = merge_schema(
             CORE_SCHEMA, additional, *(p.schema for p in self.plugins)
         )
+        # DB-backed rate limiting needs the `rateLimit` table in the adapter's schema.
+        if self.rate_limit.storage == "database":
+            self.schema = merge_schema(self.schema, {"rateLimit": rate_limit_model()})
         # Input schema per model: additionalFields + plugin fields only (NOT core columns),
         # so generic write routes (e.g. /update-session) only accept configured fields.
         self._input_fields: dict[str, dict[str, Field]] = {
-            model: merge_schema(
-                {model: additional[model]}, *(p.schema for p in self.plugins)
-            ).get(model, {})
+            model: merge_schema({model: additional[model]}, *(p.schema for p in self.plugins)).get(
+                model, {}
+            )
             for model in ("user", "session", "account")
         }
 
@@ -162,7 +171,7 @@ class BetterAuth:
         )
 
         self._http = http_client
-        self._rate_buckets: dict[str, tuple[float, int]] = {}
+        self._rate_limiter = RateLimiter(self)
         self._routes: list[tuple[str, tuple[str, ...], Any]] = []
         for method, path, handler in [
             *ROUTES,
@@ -200,22 +209,31 @@ class BetterAuth:
     def parse_user_input(self, data: dict[str, Any], action: str = "update") -> dict[str, Any]:
         return parse_input_data(data, self._input_fields["user"], action)
 
-    def _allowed_origins(self) -> set[str]:
-        origins = {self._origin(self.base_url)}
-        origins.update(self._origin(origin) for origin in self.trusted_origins)
-        origins.discard("")
+    @property
+    def cookie_domain(self) -> str | None:
+        """Cookie ``Domain`` when cross-subdomain cookies are enabled, else None."""
+        cfg = self.cross_sub_domain_cookies
+        if not cfg.enabled:
+            return None
+        return cfg.domain or (urlsplit(self.base_url).hostname or None)
+
+    def _sync_trusted_origins(self) -> list[str]:
+        """Base origin + static configured origins (callable form is resolved async in
+        the router middleware; the sync redirect-guard uses the static list only)."""
+        origins: list[str] = []
+        parts = urlsplit(self.base_url)
+        if parts.scheme and parts.netloc:
+            origins.append(f"{parts.scheme}://{parts.netloc}")
+        if not callable(self._trusted_origins):
+            origins.extend(self._trusted_origins)
         return origins
 
-    @staticmethod
-    def _origin(url: str) -> str:
-        parts = urlsplit(url)
-        return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
-
     def is_trusted_url(self, url: str) -> bool:
-        """Relative paths and URLs on the base/trusted origins are allowed redirect targets."""
-        if url.startswith("/") and not url.startswith("//"):
-            return True
-        return self._origin(url) in self._allowed_origins()
+        """Relative paths and URLs matching a base/trusted origin (wildcards honoured)."""
+        return any(
+            matches_origin_pattern(url, o, allow_relative=True)
+            for o in self._sync_trusted_origins()
+        )
 
     def ensure_trusted_url(self, url: str) -> None:
         if not self.is_trusted_url(url):
@@ -232,18 +250,41 @@ class BetterAuth:
         try:
             return await self._dispatch(request)
         except APIError as error:
-            return AuthResponse(
-                status=error.status, body={"code": error.code, "message": error.message}
-            )
-        except Exception:
+            return await self._on_api_error(request, error, error.status, error.code, error.message)
+        except Exception as exc:
             logger.exception("better-auth error handling %s %s", request.method, request.path)
-            return AuthResponse(status=500, body={"message": "Internal Server Error"})
+            return await self._on_api_error(
+                request, exc, 500, "INTERNAL_SERVER_ERROR", "Internal Server Error"
+            )
+
+    async def _on_api_error(
+        self, request: AuthRequest, error: Exception, status: int, code: str, message: str
+    ) -> AuthResponse:
+        """options.onAPIError: run the on_error hook, optionally re-raise (throw)."""
+        cfg = self.on_api_error
+        if cfg.on_error is not None:
+            try:
+                await cfg.on_error(error, request)
+            except Exception:
+                logger.exception("onAPIError.on_error hook raised")
+        if cfg.throw:
+            raise error
+        if status == 500:
+            return AuthResponse(status=500, body={"code": code, "message": message})
+        return AuthResponse(status=status, body={"code": code, "message": message})
 
     async def _dispatch(self, request: AuthRequest) -> AuthResponse:
+        # A trailing slash on a non-root path is significant unless skipTrailingSlashes
+        # (TS default false: `/ok/` != `/ok`). The normalized path (trailing stripped) is
+        # what disabledPaths/rate-limit/origin key on, mirroring TS normalizePathname.
+        had_trailing_slash = len(request.path) > 1 and request.path.rstrip().endswith("/")
         request.path = "/" + request.path.strip("/")
 
-        # --- onRequest phase: rate limit -> plugin.on_request ---------------------------
-        retry_after = self._check_rate_limit(request)
+        # --- onRequest phase: disabledPaths -> rate limit -> plugin.on_request -----------
+        if request.path in self.disabled_paths:
+            return AuthResponse(status=404, body={"message": "Not Found"})
+
+        retry_after = await self._rate_limiter.check(request)
         if retry_after is not None:
             return AuthResponse(
                 status=429,
@@ -257,10 +298,10 @@ class BetterAuth:
             if short_circuit is not None:
                 return short_circuit
 
-        self._check_origin(request)
+        await check_origin(self, ctx)
 
         match = self._match(request.method, request.path)
-        if match is None:
+        if match is None or (had_trailing_slash and not self.skip_trailing_slashes):
             return AuthResponse(status=404, body={"message": "Not Found"})
         handler, params = match
         ctx.params = params
@@ -343,47 +384,4 @@ class BetterAuth:
                     break
             else:
                 return handler, params
-        return None
-
-    def _check_origin(self, request: AuthRequest) -> None:
-        """Reject state-changing requests from untrusted browser origins (CSRF)."""
-        if request.method == "GET":
-            return
-        origin = request.headers.get("origin")
-        if not origin:  # non-browser clients (no Origin header) pass through
-            return
-        if origin.rstrip("/") not in self._allowed_origins():
-            raise APIError(403, "INVALID_ORIGIN", "Origin not trusted")
-
-    def _check_rate_limit(self, request: AuthRequest) -> int | None:
-        """Returns seconds to wait when limited, else None. Fixed window, in-memory."""
-        limit = self.rate_limit
-        if not limit.enabled:
-            return None
-        window, maximum = limit.window, limit.max
-        for matches, rule in _SPECIAL_RATE_RULES:
-            if matches(request.path):
-                window, maximum = rule
-                break
-        # plugin rateLimit[] rules (first match wins) override default/special
-        for plugin in self.plugins:
-            matched = next(
-                (r for r in plugin.rate_limit() if r.path_matcher(request.path)), None
-            )
-            if matched is not None:
-                window, maximum = matched.window, matched.max
-                break
-        custom = limit.custom_rules.get(request.path)
-        if custom is not None:
-            window, maximum = custom
-
-        key = f"{request.client_ip or 'no-ip'}-{request.path}"
-        now = time.time()
-        start, count = self._rate_buckets.get(key, (now, 0))
-        if now - start >= window:
-            start, count = now, 0
-        count += 1
-        self._rate_buckets[key] = (start, count)
-        if count > maximum:
-            return max(1, int(window - (now - start)))
         return None

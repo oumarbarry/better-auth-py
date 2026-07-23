@@ -45,10 +45,30 @@ class EmailVerification:
 
 
 @dataclass
+class CookieCache:
+    """``session.cookieCache`` — cache the ``{session, user}`` payload in a signed,
+    short-TTL ``session_data`` cookie so ``/get-session`` can skip the DB (mirrors
+    better-auth). Only the ``compact`` strategy is implemented (base64url + a
+    ``base64urlnopad`` HMAC-SHA256 signature), which is the TS default.
+    """
+
+    enabled: bool = False
+    max_age: int = 300  # seconds
+    #: "compact" only for now (jwt/jwe are TS strategies not yet ported)
+    strategy: str = "compact"
+    version: str = "1"
+
+
+@dataclass
 class SessionOptions:
     expires_in: int = 7 * DAY
     #: refresh `expiresAt` when the session is older than this
     update_age: int = 1 * DAY
+    #: a session is "fresh" when its `createdAt` is within this many seconds; gates
+    #: fresh-only routes (/list-sessions, /unlink-account, /delete-user). 0 = always fresh.
+    fresh_age: int = 1 * DAY
+    #: signed short-TTL {session, user} cookie cache (mirrors better-auth session.cookieCache)
+    cookie_cache: CookieCache = field(default_factory=CookieCache)
     #: extra columns merged into the `session` schema and emitted by parse_session_output
     #: (mirrors better-auth's `session.additionalFields`)
     additional_fields: dict[str, Field] = field(default_factory=dict)
@@ -119,23 +139,55 @@ class AdvancedDatabase:
 
 @dataclass
 class RateLimit:
-    """Fixed-window rate limiting, keyed by client IP + path.
+    """Rolling-window rate limiting, keyed by client IP + path (mirrors better-auth).
 
-    ``storage`` selects where counters live: ``"memory"`` (in-process, default),
-    ``"database"`` (the ``rateLimit`` table), or ``"secondary-storage"`` (a KV store).
-    The storage backends live in ``adapters.rate_limit``; the limiter algorithm that
-    drives them is a separate concern.
+    The window is ``lastRequest``-based: a key's counter resets once ``window`` seconds
+    have elapsed since its last request, otherwise the count increments until ``max``.
+
+    ``enabled`` defaults to production-only: ``None`` means "on when NODE_ENV/BETTER_AUTH_ENV
+    == production", matching TS. ``storage`` selects where counters live: ``"memory"``
+    (in-process, default), ``"database"`` (the ``rateLimit`` table), or
+    ``"secondary-storage"`` (a KV store).
+
+    ``custom_rules`` maps a path (exact, or a ``*`` wildcard pattern) to a ``(window, max)``
+    tuple, ``False`` (skip rate limiting for that path), or a callable
+    ``(request, {window, max}) -> (window, max) | False``.
     """
 
-    enabled: bool = False
+    enabled: bool | None = None
     window: int = 10  # seconds
     max: int = 100
-    #: per-path overrides, e.g. {"/sign-in/email": (10, 3)}
-    custom_rules: dict[str, tuple[int, int]] = field(default_factory=dict)
+    #: per-path overrides: (window, max) | False (skip) | callable(request, defaults)
+    custom_rules: dict[str, Any] = field(default_factory=dict)
     #: "memory" | "database" | "secondary-storage"
     storage: str = "memory"
     #: bring-your-own storage backend (implements adapters.rate_limit.RateLimitStorage)
     custom_storage: Any | None = None
+
+
+@dataclass
+class OnAPIError:
+    """``onAPIError`` — how the router surfaces errors (mirrors better-auth).
+
+    - ``throw``: re-raise the ``APIError`` to the caller instead of serializing a response.
+    - ``on_error(error, ctx)``: async hook run on every error (logging, reporting).
+    - ``error_url``: the ``/error`` page 302-redirects here with ``?error=&error_description=``.
+    """
+
+    throw: bool = False
+    on_error: Callable[[Any, Any], Awaitable[None]] | None = None
+    error_url: str | None = None
+    #: when set, the default /error page renders even in production (else prod redirects to /)
+    customize_default_error_page: bool = False
+
+
+@dataclass
+class CrossSubDomainCookies:
+    """``advanced.crossSubDomainCookies`` — widen auth cookies to a shared parent domain."""
+
+    enabled: bool = False
+    #: explicit cookie Domain; defaults to the baseURL hostname when enabled
+    domain: str | None = None
 
 
 #: Per-model database hooks (mirrors better-auth's ``databaseHooks``). Shape:

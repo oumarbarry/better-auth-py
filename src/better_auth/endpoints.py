@@ -25,6 +25,8 @@ from .session import clear_cookie, create_session, get_session, refresh_session_
 from .types import APIError, AuthResponse, Ctx
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
 def require_fields(body: dict[str, Any], *names: str) -> None:
     for name in names:
         if body.get(name) in (None, ""):
@@ -208,8 +210,18 @@ async def sign_in_email(ctx: Ctx) -> AuthResponse:
 # --- session --------------------------------------------------------------------------
 
 
+def _query_flag(ctx: Ctx, name: str) -> bool:
+    value = ctx.request.query.get(name)
+    return value is not None and value not in ("false", "0")
+
+
 async def get_session_handler(ctx: Ctx) -> AuthResponse:
-    result, cookies = await get_session(ctx.auth, ctx.request)
+    result, cookies = await get_session(
+        ctx.auth,
+        ctx.request,
+        disable_cache=_query_flag(ctx, "disableCookieCache"),
+        disable_refresh=_query_flag(ctx, "disableRefresh"),
+    )
     if result is not None:
         result = {
             "session": ctx.auth.parse_session_output(result["session"]),
@@ -1005,7 +1017,19 @@ _ERROR_PAGE = """<!DOCTYPE html>
 
 
 async def error_page(ctx: Ctx) -> AuthResponse:
-    error = re.sub(r"[^a-zA-Z0-9_\- .]", "", ctx.request.query.get("error", "Unknown error"))
+    query = ctx.request.query
+    raw_error = query.get("error", "Unknown error")
+    # onAPIError.errorURL: hand the error off to the app's own page instead of rendering.
+    error_url = ctx.auth.on_api_error.error_url
+    if error_url:
+        separator = "&" if "?" in error_url else "?"
+        description = query.get("error_description", "")
+        target = (
+            f"{error_url}{separator}error={quote(raw_error, safe='')}"
+            f"&error_description={quote(description, safe='')}"
+        )
+        return AuthResponse(redirect_to=target)
+    error = re.sub(r"[^a-zA-Z0-9_\- .]", "", raw_error)
     return AuthResponse(body=_ERROR_PAGE.format(error=error), media_type="text/html")
 
 

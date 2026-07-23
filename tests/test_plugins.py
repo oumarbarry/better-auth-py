@@ -67,9 +67,7 @@ async def test_database_hooks():
     async def after(user):
         events.append("after")
 
-    auth = make_auth(
-        database_hooks={"user": {"create": {"before": before, "after": after}}}
-    )
+    auth = make_auth(database_hooks={"user": {"create": {"before": before, "after": after}}})
     async with make_client(auth) as client:
         data = await sign_up(client, name="  Ada Lovelace  ")
         assert data["user"]["name"] == "Ada Lovelace"
