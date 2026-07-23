@@ -345,8 +345,8 @@ async def _resolve_user(
         [Where("providerId", provider.provider_id), Where("accountId", info.id)],
     )
     if account is not None:
-        await ctx.adapter.update(
-            "account", [Where("id", account["id"])], {**token_fields, "updatedAt": now}
+        await ctx.internal.update(
+            "account", [Where("id", account["id"])], {**token_fields, "updatedAt": now}, ctx=ctx
         )
         return account["userId"], False
 
@@ -365,11 +365,9 @@ async def _resolve_user(
             "createdAt": now,
             "updatedAt": now,
         }
-        await ctx.auth.run_hook("user_created_before", user)
-        await ctx.adapter.create("user", user)
-        await ctx.auth.run_hook("user_created_after", user)
+        await ctx.internal.create("user", user, ctx=ctx)
 
-    await ctx.adapter.create(
+    await ctx.internal.create(
         "account",
         {
             "id": generate_id(),
@@ -380,5 +378,6 @@ async def _resolve_user(
             "createdAt": now,
             "updatedAt": now,
         },
+        ctx=ctx,
     )
     return user["id"], is_new_user

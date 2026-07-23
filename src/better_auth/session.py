@@ -79,7 +79,7 @@ async def create_session(
         "createdAt": now,
         "updatedAt": now,
     }
-    await auth.adapter.create("session", session)
+    await auth.internal.create("session", session)  # routes through databaseHooks
     signed = sign_value(auth.secret, session["token"])
     if remember_me:
         cookies = [
@@ -126,7 +126,7 @@ async def get_session(
 
     now = utcnow()
     if session["expiresAt"] <= now:
-        await auth.adapter.delete_many("session", [Where("token", token)])
+        await auth.internal.delete_many("session", [Where("token", token)])
         return None, [clear_cookie(auth), clear_cookie(auth, "dont_remember")]
 
     cookies: list[str] = []
@@ -139,7 +139,7 @@ async def get_session(
     )
     if due_at <= now and not dont_remember:
         session = (
-            await auth.adapter.update(
+            await auth.internal.update(
                 "session",
                 [Where("token", token)],
                 {"expiresAt": now + timedelta(seconds=options.expires_in), "updatedAt": now},

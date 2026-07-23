@@ -5,9 +5,14 @@ plus the change-email branch of /verify-email.
 
 from datetime import timedelta
 
-from better_auth import EmailAndPassword, EmailVerification
+from better_auth import EmailAndPassword, EmailVerification, Field
 from better_auth.adapters.base import Where
-from better_auth.config import ChangeEmailOptions, DeleteUserOptions, UserOptions
+from better_auth.config import (
+    ChangeEmailOptions,
+    DeleteUserOptions,
+    SessionOptions,
+    UserOptions,
+)
 from better_auth.oauth import OAuthProvider, OAuthUserInfo
 from better_auth.session import utcnow
 from conftest import SIGNUP, make_auth, make_client, sign_up
@@ -18,21 +23,44 @@ NEW_EMAIL = "grace@example.com"
 # --- /update-session ------------------------------------------------------------------
 
 
-async def test_update_session_writes_additional_field():
-    async with make_client(make_auth()) as client:
+async def test_update_session_writes_configured_field():
+    # a configured additional session field with input allowed is written + emitted
+    auth = make_auth(session=SessionOptions(additional_fields={"role": Field("string")}))
+    async with make_client(auth) as client:
         await sign_up(client)
         response = await client.post("/api/auth/update-session", json={"role": "admin"})
         assert response.status_code == 200, response.text
         assert response.json()["session"]["role"] == "admin"
 
 
-async def test_update_session_no_fields_to_update():
+async def test_update_session_unconfigured_field_dropped():
+    # nothing configured -> the schema-driven allowlist drops "role" -> empty write -> 400
     async with make_client(make_auth()) as client:
         await sign_up(client)
-        # only a core-managed field -> nothing updatable
+        response = await client.post("/api/auth/update-session", json={"role": "admin"})
+        assert response.status_code == 400
+        assert response.json()["message"] == "No fields to update"
+
+
+async def test_update_session_core_field_dropped():
+    async with make_client(make_auth()) as client:
+        await sign_up(client)
+        # a core-managed field is never in the input schema -> nothing updatable
         response = await client.post("/api/auth/update-session", json={"token": "nope"})
         assert response.status_code == 400
         assert response.json()["message"] == "No fields to update"
+
+
+async def test_update_session_input_false_field_rejected():
+    # a configured field with input=False cannot be set by a client (TS FIELD_NOT_ALLOWED)
+    auth = make_auth(
+        session=SessionOptions(additional_fields={"role": Field("string", input=False)})
+    )
+    async with make_client(auth) as client:
+        await sign_up(client)
+        response = await client.post("/api/auth/update-session", json={"role": "admin"})
+        assert response.status_code == 400
+        assert response.json()["code"] == "FIELD_NOT_ALLOWED"
 
 
 async def test_update_session_requires_auth():

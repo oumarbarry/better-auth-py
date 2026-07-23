@@ -85,6 +85,8 @@ class Ctx:
     auth: BetterAuth
     request: AuthRequest
     params: dict[str, str] = field(default_factory=dict)
+    #: the outgoing response during after-hooks (None before the handler runs)
+    response: Any = None
     _body: dict[str, Any] | None = None
     _session: Any = None
     _session_loaded: bool = False
@@ -92,6 +94,11 @@ class Ctx:
     @property
     def adapter(self):
         return self.auth.adapter
+
+    @property
+    def internal(self):
+        """The InternalAdapter seam — core writes route through it so databaseHooks fire."""
+        return self.auth.internal
 
     def body(self) -> dict[str, Any]:
         if self._body is None:

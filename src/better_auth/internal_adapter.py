@@ -8,7 +8,8 @@ Sits between the endpoints and the raw ``BaseAdapter``. This is the single place
   generation) unless ``force_allow_id`` is passed;
 - secondary storage is consulted/updated for sessions.
 
-Endpoints / ``session.py`` are wired to this by a later wave; the seam is standalone here.
+Endpoints, ``session.py``, and the OAuth flow write through this seam (via ``ctx.internal``
+/ ``auth.internal``) so ``databaseHooks`` fire on every core create/update/delete.
 """
 
 from __future__ import annotations
@@ -51,6 +52,26 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+async def _call_hook(fn: Callable[..., Any], data: Any, ctx: Any) -> Any:
+    """Invoke a databaseHook, passing ``ctx`` only if it accepts a second positional arg.
+
+    TS databaseHooks receive ``(value, context)``; Python hooks may be written with just
+    ``(value)``. We adapt to the callable's arity so both spellings work.
+    """
+    try:
+        params = inspect.signature(fn).parameters.values()
+        takes_ctx = any(
+            p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
+        ) or sum(
+            p.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            for p in params
+        ) >= 2
+    except (ValueError, TypeError):
+        takes_ctx = True
+    return await _maybe_await(fn(data, ctx) if takes_ctx else fn(data))
 
 
 def _js_iso(dt: datetime) -> str:
@@ -131,25 +152,31 @@ class InternalAdapter:
                 found.append(fn)
         return found
 
-    async def _run_before(self, model: str, op: str, data: dict[str, Any]) -> tuple[dict, bool]:
-        """Run before hooks; return (possibly-merged data, aborted)."""
+    async def _run_before(
+        self, model: str, op: str, data: dict[str, Any], ctx: Any
+    ) -> tuple[dict, bool]:
+        """Run before hooks; return (possibly-merged data, aborted).
+
+        Hooks receive ``(data, ctx)`` where ``ctx`` is the request context
+        (``None`` for internal callers), matching TS ``databaseHooks``.
+        """
         actual = data
         for fn in self._hook(model, op, "before"):
-            result = await _maybe_await(fn(actual))
+            result = await _call_hook(fn, actual, ctx)
             if result is False:
                 return actual, True
             if isinstance(result, dict) and "data" in result:
                 actual = {**actual, **result["data"]}
         return actual, False
 
-    async def _queue_after(self, model: str, op: str, payload: Any) -> None:
+    async def _queue_after(self, model: str, op: str, payload: Any, ctx: Any) -> None:
         fns = self._hook(model, op, "after")
         if not fns:
             return
 
         async def run() -> None:
             for fn in fns:
-                await _maybe_await(fn(payload))
+                await _call_hook(fn, payload, ctx)
 
         if self._after_queue is not None:
             self._after_queue.append(run)
@@ -157,11 +184,17 @@ class InternalAdapter:
             await run()
 
     async def _create(
-        self, model: str, data: dict[str, Any], *, force_allow_id: bool, custom_fn: CustomFn | None
+        self,
+        model: str,
+        data: dict[str, Any],
+        *,
+        force_allow_id: bool,
+        custom_fn: CustomFn | None,
+        ctx: Any = None,
     ) -> dict[str, Any] | None:
         if not force_allow_id:
             data = {k: v for k, v in data.items() if k != "id"}
-        data, aborted = await self._run_before(model, "create", data)
+        data, aborted = await self._run_before(model, "create", data, ctx)
         if aborted:
             return None
         created: Any = None
@@ -169,13 +202,19 @@ class InternalAdapter:
             created = await self.adapter.create(model, data, force_allow_id=True)
         if custom_fn and custom_fn.get("fn"):
             created = await _maybe_await(custom_fn["fn"](created if created is not None else data))
-        await self._queue_after(model, "create", created)
+        await self._queue_after(model, "create", created, ctx)
         return created
 
     async def _update(
-        self, model: str, where: list[Where], data: dict[str, Any], *, custom_fn: CustomFn | None
+        self,
+        model: str,
+        where: list[Where],
+        data: dict[str, Any],
+        *,
+        custom_fn: CustomFn | None,
+        ctx: Any = None,
     ) -> dict[str, Any] | None:
-        data, aborted = await self._run_before(model, "update", data)
+        data, aborted = await self._run_before(model, "update", data, ctx)
         if aborted:
             return None
         custom_result = None
@@ -185,10 +224,10 @@ class InternalAdapter:
             updated = await self.adapter.update(model, where, data)
         else:
             updated = custom_result
-        await self._queue_after(model, "update", updated)
+        await self._queue_after(model, "update", updated, ctx)
         return updated
 
-    async def _delete(self, model: str, where: list[Where]) -> None:
+    async def _delete(self, model: str, where: list[Where], ctx: Any = None) -> None:
         entity = None
         try:
             rows = await self.adapter.find_many(model, where, limit=1)
@@ -196,26 +235,50 @@ class InternalAdapter:
         except Exception:
             entity = None
         if entity is not None:
-            _, aborted = await self._run_before(model, "delete", entity)
+            _, aborted = await self._run_before(model, "delete", entity, ctx)
             if aborted:
                 return
         await self.adapter.delete(model, where)
         if entity is not None:
-            await self._queue_after(model, "delete", entity)
+            await self._queue_after(model, "delete", entity, ctx)
 
-    async def _delete_many(self, model: str, where: list[Where]) -> int:
+    async def _delete_many(self, model: str, where: list[Where], ctx: Any = None) -> int:
         try:
             entities = await self.adapter.find_many(model, where)
         except Exception:
             entities = []
         for entity in entities:
-            _, aborted = await self._run_before(model, "delete", entity)
+            _, aborted = await self._run_before(model, "delete", entity, ctx)
             if aborted:
                 return 0
         deleted = await self.adapter.delete_many(model, where)
         for entity in entities:
-            await self._queue_after(model, "delete", entity)
+            await self._queue_after(model, "delete", entity, ctx)
         return deleted
+
+    # --- generic hook-running CRUD (the seam endpoints/session.py write through) --------
+    #
+    # Endpoints build the full row (id, timestamps) themselves, so ``create`` defaults to
+    # ``force_allow_id=True``: behaviour-identical to a raw ``adapter.create`` when no
+    # databaseHooks are configured, but runs the per-model before/after hooks with ``ctx``.
+
+    async def create(
+        self, model: str, data: dict[str, Any], *, ctx: Any = None, force_allow_id: bool = True
+    ) -> dict[str, Any] | None:
+        return await self._create(
+            model, data, force_allow_id=force_allow_id, custom_fn=None, ctx=ctx
+        )
+
+    async def update(
+        self, model: str, where: list[Where], data: dict[str, Any], *, ctx: Any = None
+    ) -> dict[str, Any] | None:
+        return await self._update(model, where, data, custom_fn=None, ctx=ctx)
+
+    async def delete_one(self, model: str, where: list[Where], *, ctx: Any = None) -> None:
+        await self._delete(model, where, ctx)
+
+    async def delete_many(self, model: str, where: list[Where], *, ctx: Any = None) -> int:
+        return await self._delete_many(model, where, ctx)
 
     async def transaction(self, callback: Callable[[InternalAdapter], Awaitable[Any]]) -> Any:
         """Run ``callback`` in a DB transaction, flushing after-hooks once it commits."""

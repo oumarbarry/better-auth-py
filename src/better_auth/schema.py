@@ -158,6 +158,60 @@ def filter_output_fields(row: dict[str, Any], fields: dict[str, Field]) -> dict[
     return {key: value for key, value in row.items() if key not in hidden}
 
 
-def parse_account_output(account: dict[str, Any]) -> dict[str, Any]:
-    """Strip tokens + password from an account row before returning it to callers."""
-    return filter_output_fields(account, CORE_SCHEMA["account"])
+def parse_input_data(
+    data: dict[str, Any], fields: dict[str, Field], action: str = "create"
+) -> dict[str, Any]:
+    """Schema-driven input allowlist (mirrors better-auth's ``parseInputData``).
+
+    Only keys declared in ``fields`` pass through; unknown keys are dropped. A field
+    with ``input=False`` is rejected (``FIELD_NOT_ALLOWED``) if the caller tries to
+    set a truthy value (its default is applied instead on ``create``). Defaults and
+    ``required`` are enforced only on ``create``.
+
+    ``fields`` is the *input* schema — the configured ``additionalFields`` plus
+    plugin-contributed fields, NOT the core columns (TS ``getFields(mode:"input")``
+    starts from an empty core schema). So with nothing configured this returns ``{}``,
+    which is exactly why a generic route like ``/update-session`` then reports
+    "No fields to update".
+    """
+    from .types import APIError
+
+    parsed: dict[str, Any] = {}
+    for key, spec in fields.items():
+        if key in data:
+            if spec.input is False:
+                if spec.has_default() and action != "update":
+                    parsed[key] = spec.make_default()
+                    continue
+                if data[key]:
+                    raise APIError(400, "FIELD_NOT_ALLOWED", f"{key} is not allowed to be set")
+                continue
+            parsed[key] = data[key]
+            continue
+        if spec.has_default() and action == "create":
+            parsed[key] = spec.make_default()
+            continue
+        if spec.required and action == "create":
+            raise APIError(400, "MISSING_FIELD", f"{key} is required")
+    return parsed
+
+
+def parse_user_output(user: dict[str, Any], fields: dict[str, Field]) -> dict[str, Any]:
+    """Emit only returnable user fields (schema + configured additionalFields)."""
+    return filter_output_fields(user, fields)
+
+
+def parse_session_output(session: dict[str, Any], fields: dict[str, Field]) -> dict[str, Any]:
+    """Emit only returnable session fields (schema + configured additionalFields)."""
+    return filter_output_fields(session, fields)
+
+
+def parse_account_output(
+    account: dict[str, Any], fields: dict[str, Field] | None = None
+) -> dict[str, Any]:
+    """Strip tokens + password from an account row before returning it to callers.
+
+    ``fields`` defaults to the core account schema; pass the merged schema (with
+    plugin/additional fields) to honour their ``returned`` flags too.
+    """
+    return filter_output_fields(account, fields if fields is not None else CORE_SCHEMA["account"])

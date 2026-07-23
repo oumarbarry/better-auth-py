@@ -25,18 +25,6 @@ from .session import clear_cookie, create_session, get_session, refresh_session_
 from .types import APIError, AuthResponse, Ctx
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-SENSITIVE_ACCOUNT_FIELDS = frozenset(
-    {
-        "password",
-        "accessToken",
-        "refreshToken",
-        "idToken",
-        "accessTokenExpiresAt",
-        "refreshTokenExpiresAt",
-    }
-)
-
-
 def require_fields(body: dict[str, Any], *names: str) -> None:
     for name in names:
         if body.get(name) in (None, ""):
@@ -127,7 +115,9 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
                 "createdAt": now,
                 "updatedAt": now,
             }
-            return AuthResponse(body={"token": None, "user": synthetic_user})
+            return AuthResponse(
+                body={"token": None, "user": ctx.auth.parse_user_output(synthetic_user)}
+            )
         raise APIError(
             422, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL", "User already exists. Use another email."
         )
@@ -142,9 +132,8 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
         "createdAt": now,
         "updatedAt": now,
     }
-    await ctx.auth.run_hook("user_created_before", user)
-    await ctx.adapter.create("user", user)
-    await ctx.adapter.create(
+    await ctx.internal.create("user", user, ctx=ctx)
+    await ctx.internal.create(
         "account",
         {
             "id": generate_id(),
@@ -155,19 +144,21 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
             "createdAt": now,
             "updatedAt": now,
         },
+        ctx=ctx,
     )
-    await ctx.auth.run_hook("user_created_after", user)
 
     if cfg.require_email_verification or ctx.auth.email_verification.send_on_sign_up:
         await _send_verification_email(ctx, user, body.get("callbackURL") or "/")
 
     if should_return_generic_duplicate:  # requireEmailVerification || autoSignIn===false
-        return AuthResponse(body={"token": None, "user": user})
+        return AuthResponse(body={"token": None, "user": ctx.auth.parse_user_output(user)})
 
     session, cookies = await create_session(
         ctx.auth, user["id"], ctx.request, body.get("rememberMe", True)
     )
-    response = AuthResponse(body={"token": session["token"], "user": user})
+    response = AuthResponse(
+        body={"token": session["token"], "user": ctx.auth.parse_user_output(user)}
+    )
     for cookie in cookies:
         response.set_cookie(cookie)
     return response
@@ -206,7 +197,7 @@ async def sign_in_email(ctx: Ctx) -> AuthResponse:
             "redirect": bool(callback_url),
             "token": session["token"],
             "url": callback_url,
-            "user": user,
+            "user": ctx.auth.parse_user_output(user),
         }
     )
     for cookie in cookies:
@@ -219,6 +210,11 @@ async def sign_in_email(ctx: Ctx) -> AuthResponse:
 
 async def get_session_handler(ctx: Ctx) -> AuthResponse:
     result, cookies = await get_session(ctx.auth, ctx.request)
+    if result is not None:
+        result = {
+            "session": ctx.auth.parse_session_output(result["session"]),
+            "user": ctx.auth.parse_user_output(result["user"]),
+        }
     response = AuthResponse(
         body=result,
         headers=[("cache-control", "no-store"), ("pragma", "no-cache")],
@@ -282,32 +278,27 @@ async def revoke_other_sessions(ctx: Ctx) -> AuthResponse:
     return AuthResponse(body={"status": True})
 
 
-#: session columns managed by the auth core — never settable via /update-session
-#: (TS restricts writes to configured additional session fields).
-_PROTECTED_SESSION_FIELDS = frozenset(
-    {"id", "token", "userId", "expiresAt", "ipAddress", "userAgent", "createdAt", "updatedAt"}
-)
-
-
 async def update_session(ctx: Ctx) -> AuthResponse:
-    """POST /update-session — writes additional (non-core) session fields and
-    refreshes the session cookie (update-session.ts). Core-managed columns are
-    rejected; an empty change set is a 400 "No fields to update".
+    """POST /update-session — writes configured additional session fields and
+    refreshes the session cookie (update-session.ts).
 
-    ponytail: no `additionalFields` allowlist (gap item 12) — any non-core key is
-    accepted rather than only configured ones; tighten when session field config lands.
+    The body is filtered through the schema-driven input allowlist
+    (`parse_session_input`): only configured additional fields whose `input`
+    attribute permits writes pass through. Core columns and unknown keys are
+    dropped — with no additional fields configured this yields nothing writable,
+    which is the 400 "No fields to update". This closes a privilege-escalation
+    vector where a client could pre-write plugin-owned authority fields.
     """
     result = await ctx.require_session()
-    body = ctx.body()
-    updates = {key: value for key, value in body.items() if key not in _PROTECTED_SESSION_FIELDS}
+    updates = ctx.auth.parse_session_input(ctx.body(), "update")
     if not updates:
         raise APIError(400, "BAD_REQUEST", "No fields to update")
     updates["updatedAt"] = utcnow()
-    updated = await ctx.adapter.update(
-        "session", [Where("token", result["session"]["token"])], updates
+    updated = await ctx.internal.update(
+        "session", [Where("token", result["session"]["token"])], updates, ctx=ctx
     )
     new_session = updated or {**result["session"], **updates}
-    response = AuthResponse(body={"session": new_session})
+    response = AuthResponse(body={"session": ctx.auth.parse_session_output(new_session)})
     response.set_cookie(refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"]))
     return response
 
@@ -331,10 +322,11 @@ async def update_user(ctx: Ctx) -> AuthResponse:
     if body.get("email"):
         raise APIError(400, "EMAIL_CAN_NOT_BE_UPDATED", "Email can not be updated")
     updates = {key: body[key] for key in ("name", "image") if key in body}
+    updates.update(ctx.auth.parse_user_input(body, "update"))  # configured additionalFields
     if not updates:
         raise APIError(400, "BAD_REQUEST", "No fields to update")
     updates["updatedAt"] = utcnow()
-    await ctx.adapter.update("user", [Where("id", result["user"]["id"])], updates)
+    await ctx.internal.update("user", [Where("id", result["user"]["id"])], updates, ctx=ctx)
     response = AuthResponse(body={"status": True})
     response.set_cookie(refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"]))
     return response
@@ -353,22 +345,23 @@ async def change_password(ctx: Ctx) -> AuthResponse:
     if not verify_password(account["password"], body["currentPassword"]):
         raise APIError(400, "INVALID_PASSWORD", "Invalid password")
 
-    await ctx.adapter.update(
+    await ctx.internal.update(
         "account",
         [Where("id", account["id"])],
         {"password": hash_password(body["newPassword"]), "updatedAt": utcnow()},
+        ctx=ctx,
     )
     token = None
     response = AuthResponse(body=None)
     if body.get("revokeOtherSessions"):
         # TS semantics: revoke ALL sessions (including the current one), then
         # mint a brand-new session and set its cookie (update-user.ts:291).
-        await ctx.adapter.delete_many("session", [Where("userId", user["id"])])
+        await ctx.internal.delete_many("session", [Where("userId", user["id"])], ctx=ctx)
         new_session, cookies = await create_session(ctx.auth, user["id"], ctx.request)
         token = new_session["token"]
         for cookie in cookies:
             response.set_cookie(cookie)
-    response.body = {"token": token, "user": user}
+    response.body = {"token": token, "user": ctx.auth.parse_user_output(user)}
     return response
 
 
@@ -382,7 +375,7 @@ async def set_password(ctx: Ctx) -> AuthResponse:
     if account is not None and account.get("password"):
         raise APIError(400, "USER_ALREADY_HAS_PASSWORD", "User already has a password")
     now = utcnow()
-    await ctx.adapter.create(
+    await ctx.internal.create(
         "account",
         {
             "id": generate_id(),
@@ -393,6 +386,7 @@ async def set_password(ctx: Ctx) -> AuthResponse:
             "createdAt": now,
             "updatedAt": now,
         },
+        ctx=ctx,
     )
     return AuthResponse(body={"status": True})
 
@@ -892,12 +886,10 @@ async def list_accounts(ctx: Ctx) -> AuthResponse:
     accounts = await ctx.adapter.find_many("account", [Where("userId", result["user"]["id"])])
     sanitized = []
     for account in accounts:
-        item = {
-            key: value
-            for key, value in account.items()
-            if key not in SENSITIVE_ACCOUNT_FIELDS and key != "scope"
-        }
-        scope = account.get("scope")
+        # schema-driven output filter drops returned:false fields (tokens/password);
+        # list-accounts additionally replaces the `scope` string with a `scopes` array.
+        item = ctx.auth.parse_account_output(account)
+        scope = item.pop("scope", None)
         item["scopes"] = scope.split(",") if scope else []
         sanitized.append(item)
     return AuthResponse(body=sanitized)

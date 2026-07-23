@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .schema import Field
 
 #: async callback(user, url, token) used for verification / reset-password emails.
 SendEmail = Callable[[dict[str, Any], str, str], Awaitable[None]]
@@ -46,6 +49,17 @@ class SessionOptions:
     expires_in: int = 7 * DAY
     #: refresh `expiresAt` when the session is older than this
     update_age: int = 1 * DAY
+    #: extra columns merged into the `session` schema and emitted by parse_session_output
+    #: (mirrors better-auth's `session.additionalFields`)
+    additional_fields: dict[str, Field] = field(default_factory=dict)
+
+
+@dataclass
+class AccountOptions:
+    """``account`` option group (mirrors better-auth)."""
+
+    #: extra columns merged into the `account` schema and emitted by parse_account_output
+    additional_fields: dict[str, Field] = field(default_factory=dict)
 
 
 @dataclass
@@ -79,6 +93,9 @@ class UserOptions:
 
     change_email: ChangeEmailOptions = field(default_factory=ChangeEmailOptions)
     delete_user: DeleteUserOptions = field(default_factory=DeleteUserOptions)
+    #: extra columns merged into the `user` schema and emitted by parse_user_output
+    #: (mirrors better-auth's `user.additionalFields`)
+    additional_fields: dict[str, Field] = field(default_factory=dict)
 
 
 #: generate_id: True = default 32-char base62; False = let the DB generate; "uuid" =

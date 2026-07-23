@@ -24,19 +24,101 @@ strings, camelCase DB columns, exact crypto/token encodings (cross-runtime compa
 Done-condition: all 6 spec files exist, validated by Fable (spot-check claims
 against TS source), gap items consolidated into Phase 1+ waves below.
 
-## Phases 1+ — Implementation waves (TO BE PLANNED after Phase 0)
+## Phase 0 status: COMPLETE — all 6 specs delivered and Fable-validated
+(8 wire-critical claims spot-checked against TS source, all confirmed:
+verify-password shape, jose JWT email-verification, scopes[], adapter
+transaction/updateMany/count, 35 providers, oidc-provider @deprecated,
+XChaCha20-Poly1305, exact error-code strings.)
 
-Provisional wave shape (will be rewritten from the specs):
-1. Core upgrades: plugin architecture (TS-shaped), hooks, rate limiting, cookie
-   cache, secondary storage, missing account routes (change-email, delete-user,
-   link/unlink-social, refresh-token, get-access-token), full options surface.
-2. Social providers fan-out (mechanical, per-provider).
-3. Simple plugins.
-4. Hard plugins (two-factor, admin, organization, jwt, multi-session, generic-oauth, device-authorization).
-5. Advanced plugins (oidc-provider, mcp, siwe, one-tap, oauth-proxy/popup).
-6. Ecosystem packages per IN/OUT scoping decision.
+## Wave 1 — Core foundation (branch parity/v1.6.23)
 
-Each validated task = one atomic Conventional Commit, test gate before commit.
+Two parallel tracks (disjoint files), sequential within each track.
+Every task: TDD, full test gate (`uv run pytest && uv run ruff check . && uv run ty check`),
+one atomic Conventional Commit incl. ACTIVE.md checkbox update.
+
+**Track DB** (spec: gap/02-db-layer.md — task = its gap item numbers):
+- [x] W1-A1: DONE, validated, commit 2795c45 (147-test gate green). Accepted
+      deviations to carry into A2/E: (a) caller-supplied id kept (strip-unless-
+      forceAllowId moves to internal-adapter seam in A2), (b) advanced.database
+      passed to adapter ctor, rewire through BetterAuth options in A2/E,
+      (c) generate_id="serial" stubbed → returns None (ponytail note in code),
+      (d) filter_output_fields/parse_account_output provided but not yet wired
+      into endpoints (W1-E), (e) String(255) kept for MySQL unique-index safety.
+- [ ] W1-A2 (Opus high, after A1): internal-adapter seam (5) + databaseHooks (4)
+      + SecondaryStorage protocol (7) + rateLimit table (9) + shared adapter
+      test suite port (11).
+
+**Track HTTP** (spec: gap/01-core-http.md — task = its gap item numbers):
+- [x] W1-B (Sonnet medium): DONE, validated, commit 1edbaa7. Interim
+      scope-blacklist in /list-accounts to be replaced by parse_account_output
+      in W1-E. BODY_MUST_BE_AN_OBJECT unreachable (INVALID_BODY fires earlier
+      in types.py) — revisit in W1-E if parity of that code matters.
+- [x] W1-C: DONE, validated, commit 98bcfab. Notes: change-email JWT branch
+      (updateTo) minted but /verify-email's change-email path lands in W1-D;
+      "reuse existing session" refinement for autoSignInAfterVerification
+      deliberately skipped (revisit W1-F if parity-relevant).
+- [x] W1-A2: DONE, validated, commit 4a3ae2c. Notes: hook signature is
+      before(data)/after(payload) single-arg (no ctx object yet — W1-E may
+      widen); secondary storage wired in seam only; endpoints not yet routed
+      through the seam (W1-E).
+- [x] W1-D: DONE, validated, commit 463a919. Fable merge-fix: BetterAuth now
+      takes user= (UserOptions) directly; getattr shim removed. Deferred:
+      afterEmailVerification hooks + additionalFields allowlist (W1-E/F),
+      /account-info data:{} until Wave 2 refresh machinery. Verified against
+      TS: delete-user main path cascades sessions only, callback path also
+      cascades accounts (update-user.ts:552 vs 649-651).
+      /delete-user, /delete-user/callback, /account-info, /update-session
+      (item 8 minus link-social/refresh-token/get-access-token → Wave 2).
+
+**Merge point** (both tracks done):
+- [x] W1-E: DONE (2 agents — first died at weekly API limit mid-refactor,
+      continuation finished it). TS-shaped plugin contract, schema-driven
+      output parsing (blacklist deleted), endpoints + session.py + oauth.py
+      routed through InternalAdapter seam, options.hooks + databaseHooks
+      wired. SECURITY FIX validated: /update-session now enforces
+      parse_session_input allowlist; input:false raises FIELD_NOT_ALLOWED
+      (verified vs db/schema.ts:155). databaseHook call site adapts to (data)
+      or (data, ctx) arity.
+- [ ] W1-F (Opus high): CSRF/origin parity (9) + session freshness (10) +
+      rate-limiter storage backends (14) + cookie cache session_data (15) +
+      onAPIError (16) + misc options (17).
+
+## Wave 2 — Social providers (spec: gap/03-social-oauth.md)
+- [ ] W2-A: oauth2 machinery (16 items: refresh, JWKS/id-token verify,
+      linking decision tree, per-provider PKCE, SSRF guard, stateless state)
+      + /link-social, /refresh-token, /get-access-token endpoints.
+- [ ] W2-B: 32 provider ports, fan-out (pipeline, Sonnet; apple/paypal/wechat
+      and other quirky ones → Opus).
+
+## Wave 3 — Simple plugins (spec: gap/04-plugins-simple.md)
+- [ ] Foundation items from spec first (consume_verification_value atomic,
+      OTP crypto helpers), then: username, anonymous, phone-number, magic-link,
+      email-otp, one-time-token, bearer(full), last-login-method,
+      haveibeenpwned, captcha, additional-fields, custom-session.
+      open-api: DEFERRED (route-metadata registry) — end of Wave 5.
+
+## Wave 4 — Hard plugins (spec: gap/05-plugins-core.md)
+- [ ] Crypto primitives first (XChaCha20 symmetricEncrypt `$ba$` envelope,
+      TOTP, JWKS EdDSA + exact privateKey storage) — MUST resolve the 2
+      BLOCKED cross-runtime items (fetch @better-auth/utils source, byte-parity
+      test vs @noble/ciphers) before coding.
+- [ ] access-control subsystem → two-factor, admin, organization (XL,
+      sub-phased), multi-session, jwt, generic-oauth, device-authorization.
+
+## Wave 5 — Advanced plugins (spec: gap/06-plugins-advanced.md)
+- [ ] oauth-popup, siwe, one-tap, oauth-proxy; oauth-provider pkg (subset,
+      replaces deprecated oidc-provider/mcp per decision log); open-api.
+
+## Wave 6 — Ecosystem (pending user IN/OUT confirmation; default from spec 06)
+- [ ] api-key, passkey (webauthn lib), sso-OIDC. OUT: scim, stripe, SAML.
+
+## Security findings (from background commit review)
+
+- 2026-07-22 CONFIRMED: /update-session (commit 463a919) accepted arbitrary
+  non-core session fields — priv-esc vector vs TS's parseSessionInput
+  allowlist. Fix folded into W1-E's item-12 scope (message sent to the running
+  agent): parse_session_input schema-driven allowlist + tests. Validate before
+  W1-E commit.
 
 ## Decision log
 
@@ -50,6 +132,9 @@ Each validated task = one atomic Conventional Commit, test gate before commit.
   mcp plugins; port their successor `oauth-provider` package instead. Rationale:
   porting code upstream is removing = wasted parity. Listed in parked questions
   for user confirmation; work proceeds on this default.
+
+- 2026-07-22: JWT dependency = `pyjwt` (HS256 now; add `cryptography` only when
+  EdDSA/RS256 lands in waves 2/4). Boring, ubiquitous, EdDSA-capable.
 
 ## Parked questions (batch for user)
 
