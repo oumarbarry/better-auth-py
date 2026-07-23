@@ -645,7 +645,11 @@ async def refresh_token(ctx: Ctx) -> AuthResponse:
         raise APIError(
             400, "TOKEN_REFRESH_NOT_SUPPORTED", f"Provider {provider_id} does not support refresh."
         )
-    user_id = body.get("userId") or result["user"]["id"]
+    # account.ts resolveUserId: over HTTP the session user ALWAYS wins; a body
+    # userId is honored only for a trusted server-side call with no session.
+    # These handlers always require a session, so the session user is authoritative
+    # — never trust body.userId here (would be an IDOR onto another user's tokens).
+    user_id = result["user"]["id"]
     account = await _find_account(ctx, user_id, provider_id, body.get("accountId"))
     if account is None:
         raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
@@ -741,7 +745,9 @@ async def get_access_token(ctx: Ctx) -> AuthResponse:
     provider = ctx.auth.social_providers.get(provider_id)
     if provider is None:
         raise APIError(400, "PROVIDER_NOT_SUPPORTED", f"Provider {provider_id} is not supported.")
-    user_id = body.get("userId") or result["user"]["id"]
+    # Session user is authoritative (account.ts resolveUserId) — never trust
+    # body.userId over HTTP, else any user could read another's access token.
+    user_id = result["user"]["id"]
     account = await _find_account(ctx, user_id, provider_id, body.get("accountId"))
     if account is None:
         raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
