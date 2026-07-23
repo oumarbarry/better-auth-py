@@ -79,16 +79,19 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
       parse_session_input allowlist; input:false raises FIELD_NOT_ALLOWED
       (verified vs db/schema.ts:155). databaseHook call site adapts to (data)
       or (data, ctx) arity.
-- [~] W1-F (Opus high): first agent STALLED (600s watchdog) mid-refactor —
-      tree left unimportable (auth.py imports missing rate_limit.py; origin.py
-      + cookie_cache.py created; old _check_origin/_check_rate_limit still
-      present). W1-F-bis continuation dispatched with exact state. Baseline to
-      return to if unrecoverable: cd49200 (202 tests).
+- [x] W1-F: DONE (2 agents; continuation after stall), commit f6aabd9.
+      243 tests. Origin-check truthiness bypass fixed pre-commit (per-path
+      skip tests green). WAVE 1 COMPLETE.
+      Deferred leftovers (backlog, fold in later): dynamic base_url
+      ({allowedHosts}), secrets rotation, telemetry/logger config groups,
+      advanced.ipAddress (ipAddressHeaders/trustedProxies/ipv6Subnet — matters
+      for prod rate-limiting; schedule with Wave 3).
 
 ## Wave 2 — Social providers (spec: gap/03-social-oauth.md)
-- [ ] W2-A: oauth2 machinery (16 items: refresh, JWKS/id-token verify,
-      linking decision tree, per-provider PKCE, SSRF guard, stateless state)
-      + /link-social, /refresh-token, /get-access-token endpoints.
+- [~] W2-A: first agent DIED (connection drop) mid-split of oauth.py into
+      oauth/ package — models/machinery/verify.py exist, NO __init__.py, no
+      provider base, suite unimportable. W2-A-bis continuation dispatched.
+      Green baseline to fall back to: c541260 (243 tests).
 - [ ] W2-B: 32 provider ports, fan-out (pipeline, Sonnet; apple/paypal/wechat
       and other quirky ones → Opus).
 
@@ -126,6 +129,10 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
   disable_origin_check as non-empty list (per-path skip) disabled the origin
   check globally. Fix folded into W1-F-bis (message sent). Gate before commit:
   per-path skip tests must exist and pass.
+
+- 2026-07-23 FIXED c541260: cookie_cache.py compared HMAC signatures with `!=`
+  (timing side-channel). Now hmac.compare_digest + type guard. Fixed directly
+  by orchestrator (file unowned by any live agent).
 
 ## Decision log
 

@@ -110,6 +110,39 @@ def unsign_value(secret: str, signed: str) -> str | None:
     return value
 
 
+_ENC_PREFIX = "$bap$"  # better-auth-python at-rest envelope (see note below)
+
+
+def symmetric_encrypt(secret: str, data: str) -> str:
+    """AES-256-GCM encrypt ``data`` with a key derived from ``secret`` (SHA-256).
+
+    ponytail: better-auth (TS) uses XChaCha20-Poly1305, which Python's ``cryptography``
+    does not expose; this is a self-consistent AES-GCM envelope (``$bap$`` + hex(nonce||ct))
+    for at-rest token encryption, NOT byte-compatible with a TS deployment's encrypted
+    tokens. Cross-runtime encrypted-token sharing needs a matching XChaCha impl (pynacl).
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    key = hashlib.sha256(secret.encode()).digest()
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, data.encode(), None)
+    return _ENC_PREFIX + (nonce + ct).hex()
+
+
+def symmetric_decrypt(secret: str, payload: str) -> str:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    raw = bytes.fromhex(payload[len(_ENC_PREFIX) :])
+    key = hashlib.sha256(secret.encode()).digest()
+    return AESGCM(key).decrypt(raw[:12], raw[12:], None).decode()
+
+
+def is_likely_encrypted(token: str) -> bool:
+    """Whether ``token`` looks like a ``symmetric_encrypt`` envelope (lets ``encrypt_oauth_tokens``
+    be turned on without breaking plaintext rows written before the flag flipped)."""
+    return token.startswith(_ENC_PREFIX)
+
+
 def sign_email_verification_token(
     secret: str,
     email: str,

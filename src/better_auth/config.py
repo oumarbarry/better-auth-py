@@ -75,11 +75,41 @@ class SessionOptions:
 
 
 @dataclass
+class AccountLinking:
+    """``account.accountLinking`` — the implicit-linking policy surface (mirrors better-auth).
+
+    Security-sensitive: these gates guard account-takeover via a pre-registered local row.
+    ``require_local_email_verified`` defaults ``True`` (``@deprecated`` in TS, slated to
+    become unconditional): even a *verified* IdP email won't auto-link into a local row
+    whose own email was never verified.
+    """
+
+    enabled: bool = True
+    #: static list, or a (request) -> list[str] callable resolved per-request
+    trusted_providers: list[str] | Callable[[Any], Any] = field(default_factory=list)
+    #: allow linking when the provider email differs from the local email
+    allow_different_emails: bool = False
+    #: allow /unlink-account to remove the user's last account
+    allow_unlinking_all: bool = False
+    #: gate a verified IdP email against an unverified local row (account-preemption guard)
+    require_local_email_verified: bool = True
+    #: turn off implicit linking on sign-in entirely (only /link-social can link)
+    disable_implicit_linking: bool = False
+    #: copy name/image from the freshly linked provider profile onto the user row
+    update_user_info_on_link: bool = False
+
+
+@dataclass
 class AccountOptions:
     """``account`` option group (mirrors better-auth)."""
 
     #: extra columns merged into the `account` schema and emitted by parse_account_output
     additional_fields: dict[str, Field] = field(default_factory=dict)
+    account_linking: AccountLinking = field(default_factory=AccountLinking)
+    #: refresh stored tokens on every re-sign-in (default true, matching TS)
+    update_account_on_sign_in: bool = True
+    #: AES-256-GCM encrypt access/refresh tokens at rest (account.encryptOAuthTokens)
+    encrypt_oauth_tokens: bool = False
 
 
 @dataclass

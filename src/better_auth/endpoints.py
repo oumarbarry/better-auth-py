@@ -20,7 +20,15 @@ from .crypto import (
     sign_email_verification_token,
     verify_password,
 )
-from .oauth import OAuthTokens, oauth_callback, sign_in_social
+from .oauth import (
+    OAuthTokens,
+    get_access_token,
+    link_social,
+    oauth_callback,
+    refresh_token,
+    sign_in_social,
+)
+from .oauth.flow import _valid_access_token
 from .session import clear_cookie, create_session, get_session, refresh_session_cookie, utcnow
 from .types import APIError, AuthResponse, Ctx
 
@@ -920,7 +928,8 @@ async def unlink_account(ctx: Ctx) -> AuthResponse:
     ]
     if not matching:
         raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
-    if len(accounts) - len(matching) < 1:
+    allow_unlinking_all = ctx.auth.account.account_linking.allow_unlinking_all
+    if not allow_unlinking_all and len(accounts) - len(matching) < 1:
         raise APIError(400, "FAILED_TO_UNLINK_LAST_ACCOUNT", "You can't unlink your last account")
     for account in matching:
         await ctx.adapter.delete_many("account", [Where("id", account["id"])])
@@ -930,12 +939,10 @@ async def unlink_account(ctx: Ctx) -> AuthResponse:
 async def account_info(ctx: Ctx) -> AuthResponse:
     """GET /account-info — the provider's user-info for one linked account (account.ts).
 
-    Returns ``{user, data}`` (the provider `getUserInfo` shape). Every HTTP caller
-    needs a valid session; the account must belong to the session user.
-
-    ponytail: no token refresh and `data` is ``{}`` — `OAuthProvider.fetch_user`
-    (oauth.py, out of scope) uses the stored access token and discards the raw
-    provider payload; the refresh/`getAccessToken` machinery is Wave 2.
+    Returns ``{user, data}`` (the provider `getUserInfo` shape, with ``data`` the raw
+    provider profile). Refreshes the access token first if it's near expiry (shared
+    ``getValidAccessToken`` path). Every HTTP caller needs a valid session; the account
+    must belong to the session user.
     """
     result = await ctx.require_session()
     user_id = result["user"]["id"]
@@ -972,16 +979,14 @@ async def account_info(ctx: Ctx) -> AuthResponse:
             "Account is not associated with a configured social provider.",
         )
 
-    access_token = account.get("accessToken")
-    if not access_token:
+    if not account.get("accessToken"):
         raise APIError(400, "ACCESS_TOKEN_NOT_FOUND", "Access token not found")
 
+    valid = await _valid_access_token(ctx, account, provider)
     tokens = OAuthTokens(
-        access_token=access_token,
-        refresh_token=account.get("refreshToken"),
-        id_token=account.get("idToken"),
+        access_token=valid["accessToken"],
+        id_token=valid["idToken"],
         scope=account.get("scope"),
-        access_token_expires_at=account.get("accessTokenExpiresAt"),
     )
     info = await provider.fetch_user(tokens, ctx.auth.http)
     return AuthResponse(
@@ -993,7 +998,7 @@ async def account_info(ctx: Ctx) -> AuthResponse:
                 "image": info.image,
                 "emailVerified": info.email_verified,
             },
-            "data": {},
+            "data": info.raw,
         }
     )
 
@@ -1062,6 +1067,9 @@ ROUTES: list[tuple[str, str, Any]] = [
     ("POST", "/reset-password", reset_password),
     ("POST", "/send-verification-email", send_verification_email_handler),
     ("GET", "/verify-email", verify_email),
+    ("POST", "/link-social", link_social),
+    ("POST", "/refresh-token", refresh_token),
+    ("POST", "/get-access-token", get_access_token),
     ("GET", "/list-accounts", list_accounts),
     ("POST", "/unlink-account", unlink_account),
     ("GET", "/account-info", account_info),
