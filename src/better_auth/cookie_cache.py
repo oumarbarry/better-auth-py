@@ -11,6 +11,7 @@ payloads cover the common case; add chunking if a session's cached payload nears
 
 from __future__ import annotations
 
+import hmac
 import json
 import time
 from typing import TYPE_CHECKING, Any
@@ -77,7 +78,7 @@ def get_cookie_cache(auth: BetterAuth, request: AuthRequest) -> dict[str, Any] |
     if not isinstance(payload, dict) or not payload.get("session") or not payload.get("user"):
         return None
     expected = sign_hmac_b64url(auth.secret, _dumps({**payload, "expiresAt": expires_at}))
-    if signature != expected:
+    if not isinstance(signature, str) or not hmac.compare_digest(signature, expected):
         return None
     if payload.get("version", "1") != cache.version:
         return None
