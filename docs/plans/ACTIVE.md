@@ -18,7 +18,7 @@ strings, camelCase DB columns, exact crypto/token encodings (cross-runtime compa
 - [x] 02-db-layer.md — DELIVERED (await Fable validation). Headline gaps: adapter contract ~half (missing count/updateMany/delete/transaction/sortBy/limit/select…), no transform/parse layer, no databaseHooks, no secondary storage, no advanced.database opts, schema Field lacks returned/input/onUpdate/onDelete. 2 BLOCKED items recorded in spec.
 - [x] 03-social-oauth.md — DELIVERED (await Fable validation). 35 providers in TS vs 3 in Python (32 to port; the 3 existing are incomplete). Machinery gaps: token refresh, JWKS/id-token verify (blocks 9+ providers), account-linking decision tree, per-provider PKCE, stateless-cookie state strategy, SSRF guard on outbound fetches. 16 machinery items + 32 provider ports, no BLOCKED.
 - [x] 04-plugins-simple.md — DELIVERED (await Fable validation). All 13 specced. Shared foundation blockers: plugin init()+databaseHooks, atomic consume_verification_value, OTP crypto helpers, schema field attrs, additionalFields core support. Reco: defer open-api (needs route-metadata registry). 8 open questions w/ defaults.
-- [ ] 05-plugins-core.md — two-factor, admin, organization+access, multi-session, jwt, generic-oauth, device-authorization (Opus)
+- [x] 05-plugins-core.md — two-factor, admin, organization+access, multi-session, jwt, generic-oauth, device-authorization (Opus) — DELIVERED (checkbox was stale; covered by Phase 0 completion below)
 - [x] 06-plugins-advanced.md — DELIVERED (await Fable validation). Key finding: oidc-provider & mcp are @deprecated in v1.6.23, successor = standalone `oauth-provider` pkg. Ecosystem reco: IN = api-key, passkey, oauth-provider; PARTIAL = sso (OIDC yes, SAML out); OUT = scim, stripe, expo/electron/cli.
 
 Done-condition: all 6 spec files exist, validated by Fable (spot-check claims
@@ -94,21 +94,42 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
       storeAccountCookie, oauth-signup verification email (flag for parity
       review). Token encryption is AES-GCM $bap$ (not TS-XChaCha20-compatible —
       revisit in Wave 4 crypto task which ports symmetricEncrypt).
-- [~] W2-B: 6 group agents DISPATCHED in parallel (G1-G3 Sonnet standard,
-      G4 apple/facebook/microsoft/paypal, G5 twitter/tiktok/wechat/salesforce,
-      G6 atlassian/cognito/kakao/line/naver/vk — Opus). Each writes ONLY
-      src/better_auth/oauth/providers_ext/<name>.py + tests/providers/test_gN.py.
-      Registry wiring (providers_ext/__init__ + social_providers name map) is
-      the orchestrator's merge commit.
-- [ ] W2-B: 32 provider ports, fan-out (pipeline, Sonnet; apple/paypal/wechat
-      and other quirky ones → Opus).
+- [x] W2-B: DONE, commit 0d36a03, 406 tests. All 32 providers ported via 6
+      parallel group agents (G1-G3 Sonnet, G4-G6 Opus), ZERO merge conflicts
+      (disjoint files by design). PROVIDER_REGISTRY exposes all 35.
+      Backlog: name-based provider config (socialProviders:{github:{...}})
+      ergonomics — BetterAuth takes instances today.
+      Security: 2 IDOR in refresh/get-access-token fixed pre-merge (21bc8c7);
+      cookie-cache timing side-channel fixed (c541260).
 
 ## Wave 3 — Simple plugins (spec: gap/04-plugins-simple.md)
-- [ ] Foundation items from spec first (consume_verification_value atomic,
-      OTP crypto helpers), then: username, anonymous, phone-number, magic-link,
-      email-otp, one-time-token, bearer(full), last-login-method,
-      haveibeenpwned, captcha, additional-fields, custom-session.
-      open-api: DEFERRED (route-metadata registry) — end of Wave 5.
+
+Spec foundation items 1–10 reconciled against post-W1/W2 code (2026-07-23):
+init()+databaseHooks, matched hooks, plugin rate-limit rules, field attrs
+(input/returned/default/field_name/sortable), additional_fields +
+parse_user_input/output, get_session(disable_refresh), verification CRUD
+helpers, symmetric_encrypt (AES-GCM interim), fresh_age gate — ALL already
+exist. additional-fields plugin: core support done (W1-E); client-only
+inference N/A in Python → no port. open-api stays deferred (end of Wave 5).
+
+- [ ] W3-A (Opus, foundation leftovers, one agent — shared files):
+      atomic consume_verification_value + update/delete_by_identifier
+      (concurrency race test mandatory); charset generate_random_string +
+      generate_otp + default_key_hasher; new-session response signal +
+      expose-headers merge helper; on_password_reset config + reset wiring;
+      overridable password-hash seam (Q1 default b); Field.transform_input
+      honored on writes; plugin-routes-shadow-core order swap (Q4 default);
+      revoke_unproven_account_access helper (TS semantics); EmailVerification
+      sender init-overridable (mutability); build_cookie attribute overrides
+      (http_only/max_age/inherit). Gate: 406 green + new tests, ruff, ty.
+- [ ] W3-B (after W3-A): 11 plugins via 6 parallel group agents, disjoint
+      files only — src/better_auth/plugins_ext/<name>.py +
+      tests/plugins/test_<name>.py; plugins_ext/__init__ wiring = orchestrator
+      merge commit (W2-B pattern, zero conflicts by design).
+      G1 Sonnet: bearer(resp-side) + last-login-method + custom-session;
+      G2 Sonnet: anonymous + one-time-token; G3 Opus: username + magic-link;
+      G4 Opus: phone-number; G5 Opus: email-otp;
+      G6 Sonnet: captcha + haveibeenpwned.
 
 ## Wave 4 — Hard plugins (spec: gap/05-plugins-core.md)
 - [ ] Crypto primitives first (XChaCha20 symmetricEncrypt `$ba$` envelope,
@@ -157,6 +178,13 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
 
 - 2026-07-22: JWT dependency = `pyjwt` (HS256 now; add `cryptography` only when
   EdDSA/RS256 lands in waves 2/4). Boring, ubiquitous, EdDSA-capable.
+
+- 2026-07-23 (Wave 3 kickoff, spec-04 open questions resolved by defaults):
+  Q1 → (b) path-aware overridable password-hash seam (no full ctx.password
+  refactor); Q2 → (c) open-api deferred; Q4 → plugin routes shadow core
+  (order swap, semantic change flagged for review); Q5 → build_cookie gains
+  attribute overrides; Q6 → already done (disable_refresh exists); Q8 →
+  sensitive session middleware = existing fresh_age gate, no new variant.
 
 ## Parked questions (batch for user)
 
