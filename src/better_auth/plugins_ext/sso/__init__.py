@@ -22,9 +22,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ...plugins import Plugin, Route
+from ...plugins import HookSet, Plugin, PluginHook, Route
 from ...schema import Field, Reference, Schema
 from ...types import AuthResponse, Ctx
+from . import domain_verification as _domain
+from . import org_assignment as _org
 from . import providers as _providers
 from . import routes as _routes
 
@@ -49,12 +51,28 @@ class SSOPlugin(Plugin):
         redirect_uri: str | None = None,
         model_name: str | None = None,
         fields: dict[str, str] | None = None,
+        provision_user: Callable[[dict[str, Any]], Any] | None = None,
+        provision_user_on_every_login: bool = False,
+        organization_provisioning: dict[str, Any] | None = None,
+        trust_email_verified: bool = False,
+        disable_implicit_sign_up: bool = False,
+        resolve_host: Any = None,
+        dns_resolver: Any = None,
     ) -> None:
         self.providers_limit = providers_limit
         self.default_override_user_info = default_override_user_info
         self.default_sso = list(default_sso or [])
         self.redirect_uri = redirect_uri
         self.model_name = model_name or "ssoProvider"
+        self.provision_user = provision_user
+        self.provision_user_on_every_login = provision_user_on_every_login
+        self.organization_provisioning = organization_provisioning
+        self.trust_email_verified = trust_email_verified
+        self.disable_implicit_sign_up = disable_implicit_sign_up
+        #: injected A/AAAA resolver for the discovery DNS-rebind check (tests stub it)
+        self.resolve_host = resolve_host
+        #: injected TXT resolver for domain verification (tests stub it; default: dnspython)
+        self.dns_resolver = dns_resolver
 
         dv = domain_verification or {}
         self.domain_verification_enabled = bool(dv.get("enabled"))
@@ -105,13 +123,56 @@ class SSOPlugin(Plugin):
     # --- routes -----------------------------------------------------------------------
 
     def routes(self) -> list[Route]:
-        return [
+        routes: list[Route] = [
+            ("POST", "/sign-in/sso", self._sign_in),
+            ("GET", "/sso/callback/{providerId}", self._callback),
+            ("GET", "/sso/callback", self._callback_shared),
             ("POST", "/sso/register", self._register),
             ("GET", "/sso/providers", self._list_providers),
             ("GET", "/sso/get-provider", self._get_provider),
             ("POST", "/sso/update-provider", self._update_provider),
             ("POST", "/sso/delete-provider", self._delete_provider),
         ]
+        if self.domain_verification_enabled:
+            routes += [
+                ("POST", "/sso/request-domain-verification", self._request_domain_verification),
+                ("POST", "/sso/verify-domain", self._verify_domain),
+            ]
+        return routes
+
+    def hooks(self) -> HookSet:
+        # after-hook on /callback/* (non-SSO social/generic logins) -> org-by-domain.
+        return HookSet(
+            after=[
+                PluginHook(
+                    matcher=lambda ctx: ctx.request.path.startswith("/callback/"),
+                    handler=self._after_callback,
+                )
+            ]
+        )
+
+    async def _after_callback(self, ctx: Ctx) -> None:
+        new_session = ctx.new_session
+        if not new_session or not new_session.get("user"):
+            return
+        if not self.has_org_plugin(ctx):
+            return
+        await _org.assign_organization_by_domain(ctx, self, user=new_session["user"])
+
+    async def _sign_in(self, ctx: Ctx) -> AuthResponse:
+        return await _routes.sign_in_sso(self, ctx)
+
+    async def _callback(self, ctx: Ctx) -> AuthResponse:
+        return await _routes.callback_sso(self, ctx)
+
+    async def _callback_shared(self, ctx: Ctx) -> AuthResponse:
+        return await _routes.callback_sso_shared(self, ctx)
+
+    async def _request_domain_verification(self, ctx: Ctx) -> AuthResponse:
+        return await _domain.request_domain_verification(self, ctx)
+
+    async def _verify_domain(self, ctx: Ctx) -> AuthResponse:
+        return await _domain.verify_domain(self, ctx)
 
     async def _register(self, ctx: Ctx) -> AuthResponse:
         return await _routes.register(self, ctx)

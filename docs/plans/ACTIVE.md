@@ -280,8 +280,11 @@ origin check (W1). Straight to plugins.
       Ponytail deviations: request state on Ctx (no defineRequestState);
       no cross-request oAuthState store (authorize.ts:212 skip, noted);
       after-hook copies login Set-Cookie onto resume redirect (port
-      replaces response wholesale). NEXT: Phase C (token grants +
-      introspection, items 5/14-18 — crypto+concurrency core), then D.
+      replaces response wholesale).
+      Phase C DISPATCHED 2026-07-24 (Opus xhigh, background): token
+      endpoint 3 grants, createUserTokens (JWT/opaque/id_token), refresh
+      rotation CAS + family teardown, verify_jws_access_token (azp gate),
+      introspection, pairwise sub. Then Phase D (userinfo/revoke/logout).
 - [ ] W5-D: open-api — decide at end of wave (needs route-metadata registry;
       deferred since Wave 3).
 
@@ -353,11 +356,20 @@ origin check (W1). Straight to plugins.
       (domain-verification endpoints + org auto-assign): ensure_runtime_
       discovery, verification_identifier, domainVerified column,
       has_org_plugin. Export wired by Fable (+ RUF022 __all__ sort fix).
-- [ ] W6 sso-OIDC waves C+D: DISPATCHED 2026-07-24 (Opus high, background).
-      Owns plugins_ext/sso/ + test_sso*.py + oauth/flow.py (minimal
-      handle_oauth_user_info trust-flag extension — defaults preserve
-      existing callers). WIDER gate mandated (full suite minus phase-B-owned
-      oauth_provider tests, baseline 1595) since flow.py is shared.
+- [x] W6 sso-OIDC waves C+D: DONE, validated — SSO PLUGIN CLOSED (OIDC half)
+      vs TS v1.6.23. 44 new tests (169 sso total); Fable re-ran gates:
+      near-whole-tree 1639 = 1595 + 44, shared-caller suites green (flow.py
+      extension regression-free). Fable scrutiny of 2 flagged points, both
+      sound: (a) trust_provider_by_name defaults True (preserves social/
+      generic-oauth callers; SSO callback passes False + is_trusted_provider
+      = domainVerified && email-domain match, routes.py:616/641); (b) no
+      per-endpoint ensure_trusted_url on sign-in callback URLs == TS
+      generateState, AND the port's global check_origin already validates
+      callbackURL/errorCallbackURL/redirectTo every request (origin.py:218).
+      Ponytail deviations: callback drops dead config.scopes read;
+      ssoProviderId/requestSignUp ride state.additionalData (single-runtime
+      state, spec-permitted); (user_id, is_register) return convention.
+      SAML remains OUT per decision log.
 - [ ] W6 impl DISPATCHED 2026-07-24 (3 Opus high agents, parallel, in-tree):
       api-key (plugins_ext/api_key.py), passkey (plugins_ext/passkey.py),
       sso-OIDC waves A+B (plugins_ext/sso/ — schema/CRUD/SSRF/discovery/

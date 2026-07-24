@@ -247,14 +247,35 @@ async def handle_oauth_user_info(
     tokens: OAuthTokens,
     *,
     disable_sign_up: bool = False,
+    is_trusted_provider: bool | None = None,
+    trust_provider_by_name: bool = True,
+    override_user_info: bool | None = None,
 ) -> tuple[str, bool]:
     """Find/register/link decision tree (``link-account.ts``). Returns (user_id, is_register).
 
     Raises :class:`OAuthLinkError` with a stable code (``account_not_linked``,
     ``signup_disabled``) on a refused link/register — callers map it to a redirect
     (callback) or an APIError (idToken sign-in).
+
+    Trust flags (extension for the SSO plugin; defaults preserve social/generic-oauth
+    behavior, one shared change so all callers route through the same gate):
+
+    - ``is_trusted_provider`` — a call-time trust signal (SSO passes verified
+      domain-ownership). When truthy the implicit-linking gate treats the provider as
+      trusted regardless of the name list.
+    - ``trust_provider_by_name`` — when ``False`` the global
+      ``accountLinking.trustedProviders`` list is NOT consulted (SSO providerIds are
+      user-controlled and live in the social namespace, so a provider named after a
+      trusted social provider must not launder that trust).
+    - ``override_user_info`` — overrides ``provider.override_user_info_on_sign_in`` when
+      not ``None`` (SSO passes the per-provider ``oidcConfig.overrideUserInfo``).
     """
     now = utcnow()
+    override = (
+        provider.override_user_info_on_sign_in
+        if override_user_info is None
+        else override_user_info
+    )
     email = (info.email or "").lower()
     token_fields = _token_fields(ctx, tokens)
     linking = ctx.auth.account.account_linking
@@ -270,7 +291,7 @@ async def handle_oauth_user_info(
                 "account", [Where("id", account["id"])], {**token_fields, "updatedAt": now}, ctx=ctx
             )
         user = await _maybe_promote_verified(ctx, user, info, email, now)
-        if provider.override_user_info_on_sign_in and user is not None:
+        if override and user is not None:
             user = await _override_user_info(ctx, user, info, email, now)
         return account["userId"], False
 
@@ -293,8 +314,12 @@ async def handle_oauth_user_info(
         return user["id"], True
 
     # user exists, this provider account is not yet linked → implicit-linking gate
-    trusted = await _resolve_trusted_providers(ctx)
-    is_trusted = provider.provider_id in trusted
+    if is_trusted_provider:
+        is_trusted = True
+    elif trust_provider_by_name:
+        is_trusted = provider.provider_id in (await _resolve_trusted_providers(ctx))
+    else:
+        is_trusted = False
     if (
         (not is_trusted and not info.email_verified)
         or (linking.require_local_email_verified and not user["emailVerified"])
@@ -307,7 +332,7 @@ async def handle_oauth_user_info(
     user = await _maybe_promote_verified(ctx, user, info, email, now) or user
     if linking.update_user_info_on_link and user is not None:
         user = await _apply_update_user_info_on_link(ctx, user, info, now)
-    if provider.override_user_info_on_sign_in and user is not None:
+    if override and user is not None:
         user = await _override_user_info(ctx, user, info, email, now)
     return user["id"], False
 
