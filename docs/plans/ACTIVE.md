@@ -50,6 +50,15 @@ priority, or release chores (version bump, CHANGELOG).
       TS entropy warnings dropped (logging-only). Backlog shrunk: encrypted
       client secrets no longer blocked on secrets rotation — remaining
       blocker for them is the HS256/disableJwtPlugin follow-up alone.
+- [ ] B3 advanced.ipAddress: DISPATCHED (Opus high). Owns auth.py/types.py/
+      rate_limit.py/session.py; internal_adapter diff via merge window.
+- [x] B4 SQLAlchemy insensitive in/not_in: DONE, validated (7-line fix
+      mirroring the file's eq/ne insensitive style; +3 tests, 82 adapter
+      tests green). Agent verified TS adapters have NO insensitive-in
+      precedent — MemoryAdapter semantics (memory.py:24-29) authoritative.
+- [ ] B5 verification secondaryStorage + storeIdentifier hashing:
+      DISPATCHED (Opus high). Owns internal_adapter.py; auth.py plumbing
+      via merge-window diff. Must verify actual v1.6.23 option fields.
 
 ## Phase 0 — Gap analysis (IN PROGRESS)
 

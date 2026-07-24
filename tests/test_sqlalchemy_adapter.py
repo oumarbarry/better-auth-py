@@ -60,6 +60,41 @@ async def test_where_operators(sa_auth):
     assert len(none) == 1
 
 
+async def test_where_in_insensitive_matches_mixed_case(sa_auth):
+    async with make_client(sa_auth) as client:
+        await sign_up(client)
+        await sign_up(client, email="second@example.com")
+
+    upper_email = SIGNUP["email"].upper()
+    subset = await sa_auth.adapter.find_many(
+        "user", [Where("email", [upper_email], "in", mode="insensitive")]
+    )
+    assert len(subset) == 1
+    assert subset[0]["email"] == SIGNUP["email"]
+
+
+async def test_where_not_in_insensitive_excludes_mixed_case(sa_auth):
+    async with make_client(sa_auth) as client:
+        await sign_up(client)
+        await sign_up(client, email="second@example.com")
+
+    upper_email = SIGNUP["email"].upper()
+    remaining = await sa_auth.adapter.find_many(
+        "user", [Where("email", [upper_email], "not_in", mode="insensitive")]
+    )
+    assert len(remaining) == 1
+    assert remaining[0]["email"] == "second@example.com"
+
+
+async def test_where_in_sensitive_stays_case_sensitive(sa_auth):
+    async with make_client(sa_auth) as client:
+        await sign_up(client)
+
+    upper_email = SIGNUP["email"].upper()
+    subset = await sa_auth.adapter.find_many("user", [Where("email", [upper_email], "in")])
+    assert len(subset) == 0
+
+
 async def test_update_and_delete(sa_auth):
     async with make_client(sa_auth) as client:
         await sign_up(client)

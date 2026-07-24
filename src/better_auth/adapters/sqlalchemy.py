@@ -155,6 +155,13 @@ class SQLAlchemyAdapter(BaseAdapter):
             if not isinstance(c.value, (list, tuple, set)):
                 raise ValueError(f"operator {op!r} requires an array value")
             values = [_to_storage(v) for v in c.value]
+            if insensitive:
+                lowered = [v.lower() for v in values]
+                return (
+                    func.lower(col).notin_(lowered)
+                    if op == "not_in"
+                    else func.lower(col).in_(lowered)
+                )
             return col.notin_(values) if op == "not_in" else col.in_(values)
 
         value = _to_storage(c.value)
