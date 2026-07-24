@@ -116,7 +116,7 @@ class AccountOptions:
     account_linking: AccountLinking = field(default_factory=AccountLinking)
     #: refresh stored tokens on every re-sign-in (default true, matching TS)
     update_account_on_sign_in: bool = True
-    #: AES-256-GCM encrypt access/refresh tokens at rest (account.encryptOAuthTokens)
+    #: XChaCha20-Poly1305 encrypt access/refresh tokens at rest (account.encryptOAuthTokens)
     encrypt_oauth_tokens: bool = False
 
 

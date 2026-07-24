@@ -157,10 +157,30 @@ inference N/A in Python → no port. open-api stays deferred (end of Wave 5).
       name-based plugin/provider config ergonomics.
 
 ## Wave 4 — Hard plugins (spec: gap/05-plugins-core.md)
-- [ ] Crypto primitives first (XChaCha20 symmetricEncrypt `$ba$` envelope,
-      TOTP, JWKS EdDSA + exact privateKey storage) — MUST resolve the 2
-      BLOCKED cross-runtime items (fetch @better-auth/utils source, byte-parity
-      test vs @noble/ciphers) before coding.
+
+2 BLOCKED crypto items RESOLVED 2026-07-23 by orchestrator with ground truth:
+installed better-auth@1.6.23 + @better-auth/utils + @noble/ciphers via npm in
+scratchpad, read published sources, generated cross-runtime vectors by running
+the REAL TS implementation (scratchpad/w4-vectors/vectors.json; to be
+hardcoded into tests). Facts: symmetricEncrypt key=SHA-256(secret utf8),
+managedNonce(xchacha20poly1305) output = 24B nonce || ct || 16B tag, HEX
+string; bare hex for string key, `$ba$<version>$<hex>` envelope only for
+versioned SecretConfig. createOTP = plain RFC-4226 HOTP: SHA-1 default,
+utf8-string HMAC key, 8-byte BE counter, digits 1–8 (default 6), period 30,
+verify window ±1, constant-time compare; otpauth URL secret = base32-nopad.
+HMAC helper: utf8 key/data, hex + base64url(nopad) encodings.
+
+- [x] W4-A: DONE, validated, 785 tests (+33). XChaCha20-Poly1305 via pynacl
+      ($bap$ AES-GCM deleted outright, zero references left), TOTP/HOTP/
+      otpauth_url in crypto.py, Ed25519 JWK pair + encode/decode_jwk_private_
+      key (privateKey column = JSON.stringify(symmetricEncrypt(JSON JWK)),
+      verified jwt/utils.ts:63,73-81). BIDIRECTIONAL parity proven by Fable:
+      JS→Python via hardcoded vectors AND Python→node (real better-auth
+      1.6.23 symmetricDecrypt, UTF-8 payload) — CROSS-RUNTIME OK.
+      One agent connection-drop mid-run; resumed via SendMessage, no rework.
+      Accepted deviations: digit-bounds raise ValueError (TS TypeError,
+      no wire impact); envelope decrypt surface = optional keys dict
+      (port has no SecretConfig yet — secrets-rotation backlog).
 - [ ] access-control subsystem → two-factor, admin, organization (XL,
       sub-phased), multi-session, jwt, generic-oauth, device-authorization.
 

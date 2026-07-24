@@ -27,6 +27,7 @@ dependencies = [
     "cryptography>=49.0.0",
     "httpx>=0.27",
     "pyjwt>=2.13.0",
+    "pynacl>=1.6.2",
 ]
 
 [project.urls]

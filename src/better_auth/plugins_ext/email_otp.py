@@ -170,9 +170,6 @@ class EmailOTPPlugin(Plugin):
     async def _store(self, otp: str) -> str:
         store = self.store_otp
         if store == "encrypted":
-            # ponytail: symmetric_encrypt is the interim $bap$ AES-GCM envelope, NOT
-            # byte-compatible with TS XChaCha20 — encrypted OTPs won't decrypt
-            # cross-runtime until Wave 4 swaps the crypto impl.
             return symmetric_encrypt(self.auth.secret, otp)
         if store == "hashed":
             return default_key_hasher(otp)
