@@ -10,6 +10,19 @@ continue from the first unverified task.
 strings, camelCase DB columns, exact crypto/token encodings (cross-runtime compat).
 **Baseline (2026-07-22):** 84 tests green, ruff clean, ty clean, v0.1.0.
 
+## STATUS 2026-07-24: ALL PLANNED WAVES COMPLETE (1–6 + Wave 5 closure)
+
+1781 tests, ruff/ty clean, tree clean at 40a4ca4. 24 plugins ported incl.
+oauth-provider (4 phases), api-key, passkey, sso-OIDC. Remaining work is
+BACKLOG only (no open waves): secrets rotation/SecretConfig (unblocks
+encrypted client secrets, disableJwtPlugin/HS256, non-EdDSA JWKS), APIError
+details field (missingPermissions[], api-key tryAgainIn), name-based
+plugin/provider config ergonomics, SQLAlchemy insensitive "in" op,
+verification-via-secondaryStorage + storeIdentifier hashing, dynamic
+base_url/advanced.ipAddress group, multi-resource token param, PAR store,
+open-api (ruled OUT, revisitable). Next session: pick from backlog on user
+priority, or release chores (version bump, CHANGELOG).
+
 ## Phase 0 — Gap analysis (IN PROGRESS)
 
 6 background agents writing specs to `docs/plans/gap/`:
