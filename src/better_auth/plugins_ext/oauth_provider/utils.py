@@ -257,15 +257,29 @@ def is_safe_url(value: str) -> bool:
 
 def get_jwt_plugin(auth: BetterAuth) -> Any:
     """Return the installed ``jwt`` plugin instance, or raise if absent — TS ``getJwtPlugin``
-    (``jwt_config`` error). The provider is JWT-first; ``disableJwtPlugin`` is unsupported in
-    this port (rejected at plugin init), so the jwt plugin must be present."""
+    (``jwt_config`` error). The provider is JWT-first, so callers on the JWT-enabled path assume
+    it is present; callers must gate this behind ``disable_jwt_plugin`` themselves (the disabled
+    path signs with the client secret and installs no jwt plugin)."""
     plugin = next((p for p in auth.plugins if getattr(p, "id", None) == "jwt"), None)
     if plugin is None:
-        raise ValueError(
-            "oauth-provider requires the jwt plugin to be installed (disableJwtPlugin is "
-            "unsupported in this port)"
-        )
+        raise ValueError("oauth-provider requires the jwt plugin to be installed")
     return plugin
+
+
+def resolve_ctx_secret_config(ctx: Ctx) -> Any:
+    """The versioned ``SecretConfig`` (or plain-string secret) used to encrypt/decrypt stored
+    client secrets — TS ``ctx.context.secretConfig``."""
+    return getattr(ctx.auth, "secret_config", None) or ctx.auth.secret
+
+
+def resolved_issuer(ctx: Ctx, opts: Any) -> str:
+    """id_token / access-token / introspection ``iss`` — TS ``jwtPluginOptions?.jwt?.issuer ??
+    ctx.context.baseURL``. When ``disable_jwt_plugin`` there is no jwt plugin, so the issuer is
+    simply the base URL."""
+    base = f"{ctx.auth.base_url}{ctx.auth.base_path}"
+    if getattr(opts, "disable_jwt_plugin", False):
+        return base
+    return getattr(get_jwt_plugin(ctx.auth), "issuer", None) or base
 
 
 # --- client secret storage (item 8) --------------------------------------------------

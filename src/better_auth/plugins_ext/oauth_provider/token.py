@@ -7,7 +7,8 @@ RFC 9700 §4.14 family teardown on replay). Access tokens are JWT when a validat
 audience is present (signed on the jwt plugin's EdDSA keys), otherwise opaque and stored hashed;
 id tokens carry pinned OIDC claims that custom claims can never override.
 
-The JWT-disabled / HS256 path is not ported (rejected at plugin init) — EdDSA-first.
+When ``disable_jwt_plugin`` is set, access tokens are always opaque and id tokens are HS256-signed
+with the client's decrypted secret (TS token.ts:180); public clients without a secret get none.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl
 
+import jwt as pyjwt
+
 from ...adapters.base import Where
 from ...crypto import generate_random_string
 from ...session import utcnow
@@ -26,13 +29,16 @@ from ..jwt import to_exp_jwt
 from .client_crud import get_client
 from .utils import (
     OAuthError,
+    _decrypt_stored_client_secret,
     basic_to_client_credentials,
     client_allows_grant,
     get_jwt_plugin,
     is_pkce_required,
     normalize_timestamp_value,
     parse_client_metadata,
+    resolve_ctx_secret_config,
     resolve_subject_identifier,
+    resolved_issuer,
     store_token,
     verify_client_secret,
 )
@@ -55,11 +61,10 @@ def _base_url(ctx: Ctx) -> str:
     return f"{ctx.auth.base_url}{ctx.auth.base_path}"
 
 
-def _token_issuer(ctx: Ctx) -> str:
+def _token_issuer(ctx: Ctx, opts: Any) -> str:
     """id_token / access-token ``iss`` — TS ``jwtPluginOptions?.jwt?.issuer ?? ctx.context.baseURL``
-    (unvalidated, unlike the discovery issuer)."""
-    jwt_plugin = get_jwt_plugin(ctx.auth)
-    return getattr(jwt_plugin, "issuer", None) or _base_url(ctx)
+    (unvalidated, unlike the discovery issuer). Base URL when the jwt plugin is disabled."""
+    return resolved_issuer(ctx, opts)
 
 
 def _read_body(ctx: Ctx) -> dict[str, Any]:
@@ -105,7 +110,7 @@ async def validate_client_credentials(
             400, "invalid_client", "public client, client secret should not be received"
         )
     if client_secret and not await verify_client_secret(
-        opts, client["clientSecret"], client_secret
+        opts, client["clientSecret"], client_secret, resolve_ctx_secret_config(ctx)
     ):
         raise OAuthError(401, "invalid_client", "invalid client_secret")
     if scopes and client.get("scopes"):
@@ -206,7 +211,7 @@ async def _create_jwt_access_token(
             "azp": client.get("clientId"),
             "scope": " ".join(scopes),
             "sid": sid,
-            "iss": _token_issuer(ctx),
+            "iss": _token_issuer(ctx, opts),
             "iat": iat,
             "exp": exp,
         }
@@ -257,9 +262,13 @@ async def _create_id_token(
     nonce: str | None,
     session_id: str | None,
     auth_time: datetime | None,
-) -> str:
+) -> str | None:
     """OIDC id_token — TS ``createIdToken``. Custom claims may override ``acr``/``auth_time`` and
-    user claims, but the pinned security claims (iss/sub/aud/nonce/iat/exp/sid) always win."""
+    user claims, but the pinned security claims (iss/sub/aud/nonce/iat/exp/sid) always win.
+
+    Signed EdDSA on the jwt plugin's keys, or HS256 with the client's decrypted secret when
+    ``disable_jwt_plugin``. A public client without a secret gets no id_token (it could not be
+    verified) — returns ``None``."""
     iat = _now_s()
     exp = iat + (getattr(opts, "id_token_expires_in", None) or 36000)
     user_claims = user_normal_claims(user, scopes)
@@ -288,13 +297,23 @@ async def _create_id_token(
         **custom_claims,
     }
     # Pinned claims override any custom-supplied value.
-    payload["iss"] = _token_issuer(ctx)
+    payload["iss"] = _token_issuer(ctx, opts)
     payload["sub"] = resolved_sub
     payload["aud"] = client.get("clientId")
     payload["nonce"] = nonce
     payload["iat"] = iat
     payload["exp"] = exp
     payload["sid"] = session_id if client.get("enableEndSession") else None
+
+    if getattr(opts, "disable_jwt_plugin", False):
+        # HS256 with the client's decrypted secret — TS token.ts:176-191.
+        client_secret = client.get("clientSecret")
+        if not client_secret:  # public client, cannot be verified -> no id_token
+            return None
+        secret = await _decrypt_stored_client_secret(
+            opts.store_client_secret, client_secret, resolve_ctx_secret_config(ctx)
+        )
+        return pyjwt.encode(_strip_none(payload), secret, algorithm="HS256")
 
     jwt_plugin = get_jwt_plugin(ctx.auth)
     return await jwt_plugin.sign_jwt(payload=_strip_none(payload))
@@ -441,7 +460,8 @@ async def create_user_tokens(
             or "offline_access" in scopes
         )
     )
-    is_jwt_access_token = audience is not None  # disable_jwt_plugin rejected at init
+    # JWT access tokens require the jwt plugin — disabled mode is always opaque (TS token.ts:519).
+    is_jwt_access_token = audience is not None and not getattr(opts, "disable_jwt_plugin", False)
     is_id_token = bool(user and "openid" in scopes)
 
     custom_fields_fn = getattr(opts, "custom_token_response_fields", None)

@@ -32,6 +32,7 @@ from .utils import (
     get_jwt_plugin,
     parse_client_metadata,
     resolve_subject_identifier,
+    resolved_issuer,
     store_token,
     verify_jws_access_token,
 )
@@ -47,9 +48,8 @@ def _base_url(ctx: Ctx) -> str:
     return f"{ctx.auth.base_url}{ctx.auth.base_path}"
 
 
-def _issuer(ctx: Ctx) -> str:
-    jwt_plugin = get_jwt_plugin(ctx.auth)
-    return getattr(jwt_plugin, "issuer", None) or _base_url(ctx)
+def _issuer(ctx: Ctx, opts: Any) -> str:
+    return resolved_issuer(ctx, opts)
 
 
 def _epoch(dt: Any) -> int | None:
@@ -75,11 +75,15 @@ class _NotAJwt(Exception):
 async def _validate_jwt_access_token(
     ctx: Ctx, opts: Any, token: str, client_id: str | None
 ) -> dict[str, Any]:
+    # Disabled mode issues no JWT access tokens (opaque only) and installs no JWKS to verify
+    # against, so skip straight to opaque handling — TS introspect.ts:44 (jwtPlugin undefined).
+    if getattr(opts, "disable_jwt_plugin", False):
+        raise _NotAJwt() from None
     jwt_plugin = get_jwt_plugin(ctx.auth)
     audience = getattr(opts, "valid_audiences", None) or _base_url(ctx)
     try:
         payload = await verify_jws_access_token(
-            jwt_plugin, token, audience=audience, issuer=_issuer(ctx)
+            jwt_plugin, token, audience=audience, issuer=_issuer(ctx, opts)
         )
     except JwsAccessTokenExpired:
         return dict(_INACTIVE)
@@ -166,7 +170,7 @@ async def _validate_opaque_access_token(
     return {
         **custom_claims,
         "active": True,
-        "iss": _issuer(ctx),
+        "iss": _issuer(ctx, opts),
         "client_id": access.get("clientId"),
         "sub": user.get("id") if user else None,
         "sid": session_id,
@@ -207,7 +211,7 @@ async def _validate_refresh_token(
     return {
         "active": True,
         "client_id": client_id,
-        "iss": _issuer(ctx),
+        "iss": _issuer(ctx, opts),
         "sub": user.get("id") if user else None,
         "sid": session_id,
         "exp": _epoch(refresh["expiresAt"]),

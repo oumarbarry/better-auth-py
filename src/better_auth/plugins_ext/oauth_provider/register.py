@@ -23,6 +23,7 @@ from .utils import (
     generate_client_secret,
     is_safe_url,
     parse_client_metadata,
+    resolve_ctx_secret_config,
     store_client_secret,
 )
 
@@ -383,7 +384,11 @@ async def create_oauth_client(
 
     client_id = generate_client_id(opts)
     client_secret = None if is_public else generate_client_secret(opts)
-    stored_secret = await store_client_secret(opts, client_secret) if client_secret else None
+    stored_secret = (
+        await store_client_secret(opts, client_secret, resolve_ctx_secret_config(ctx))
+        if client_secret
+        else None
+    )
 
     iat = int(utcnow().timestamp())
     client_reference = getattr(opts, "client_reference", None)

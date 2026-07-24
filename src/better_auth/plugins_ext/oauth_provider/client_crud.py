@@ -26,6 +26,7 @@ from .utils import (
     OAuthError,
     apply_client_secret_prefix,
     generate_client_secret,
+    resolve_ctx_secret_config,
     store_client_secret,
     verify_oauth_query_params,
 )
@@ -231,7 +232,7 @@ async def rotate_client_secret_endpoint(ctx: Ctx, opts: Any) -> dict[str, Any]:
         raise OAuthError(400, "invalid_client", "public clients cannot be updated")
 
     client_secret = generate_client_secret(opts)
-    stored_secret = await store_client_secret(opts, client_secret)
+    stored_secret = await store_client_secret(opts, client_secret, resolve_ctx_secret_config(ctx))
     updated = await ctx.adapter.update(
         "oauthClient",
         [Where("clientId", client_id)],

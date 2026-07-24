@@ -724,6 +724,9 @@ finalize consistency tests in D.
    `NotImplementedError`). **Default: ship EdDSA-only, JWT-enabled path first** (the documented default);
    HS256/`disableJwtPlugin` and non-EdDSA JWKS become a follow-up. Flag `disableJwtPlugin=true` and
    `keyPairConfig.alg != "EdDSA"` as unsupported at plugin init with a clear error.
+   **RESOLVED 2026-07-24 (backlog B2+B6):** SecretConfig landed, then `disableJwtPlugin` mode
+   fully ported (HS256 id tokens, encrypted secrets end-to-end, opaque-only access tokens,
+   discovery/introspect/end-session branches). Non-EdDSA JWKS algs remain the only deferral.
 
 2. **Versioned-secret (`secretConfig`) client-secret encryption.** TS `storeClientSecret: "encrypted"`
    uses `ctx.context.secretConfig` (key rotation). The port's `symmetric_encrypt` has only the plain-

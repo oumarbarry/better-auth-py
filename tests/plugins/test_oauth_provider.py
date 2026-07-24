@@ -33,9 +33,10 @@ def provider_client(**kwargs):
 # --- init guards (oauth.ts:71-178) ---------------------------------------------------
 
 
-def test_disable_jwt_plugin_rejected_at_init():
-    with pytest.raises(NotImplementedError):
-        OAuthProviderPlugin(disable_jwt_plugin=True)
+def test_disable_jwt_plugin_allowed_default_store_encrypted():
+    # disable_jwt_plugin is supported; its default secret storage is "encrypted"
+    # (see test_oauth_provider_disable_jwt.py for the HS256 end-to-end flow).
+    assert OAuthProviderPlugin(disable_jwt_plugin=True).store_client_secret == "encrypted"
 
 
 def test_encrypted_secret_storage_rejected_at_init():

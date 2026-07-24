@@ -29,6 +29,7 @@ from .utils import (
     OAuthError,
     basic_to_client_credentials,
     get_jwt_plugin,
+    resolved_issuer,
     store_token,
     verify_jws_access_token,
 )
@@ -38,17 +39,22 @@ def _base_url(ctx: Ctx) -> str:
     return f"{ctx.auth.base_url}{ctx.auth.base_path}"
 
 
-def _issuer(ctx: Ctx) -> str:
-    return getattr(get_jwt_plugin(ctx.auth), "issuer", None) or _base_url(ctx)
+def _issuer(ctx: Ctx, opts: Any) -> str:
+    return resolved_issuer(ctx, opts)
 
 
 async def _revoke_jwt_access_token(ctx: Ctx, opts: Any, token: str) -> None:
     """Verify a JWT access token against the JWKS — a successful verify is a no-op (a JWT is not
     stored server-side, so there is nothing to delete). TS ``revokeJwtAccessToken``."""
+    # Disabled mode issues no JWT access tokens and has no JWKS — fall through to opaque.
+    if getattr(opts, "disable_jwt_plugin", False):
+        raise OAuthError(400, "invalid_request", "invalid JWT signature")
     jwt_plugin = get_jwt_plugin(ctx.auth)
     audience = getattr(opts, "valid_audiences", None) or _base_url(ctx)
     try:
-        await verify_jws_access_token(jwt_plugin, token, audience=audience, issuer=_issuer(ctx))
+        await verify_jws_access_token(
+            jwt_plugin, token, audience=audience, issuer=_issuer(ctx, opts)
+        )
     except JwsAccessTokenInvalid:
         # Likely an opaque token — fall through to opaque handling.
         raise OAuthError(400, "invalid_request", "invalid JWT signature") from None

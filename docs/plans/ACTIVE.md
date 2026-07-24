@@ -79,11 +79,18 @@ priority, or release chores (version bump, CHANGELOG).
       consume-atomic :1249, ponytail-noted). disableCleanup NOT ported —
       port never had the expired-row sweep it disables (noted).
       DB-default path behaviorally identical (full suite green).
-- [ ] B6 HS256/disableJwtPlugin mode: DISPATCHED (Opus xhigh). Owns
-      oauth_provider/ + its tests. Lifts the last EdDSA-first init
-      restriction: HS256 id tokens w/ decrypted client secret, encrypted
-      secrets reachable end-to-end, secret_config threaded into call
-      sites, discovery w/o jwks_uri.
+- [x] B6 HS256/disableJwtPlugin mode: DONE, validated (16 new tests, 208
+      oauth-provider+jwt green, full suite 1873/clean/clean after Fable's
+      1-line ty narrowing; live-IDE _issuer errors were stale — CLI ty
+      clean, paths test-covered). Full truth table (encrypted default when
+      disabled, hashed rejected), HS256 id_token with decrypted secret
+      (token.ts:176-195), opaque-only access (token.ts:519), introspect/
+      revoke skip-to-opaque (introspect.ts:44), end-session HS256
+      (logout.ts:86-107), secret_config threaded into create/rotate/
+      validate call sites (7cafaa1 ponytail notes resolved). Agent
+      root-cause-fixed revoke.py (sibling caller, unenumerated — correct).
+      Spec 07 OQ1 annotated RESOLVED. Remaining deferral: non-EdDSA JWKS
+      algs only.
 - [x] B7 plugin IP call-site audit: DONE, validated (156 tests green incl.
       6 new; Fable re-ran gate + confirmed routing in code). All 3 sites
       were getIp consumers in TS (admin via internal-adapter.ts:349,

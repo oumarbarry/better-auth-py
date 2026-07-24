@@ -5,10 +5,11 @@ discovery documents, and jwt-plugin wiring. Ports TS ``packages/oauth-provider/s
 (``oauth.ts`` factory/init/onRequest, ``register.ts``, ``oauthClient/``, ``metadata.ts``,
 ``signed-query.ts``, ``utils/index.ts``, ``schema.ts``) at v1.6.23.
 
-Phase A scope: gap items 1-4, 6, 7-10. The authorization/token/introspection/userinfo/logout
-flows are later phases. BINDING DECISIONS enforced at init: EdDSA-first (``disable_jwt_plugin``
-and non-EdDSA jwt keys rejected); ``store_client_secret`` supports ``"hashed"`` (default) +
-custom ``{hash, verify}`` only (``"encrypted"`` blocked).
+Two signing modes: the default JWT-enabled path signs id/access tokens with the ``jwt`` plugin's
+EdDSA keys (non-EdDSA algs rejected at init); ``disable_jwt_plugin=True`` installs no jwt plugin
+and instead HS256-signs id tokens with each client's secret, storing client secrets ENCRYPTED at
+rest (recoverable) rather than hashed. The init truth table (oauth.ts:157-178) enforces the
+pairing: jwt-disabled rejects hashed/{hash} secrets, jwt-enabled rejects encrypted/{encrypt}.
 """
 
 from __future__ import annotations
@@ -133,26 +134,28 @@ class OAuthProviderPlugin(Plugin):
         silence_warnings: dict[str, Any] | None = None,
         rate_limit: dict[str, Any] | None = None,
     ) -> None:
-        # BINDING DECISION: EdDSA-first — the JWT-disabled path (HS256 id tokens, encrypted
-        # client secrets) is not ported.
-        if disable_jwt_plugin:
-            raise NotImplementedError(
-                "oauth-provider: disable_jwt_plugin=True is not supported in this port "
-                "(EdDSA-first; the HS256/encrypted-secret path is a follow-up)."
-            )
+        # Resolve the storeClientSecret default — TS oauth.ts:130: encrypted when the jwt plugin
+        # is disabled (id tokens are HS256-signed WITH the secret, so it must be recoverable),
+        # hashed otherwise. An explicit value overrides.
+        if store_client_secret is None:
+            store_client_secret = "encrypted" if disable_jwt_plugin else "hashed"
 
         # Init guard truth table — TS oauth.ts:157-178.
-        #   disableJwtPlugin && (hashed | {hash})       -> throw  (id tokens signed with secret)
+        #   disableJwtPlugin && (hashed | {hash})                -> throw  (secret unrecoverable)
         #   !disableJwtPlugin && (encrypted | {encrypt|decrypt}) -> throw  (use hashed/hash)
-        # The first branch is subsumed by the EdDSA-first `disable_jwt_plugin` rejection above
-        # (it always fires first with NotImplementedError), so only the second branch is live
-        # here. With the jwt plugin enabled, "encrypted"/{encrypt,decrypt} are therefore never
-        # selectable via init; the store/verify utils still support them at the function level.
-        # ponytail: the hashed+jwt-disabled branch is dead while disable_jwt_plugin is rejected;
-        # restore it verbatim when the HS256/disable_jwt path lands.
-        if store_client_secret == "encrypted" or (
-            isinstance(store_client_secret, dict)
-            and ("encrypt" in store_client_secret or "decrypt" in store_client_secret)
+        if disable_jwt_plugin and (
+            store_client_secret == "hashed"
+            or (isinstance(store_client_secret, dict) and "hash" in store_client_secret)
+        ):
+            raise ValueError(
+                "unable to store hashed secrets because id tokens will be signed with secret"
+            )
+        if not disable_jwt_plugin and (
+            store_client_secret == "encrypted"
+            or (
+                isinstance(store_client_secret, dict)
+                and ("encrypt" in store_client_secret or "decrypt" in store_client_secret)
+            )
         ):
             raise ValueError(
                 "encryption method not recommended, please use 'hashed' or the 'hash' function"
@@ -233,7 +236,9 @@ class OAuthProviderPlugin(Plugin):
 
     def init(self, auth: BetterAuth) -> None:
         self._auth = auth
-        # jwt plugin is required (disable_jwt_plugin is rejected in __init__).
+        # The disabled path signs with the client secret (HS256) and installs no jwt plugin.
+        if self.disable_jwt_plugin:
+            return
         jwt_plugin = get_jwt_plugin(auth)
         alg = (getattr(jwt_plugin, "key_pair_config", None) or {}).get("alg", "EdDSA")
         if alg != "EdDSA":
@@ -484,8 +489,11 @@ class OAuthProviderPlugin(Plugin):
     # --- discovery well-known router (onRequest) ------------------------------------
 
     def _issuer_path(self) -> str:
-        jwt_plugin = get_jwt_plugin(self.auth)
-        issuer = getattr(jwt_plugin, "issuer", None) or f"{self.auth.base_url}{self.auth.base_path}"
+        base = f"{self.auth.base_url}{self.auth.base_path}"
+        if self.disable_jwt_plugin:
+            issuer = base
+        else:
+            issuer = getattr(get_jwt_plugin(self.auth), "issuer", None) or base
         try:
             return urlsplit(issuer).path.rstrip("/")
         except ValueError:

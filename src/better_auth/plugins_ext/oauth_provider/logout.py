@@ -3,9 +3,10 @@
 Port of TS ``packages/oauth-provider/src/logout.ts`` (v1.6.23). Query ``{id_token_hint (required),
 client_id?, post_logout_redirect_uri?, state?}``. The client is resolved from ``client_id`` or the
 ``id_token_hint`` audience; it must exist, be enabled, and have ``enable_end_session``. The id_token
-is signature-verified against the jwt plugin's EdDSA JWKS (the HS256/``disable_jwt_plugin`` path is
-rejected at init and not built), then ``iss`` and ``aud`` are checked manually. The session named by
-the id_token's ``sid`` is deleted, and — only when ``post_logout_redirect_uri`` exactly matches a
+is signature-verified against the jwt plugin's EdDSA JWKS — or HS256 with the resolved client's
+decrypted secret when ``disable_jwt_plugin`` — then ``iss`` and ``aud`` are checked manually. The
+session named by the id_token's ``sid`` is deleted, and — only when ``post_logout_redirect_uri``
+exactly matches a
 registered ``postLogoutRedirectUris`` entry — the UA is redirected there with ``state`` appended.
 """
 
@@ -20,10 +21,13 @@ from ...types import Ctx
 from .client_crud import get_client
 from .utils import (
     OAuthError,
+    _decrypt_stored_client_secret,
     _load_verify_keys,
     get_jwt_plugin,
     handle_redirect,
     is_safe_url,
+    resolve_ctx_secret_config,
+    resolved_issuer,
 )
 
 
@@ -31,13 +35,33 @@ def _base_url(ctx: Ctx) -> str:
     return f"{ctx.auth.base_url}{ctx.auth.base_path}"
 
 
-def _issuer(ctx: Ctx) -> str:
-    return getattr(get_jwt_plugin(ctx.auth), "issuer", None) or _base_url(ctx)
+def _issuer(ctx: Ctx, opts: Any) -> str:
+    return resolved_issuer(ctx, opts)
 
 
-async def _verify_id_token_signature(ctx: Ctx, token: str) -> dict[str, Any]:
-    """Signature-only verification against the jwt plugin's local EdDSA keys (TS
-    ``compactVerify`` — claims are checked manually by the caller)."""
+async def _verify_id_token_signature(
+    ctx: Ctx, opts: Any, client: dict[str, Any], token: str
+) -> dict[str, Any]:
+    """Signature-only verification (claims are checked manually by the caller — TS
+    ``compactVerify``). EdDSA against the jwt plugin's local keys, or HS256 with the resolved
+    client's decrypted secret when ``disable_jwt_plugin`` (TS logout.ts:86-107)."""
+    if getattr(opts, "disable_jwt_plugin", False):
+        client_secret = client.get("clientSecret")
+        if not client_secret:
+            raise OAuthError(401, "invalid_client", "missing required credentials")
+        secret = await _decrypt_stored_client_secret(
+            opts.store_client_secret, client_secret, resolve_ctx_secret_config(ctx)
+        )
+        try:
+            return pyjwt.decode(
+                token,
+                secret,
+                algorithms=["HS256"],
+                options={"verify_aud": False, "verify_exp": False, "verify_iss": False},
+            )
+        except Exception as exc:
+            raise OAuthError(401, "invalid_token", "invalid id token") from exc
+
     jwt_plugin = get_jwt_plugin(ctx.auth)
     try:
         header = pyjwt.get_unverified_header(token)
@@ -91,9 +115,9 @@ async def rp_initiated_logout_endpoint(ctx: Ctx, opts: Any):
     if not client.get("enableEndSession"):
         raise OAuthError(401, "invalid_client", "client unable to logout")
 
-    id_token_payload = await _verify_id_token_signature(ctx, id_token_hint)
+    id_token_payload = await _verify_id_token_signature(ctx, opts, client, id_token_hint)
 
-    if _issuer(ctx) != id_token_payload.get("iss"):
+    if _issuer(ctx, opts) != id_token_payload.get("iss"):
         raise OAuthError(500, "invalid_request", "invalid issuer")
 
     aud = id_token_payload.get("aud")

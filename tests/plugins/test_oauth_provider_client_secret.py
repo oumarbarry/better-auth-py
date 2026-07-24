@@ -2,10 +2,9 @@
 
 Ports TS ``packages/oauth-provider/src/utils/index.ts:237-338`` (storeClientSecret /
 verifyStoredClientSecret / decryptStoredClientSecret) and the init guard truth table at
-``oauth.ts:157-178``. In this port ``disable_jwt_plugin=True`` is rejected outright
-(EdDSA-first), so the ``"encrypted"`` literal is never selectable via plugin init; the
-store/verify utils support it (and custom {encrypt,decrypt}) at the function level, which
-is what these tests exercise.
+``oauth.ts:157-178``. ``"encrypted"`` is the default and only permitted storage when
+``disable_jwt_plugin=True`` (see test_oauth_provider_disable_jwt.py for the end-to-end flow);
+these tests exercise the store/verify util round-trips directly.
 """
 
 from __future__ import annotations
@@ -25,8 +24,8 @@ from better_auth.plugins_ext.oauth_provider.utils import (
 
 
 def test_hashed_with_jwt_disabled_rejected():
-    # disableJwtPlugin && hashed -> throw (subsumed by the EdDSA-first disable_jwt reject)
-    with pytest.raises((ValueError, NotImplementedError)):
+    # disableJwtPlugin && hashed -> throw (id tokens are HS256-signed with the secret)
+    with pytest.raises(ValueError, match="id tokens will be signed with secret"):
         OAuthProviderPlugin(disable_jwt_plugin=True, store_client_secret="hashed")
 
 
