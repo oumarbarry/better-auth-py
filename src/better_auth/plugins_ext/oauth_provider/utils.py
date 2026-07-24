@@ -11,13 +11,18 @@ from __future__ import annotations
 import inspect
 import ipaddress
 import json
+import weakref
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote_plus, urlencode, urlsplit
 
+import jwt as pyjwt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from ...crypto import (
     _constant_time_equal,
     _signature,
+    b64url_decode_nopad,
     default_key_hasher,
     generate_random_string,
 )
@@ -467,3 +472,95 @@ def parse_client_metadata(metadata: str | dict | None) -> dict | None:
         except ValueError:
             return None
     return metadata
+
+
+# --- pairwise subject identifier (utils/index.ts:564-609) ----------------------------
+
+
+def resolve_subject_identifier(client: dict[str, Any], opts: Any, user_id: str) -> str:
+    """Return the subject identifier for a user+client pair — TS ``resolveSubjectIdentifier``.
+    Pairwise (``sub = makeSignature(f"{sectorHost}.{userId}", pairwiseSecret)``, sector = host of
+    the first redirect_uri) only when the client opts in AND the server has ``pairwise_secret``;
+    otherwise the real ``user.id``."""
+    secret = getattr(opts, "pairwise_secret", None)
+    if client.get("subjectType") == "pairwise" and secret:
+        uris = client.get("redirectUris") or []
+        if not uris:
+            raise ValueError("Client has no redirect URIs for sector identifier")
+        sector = urlsplit(uris[0]).netloc
+        return make_signature(f"{sector}.{user_id}", secret)
+    return user_id
+
+
+# --- server-side JWT-access-token verify (item 5) ------------------------------------
+
+
+class JwsAccessTokenInvalid(Exception):
+    """The token is not a verifiable JWS (bad structure / signature / unknown key). The caller
+    falls through to opaque-token handling — TS ``JWSInvalid``/``TypeError`` path."""
+
+
+class JwsAccessTokenExpired(Exception):
+    """A cryptographically valid but expired access token — introspection reports it inactive
+    rather than erroring (OAuth semantics; TS ``JWTExpired``)."""
+
+
+class JwsAccessTokenClaimInvalid(Exception):
+    """Signature verified but issuer/audience mismatch — inactive (TS ``JWTInvalid``)."""
+
+
+#: Instance-keyed cache of verify keys ({kid: Ed25519PublicKey}) so repeated introspections
+#: read the signing keys once per jwt-plugin instance (TS ``jwksCacheKey: jwtPlugin``).
+_verify_key_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+async def _load_verify_keys(jwt_plugin: Any, *, refresh: bool = False) -> dict[str, Any]:
+    cache = None if refresh else _verify_key_cache.get(jwt_plugin)
+    if cache is None:
+        cache = {}
+        for key in await jwt_plugin._get_all_keys():
+            public_jwk = json.loads(key["publicKey"])
+            cache[key["id"]] = Ed25519PublicKey.from_public_bytes(
+                b64url_decode_nopad(public_jwk["x"])
+            )
+        _verify_key_cache[jwt_plugin] = cache
+    return cache
+
+
+async def verify_jws_access_token(
+    jwt_plugin: Any,
+    token: str,
+    *,
+    audience: str | list[str],
+    issuer: str,
+) -> dict[str, Any]:
+    """Verify an OAuth JWT access token against the jwt plugin's local signing keys with OAuth
+    semantics — TS ``verifyJwsAccessToken``. Raises :class:`JwsAccessTokenInvalid` (structural /
+    signature failure -> try opaque), :class:`JwsAccessTokenExpired`, or
+    :class:`JwsAccessTokenClaimInvalid` (iss/aud mismatch). The ``azp`` client-binding gate is
+    enforced by the caller, not here."""
+    try:
+        header = pyjwt.get_unverified_header(token)
+    except Exception as exc:  # not a JWT at all
+        raise JwsAccessTokenInvalid(str(exc)) from exc
+    kid = header.get("kid")
+    if not kid:
+        raise JwsAccessTokenInvalid("missing kid")
+
+    keys = await _load_verify_keys(jwt_plugin)
+    public_key = keys.get(kid)
+    if public_key is None:  # key rotated in since last cache -> refetch once
+        keys = await _load_verify_keys(jwt_plugin, refresh=True)
+        public_key = keys.get(kid)
+    if public_key is None:
+        raise JwsAccessTokenInvalid("unknown kid")
+
+    auds = list(audience) if isinstance(audience, (list, tuple)) else [audience]
+    try:
+        return pyjwt.decode(token, public_key, algorithms=["EdDSA"], audience=auds, issuer=issuer)
+    except pyjwt.ExpiredSignatureError as exc:
+        raise JwsAccessTokenExpired() from exc
+    except (pyjwt.InvalidAudienceError, pyjwt.InvalidIssuerError) as exc:
+        raise JwsAccessTokenClaimInvalid() from exc
+    except Exception as exc:  # bad signature / malformed -> likely an opaque token
+        raise JwsAccessTokenInvalid(str(exc)) from exc

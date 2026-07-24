@@ -281,14 +281,25 @@ origin check (W1). Straight to plugins.
       no cross-request oAuthState store (authorize.ts:212 skip, noted);
       after-hook copies login Set-Cookie onto resume redirect (port
       replaces response wholesale).
-      Phase C DISPATCHED 2026-07-24 (Opus xhigh, background): token
-      endpoint 3 grants, createUserTokens (JWT/opaque/id_token), refresh
-      rotation CAS + family teardown, verify_jws_access_token (azp gate),
-      introspection, pairwise sub. Then Phase D (userinfo/revoke/logout).
+      Phase C DONE, validated (31 new tests; Fable ran the FULL whole-tree
+      gate — first time all agents landed: 1756 pass, ruff clean, ty clean
+      after a 1-line assert fix in test_sso_callback seeded by W6; TS
+      spot-checks: rotation CAS where revoked=null exact, replay →
+      invalidateRefreshFamily + invalid_grant token.ts:1070-1075,
+      family teardown = findMany+delete matches agent's delete_many).
+      3 grants + createUserTokens + verify_jws_access_token (azp gate,
+      WeakKey instance cache) + introspection + pairwise sub. Ponytail:
+      family teardown two non-atomic delete_many (== TS TODO); single
+      resource param only; concurrent-code loser 401 == TS UNAUTHORIZED.
+      Revoke CAS deferred to Phase D per spec option. One connection drop,
+      resumed via SendMessage without rework.
+      NEXT: Phase D (userinfo + revocation + end-session + pairwise
+      finalization, items 19-20), then W5-D open-api decision.
 - [ ] W5-D: open-api — decide at end of wave (needs route-metadata registry;
       deferred since Wave 3).
 
-## Wave 6 — Ecosystem (USER-CONFIRMED 2026-07-24)
+## Wave 6 — Ecosystem (USER-CONFIRMED 2026-07-24) — COMPLETE 2026-07-24
+(api-key 0b2686d, passkey 0cf1b65, sso-OIDC c78ffb3+d6a75bd. All validated.)
 - [ ] W6-specs: gap specs 08-api-key / 09-passkey / 10-sso-oidc (format of 07)
       DISPATCHED 2026-07-24 (3 Opus high agents, parallel, docs-only — no code
       conflict with W5-C-A). 08-api-key DELIVERED+VALIDATED (621 lines; Fable

@@ -38,6 +38,7 @@ from .consent_crud import (
     get_consents_endpoint,
     update_consent_endpoint,
 )
+from .introspect import introspect_endpoint
 from .metadata import (
     build_auth_server_metadata,
     build_oidc_server_metadata,
@@ -52,6 +53,7 @@ from .signed_query import (
     get_signed_query_issued_at,
     parse_query,
 )
+from .token import token_endpoint
 from .utils import (
     OAuthError,
     get_jwt_plugin,
@@ -249,6 +251,8 @@ class OAuthProviderPlugin(Plugin):
             ("POST", "/oauth2/client/rotate-secret", self._rotate),
             ("POST", "/oauth2/delete-client", self._delete),
             ("GET", "/oauth2/authorize", self._authorize),
+            ("POST", "/oauth2/token", self._token),
+            ("POST", "/oauth2/introspect", self._introspect),
             ("POST", "/oauth2/consent", self._consent),
             ("POST", "/oauth2/continue", self._continue),
             ("GET", "/oauth2/get-consent", self._get_consent),
@@ -263,6 +267,8 @@ class OAuthProviderPlugin(Plugin):
         for path, defaults in (
             ("/oauth2/register", (60, 5)),
             ("/oauth2/authorize", (60, 30)),
+            ("/oauth2/token", (60, 20)),
+            ("/oauth2/introspect", (60, 100)),
         ):
             cfg = (self.rate_limit_config or {}).get(path.rsplit("/", 1)[-1])
             if cfg is False:
@@ -392,6 +398,12 @@ class OAuthProviderPlugin(Plugin):
 
     async def _authorize(self, ctx: Ctx) -> AuthResponse:
         return await authorize_endpoint(ctx, self, dict(ctx.request.query), {"isAuthorize": True})
+
+    async def _token(self, ctx: Ctx) -> AuthResponse:
+        return await token_endpoint(ctx, self)
+
+    async def _introspect(self, ctx: Ctx) -> Any:
+        return await introspect_endpoint(ctx, self)
 
     async def _run_authorize(
         self, ctx: Ctx, query: dict[str, Any], settings: dict[str, Any]

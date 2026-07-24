@@ -266,6 +266,7 @@ async def _seed_local_user(auth: BetterAuth, *, email: str, email_verified: bool
     row = await auth.internal.create_user(
         {"email": email, "name": "Existing", "emailVerified": email_verified}
     )
+    assert row is not None
     return row["id"]
 
 
