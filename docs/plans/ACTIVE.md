@@ -269,8 +269,19 @@ origin check (W1). Straight to plugins.
       decisions. Ponytail deviations: no trusted-client TTL cache;
       _to_exp_seconds int-only (no "30d" strings); SERVER_ONLY endpoints =
       unmounted methods (email-otp precedent); login/consent pages stored
-      unused until Phase B. NEXT: dispatch Phase B (authorize + consent +
-      signed-query resume, items 5-partial/11-13).
+      unused until Phase B.
+      Phase B DONE, validated (37 new tests, 116 scoped total; Fable re-ran
+      gate green + code-verified the two subtle security gates:
+      _session_satisfies_login_prompt >= ba_iat with None→False, and
+      post_login_cleared requires signed-query-derived marker == current
+      session id — client postLogin:true only selects the branch).
+      /oauth2/authorize 10-step flow, consent/continue, consent CRUD,
+      signed-query before/after hooks wired, authorize {60,30} rate rule.
+      Ponytail deviations: request state on Ctx (no defineRequestState);
+      no cross-request oAuthState store (authorize.ts:212 skip, noted);
+      after-hook copies login Set-Cookie onto resume redirect (port
+      replaces response wholesale). NEXT: Phase C (token grants +
+      introspection, items 5/14-18 — crypto+concurrency core), then D.
 - [ ] W5-D: open-api — decide at end of wave (needs route-metadata registry;
       deferred since Wave 3).
 
@@ -342,6 +353,11 @@ origin check (W1). Straight to plugins.
       (domain-verification endpoints + org auto-assign): ensure_runtime_
       discovery, verification_identifier, domainVerified column,
       has_org_plugin. Export wired by Fable (+ RUF022 __all__ sort fix).
+- [ ] W6 sso-OIDC waves C+D: DISPATCHED 2026-07-24 (Opus high, background).
+      Owns plugins_ext/sso/ + test_sso*.py + oauth/flow.py (minimal
+      handle_oauth_user_info trust-flag extension — defaults preserve
+      existing callers). WIDER gate mandated (full suite minus phase-B-owned
+      oauth_provider tests, baseline 1595) since flow.py is shared.
 - [ ] W6 impl DISPATCHED 2026-07-24 (3 Opus high agents, parallel, in-tree):
       api-key (plugins_ext/api_key.py), passkey (plugins_ext/passkey.py),
       sso-OIDC waves A+B (plugins_ext/sso/ — schema/CRUD/SSRF/discovery/

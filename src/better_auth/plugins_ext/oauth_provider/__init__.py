@@ -14,11 +14,12 @@ custom ``{hash, verify}`` only (``"encrypted"`` blocked).
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar
-from urllib.parse import urlsplit
+from urllib.parse import quote_plus, urlencode, urlsplit
 
-from ...plugins import Plugin, RateLimitRule, Route
+from ...plugins import HookSet, Plugin, PluginHook, RateLimitRule, Route
 from ...schema import Schema
 from ...types import APIError, AuthResponse, Ctx
+from .authorize import authorize_endpoint, get_oauth_state, set_oauth_state
 from .client_crud import (
     admin_create_client_endpoint,
     create_client_endpoint,
@@ -30,14 +31,34 @@ from .client_crud import (
     rotate_client_secret_endpoint,
     update_client_endpoint,
 )
+from .consent import consent_endpoint
+from .consent_crud import (
+    delete_consent_endpoint,
+    get_consent_endpoint,
+    get_consents_endpoint,
+    update_consent_endpoint,
+)
 from .metadata import (
     build_auth_server_metadata,
     build_oidc_server_metadata,
     metadata_response,
 )
+from .oauth_continue import continue_endpoint  # `continue` is a reserved word -> oauth_continue
 from .register import register_endpoint
 from .schema import OAUTH_PROVIDER_SCHEMA
-from .utils import OAuthError, get_jwt_plugin
+from .signed_query import (
+    POST_LOGIN_CLEARED_PARAM,
+    SIGNED_QUERY_ISSUED_AT_PARAM,
+    get_signed_query_issued_at,
+    parse_query,
+)
+from .utils import (
+    OAuthError,
+    get_jwt_plugin,
+    remove_prompt_from_query,
+    search_params_to_query,
+    verify_oauth_query_params,
+)
 
 if TYPE_CHECKING:
     from ...auth import BetterAuth
@@ -227,16 +248,103 @@ class OAuthProviderPlugin(Plugin):
             ("POST", "/oauth2/update-client", self._update_client),
             ("POST", "/oauth2/client/rotate-secret", self._rotate),
             ("POST", "/oauth2/delete-client", self._delete),
+            ("GET", "/oauth2/authorize", self._authorize),
+            ("POST", "/oauth2/consent", self._consent),
+            ("POST", "/oauth2/continue", self._continue),
+            ("GET", "/oauth2/get-consent", self._get_consent),
+            ("GET", "/oauth2/get-consents", self._get_consents),
+            ("POST", "/oauth2/update-consent", self._update_consent),
+            ("POST", "/oauth2/delete-consent", self._delete_consent),
         ]
         return [(method, path, self._oauth_guard(handler)) for method, path, handler in raw]
 
     def rate_limit(self) -> list[RateLimitRule]:
-        cfg = (self.rate_limit_config or {}).get("register")
-        if cfg is False:
-            return []
-        window = (cfg or {}).get("window", 60)
-        max_requests = (cfg or {}).get("max", 5)
-        return [RateLimitRule(window, max_requests, lambda p: p == "/oauth2/register")]
+        rules: list[RateLimitRule] = []
+        for path, defaults in (
+            ("/oauth2/register", (60, 5)),
+            ("/oauth2/authorize", (60, 30)),
+        ):
+            cfg = (self.rate_limit_config or {}).get(path.rsplit("/", 1)[-1])
+            if cfg is False:
+                continue
+            window = (cfg or {}).get("window", defaults[0])
+            max_requests = (cfg or {}).get("max", defaults[1])
+            rules.append(RateLimitRule(window, max_requests, lambda p, _p=path: p == _p))
+        return rules
+
+    # --- signed-query resume hooks (TS oauth.ts:481-580) ----------------------------
+
+    def hooks(self) -> HookSet:
+        return HookSet(
+            before=[PluginHook(self._has_oauth_query, self._before_stash_oauth_query)],
+            after=[PluginHook(self._session_was_set, self._after_resume_authorize)],
+        )
+
+    def _has_oauth_query(self, ctx: Ctx) -> bool:
+        try:
+            return bool(ctx.body().get("oauth_query"))
+        except Exception:
+            return False
+
+    async def _before_stash_oauth_query(self, ctx: Ctx) -> AuthResponse | None:
+        query = ctx.body()["oauth_query"]
+        if not verify_oauth_query_params(query, self.auth.secret):
+            return AuthResponse(status=400, body={"error": "invalid_signature"})
+        issued_at = get_signed_query_issued_at(query)
+        pairs = parse_query(query)
+        post_login_cleared = next(
+            (v for k, v in pairs if k == POST_LOGIN_CLEARED_PARAM), None
+        )
+        reserved = {"sig", "exp", SIGNED_QUERY_ISSUED_AT_PARAM, POST_LOGIN_CLEARED_PARAM}
+        stripped = [(k, v) for k, v in pairs if k not in reserved]
+        stripped_query = urlencode(stripped, quote_via=quote_plus)
+        set_oauth_state(
+            ctx,
+            {
+                "query": stripped_query,
+                "signed_query_issued_at": issued_at,
+                "post_login_cleared_for_session": post_login_cleared,
+            },
+        )
+        # /sign-in/social + /sign-in/oauth2 carry the query through the provider round-trip.
+        if ctx.request.path in ("/sign-in/social", "/sign-in/oauth2"):
+            body = ctx.body()
+            additional = body.get("additionalData")
+            if isinstance(additional, dict) and additional.get("query"):
+                return None
+            if not isinstance(additional, dict):
+                body["additionalData"] = additional = {}
+            additional["query"] = stripped_query
+        return None
+
+    def _session_was_set(self, ctx: Ctx) -> bool:
+        return ctx.new_session is not None
+
+    async def _after_resume_authorize(self, ctx: Ctx) -> AuthResponse | None:
+        state = get_oauth_state(ctx)
+        stashed = state.get("query") if state else None
+        if not stashed:
+            return None
+        # Make the freshly created session visible to authorize's session lookup
+        # (TS sets ctx.context.session from the just-set session cookie).
+        ctx._session = ctx.new_session
+        ctx._session_loaded = True
+        headers = ctx.request.headers
+        sec = (headers.get("sec-fetch-mode") or "").lower()
+        accept = (headers.get("accept") or "").lower()
+        is_navigation = sec == "navigate" or (
+            not sec and ("text/html" in accept or "application/xhtml+xml" in accept)
+        )
+        if not is_navigation:
+            headers["accept"] = "application/json"
+        pairs = remove_prompt_from_query(parse_query(stashed), "login")
+        result = await authorize_endpoint(ctx, self, search_params_to_query(pairs), {})
+        # Preserve the login's Set-Cookie headers on the resume redirect — replacing the
+        # sign-in response wholesale would otherwise drop the freshly issued session cookie.
+        if isinstance(result, AuthResponse) and ctx.response is not None:
+            cookies = [(k, v) for k, v in ctx.response.headers if k.lower() == "set-cookie"]
+            result.headers = cookies + result.headers
+        return result
 
     def _oauth_guard(self, handler: Any) -> Any:
         async def wrapped(ctx: Ctx) -> Any:
@@ -279,6 +387,34 @@ class OAuthProviderPlugin(Plugin):
 
     async def _delete(self, ctx: Ctx) -> AuthResponse:
         return await delete_client_endpoint(ctx, self)
+
+    # --- authorization + consent + continue -----------------------------------------
+
+    async def _authorize(self, ctx: Ctx) -> AuthResponse:
+        return await authorize_endpoint(ctx, self, dict(ctx.request.query), {"isAuthorize": True})
+
+    async def _run_authorize(
+        self, ctx: Ctx, query: dict[str, Any], settings: dict[str, Any]
+    ) -> Any:
+        return await authorize_endpoint(ctx, self, query, settings)
+
+    async def _consent(self, ctx: Ctx) -> Any:
+        return await consent_endpoint(ctx, self, self._run_authorize)
+
+    async def _continue(self, ctx: Ctx) -> Any:
+        return await continue_endpoint(ctx, self, self._run_authorize)
+
+    async def _get_consent(self, ctx: Ctx) -> Any:
+        return await get_consent_endpoint(ctx, self)
+
+    async def _get_consents(self, ctx: Ctx) -> Any:
+        return await get_consents_endpoint(ctx, self)
+
+    async def _update_consent(self, ctx: Ctx) -> Any:
+        return await update_consent_endpoint(ctx, self)
+
+    async def _delete_consent(self, ctx: Ctx) -> Any:
+        return await delete_consent_endpoint(ctx, self)
 
     # --- SERVER_ONLY endpoints (plain methods; not mounted on the HTTP router) -------
 
