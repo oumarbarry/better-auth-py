@@ -259,8 +259,18 @@ origin check (W1). Straight to plugins.
       NEXT: dispatch W5-C phase A (clients + discovery + JWKS) per the spec.
 - [ ] W5-C: oauth-provider package subset (XL, replaces deprecated
       oidc-provider/mcp per decision log; sub-phase like organization).
-      Phase A (items 1-4,6,7-10: helpers + client schema/CRUD/DCR + discovery)
-      DISPATCHED 2026-07-24 (Opus xhigh, background).
+      Phase A DONE, validated (49 tests; Fable re-ran scoped gate + suite
+      minus sibling WIP = 1478 green = 1399 base + 49 + 30 passkey, zero
+      regressions; spot-checked: on_request fires before router 404
+      auth.py:313-322 — spec note (c) confirmed OK; make_signature =
+      arg-flipped crypto._signature; DCR unauthenticated overrides).
+      All 4 tables + client CRUD/DCR + privileges gate + discovery/JWKS.
+      Init rejects disable_jwt_plugin/non-EdDSA/encrypted-secret per
+      decisions. Ponytail deviations: no trusted-client TTL cache;
+      _to_exp_seconds int-only (no "30d" strings); SERVER_ONLY endpoints =
+      unmounted methods (email-otp precedent); login/consent pages stored
+      unused until Phase B. NEXT: dispatch Phase B (authorize + consent +
+      signed-query resume, items 5-partial/11-13).
 - [ ] W5-D: open-api — decide at end of wave (needs route-metadata registry;
       deferred since Wave 3).
 
@@ -306,8 +316,8 @@ origin check (W1). Straight to plugins.
       noted: freshness inlined reusing SESSION_REQUIRED; delete hides
       existence (PASSKEY_NOT_FOUND 401, == TS notFoundError/forbiddenStatus,
       Fable-verified routes.ts); client-only error codes surfaced but never
-      thrown. PENDING MERGE WINDOW: export `from .passkey import
-      PasskeyPlugin` in plugins_ext/__init__.py (file owned by W5-C-A agent).
+      thrown. Export wired by Fable in the W5-C-A merge window (imports
+      verified, 79 combined tests green).
       One connection-drop mid-run, resumed via SendMessage without rework.
 - [ ] W6 impl DISPATCHED 2026-07-24 (3 Opus high agents, parallel, in-tree):
       api-key (plugins_ext/api_key.py), passkey (plugins_ext/passkey.py),
