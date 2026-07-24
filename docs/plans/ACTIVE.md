@@ -278,7 +278,16 @@ origin check (W1). Straight to plugins.
       defensive parse-on-read. Known envelope gap: RATE_LIMITED needs
       details:{tryAgainIn} — port APIError lacks details (same backlog line
       as org missingPermissions[]). One primary agent, single
-      plugins_ext/api_key.py. 09-passkey DELIVERED+VALIDATED (452 lines; Fable
+      plugins_ext/api_key.py. 10-sso-oidc DELIVERED+VALIDATED (580 lines;
+      Fable spot-checked: clientSecret PLAINTEXT in JSON oidcConfig blob
+      routes/sso.ts:776/802 — hard cross-runtime contract, do NOT encrypt;
+      SSRF classifier isPublicRoutableHost/classifyHost oidc/discovery.ts;
+      DNS via node:dns discovery.ts:241-251 — all confirmed). Impl decisions
+      (defaults adopted): extend shared handle_oauth_user_info w/ trust flags
+      (no fork); dnspython dep for TXT + discovery resolve-check; RFC-6890
+      host classifier to port; samlConfig column kept nullable-unused for DB
+      compat; 12 items / 4 dispatch waves A-D in spec.
+      09-passkey DELIVERED+VALIDATED (452 lines; Fable
       spot-checked vs routes.ts: publicKey=padded base64 :686, credentialID=
       base64url credential.id :690, transports join(",") :694, challenge=
       signed cookie + atomic consumeVerificationValue :321-335/578-590 — all
