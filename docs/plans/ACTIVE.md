@@ -228,12 +228,13 @@ system (W1-E), atomic consume (W3-A), crypto incl. PKCE/b64url/charset/
 constant-time (W2/W4-A), JWT machinery + jwt plugin (W4), signed cookies +
 origin check (W1). Straight to plugins.
 
-- [~] W5-A DISPATCHED (2026-07-24, 3 parallel agents, disjoint files, running
-      alongside org-phase-2): oauth-popup (Opus — completion script must be
-      byte-exact for CSP hash), siwe (Opus — ERC-4361 parser verbatim, EIP-55;
-      spec default: verify_message caller-supplied, small keccak dep for
-      checksum only), one-tap (Sonnet — Google id_token via existing oauth JWKS
-      machinery, hosted-domain check).
+- [x] W5-A: DONE — one-tap da779b1 (26 tests, GHSA-9502 regressions,
+      maxTokenAge 1h), oauth-popup 5033c71 (15 tests, completion script
+      byte-exact, sha256 CSP pin == TS constant), siwe 17628b2 (61 tests,
+      ERC-4361 parser verbatim w/ all TS vectors, EIP-55 via pycryptodome
+      real Keccak-256, atomic nonce). plugins_ext exports wired (21 plugins).
+      Session-limit outage mid-volley: 3 agents died, all resumed to
+      completion without rework (oauth-popup was 3 lint items from done).
 - [ ] W5-B: oauth-proxy (L; spec flags possible YAGNI for single-deployment —
       port per plan, schedule last of the Ms).
 - [ ] W5-C: oauth-provider package subset (XL, replaces deprecated

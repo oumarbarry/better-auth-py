@@ -18,9 +18,12 @@ from .jwt import JWTPlugin
 from .last_login_method import LastLoginMethodPlugin
 from .magic_link import MagicLinkPlugin
 from .multi_session import MultiSessionPlugin
+from .oauth_popup import OAuthPopupPlugin
+from .one_tap import OneTapPlugin
 from .one_time_token import OneTimeTokenPlugin
 from .organization import OrganizationPlugin
 from .phone_number import PhoneNumberPlugin
+from .siwe import SiwePlugin
 from .two_factor import TwoFactorPlugin
 from .username import UsernamePlugin
 
@@ -38,9 +41,12 @@ __all__ = [
     "LastLoginMethodPlugin",
     "MagicLinkPlugin",
     "MultiSessionPlugin",
+    "OAuthPopupPlugin",
+    "OneTapPlugin",
     "OneTimeTokenPlugin",
     "OrganizationPlugin",
     "PhoneNumberPlugin",
+    "SiwePlugin",
     "TwoFactorPlugin",
     "UsernamePlugin",
 ]
