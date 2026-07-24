@@ -19,6 +19,7 @@ from .last_login_method import LastLoginMethodPlugin
 from .magic_link import MagicLinkPlugin
 from .multi_session import MultiSessionPlugin
 from .oauth_popup import OAuthPopupPlugin
+from .oauth_proxy import OAuthProxyPlugin
 from .one_tap import OneTapPlugin
 from .one_time_token import OneTimeTokenPlugin
 from .organization import OrganizationPlugin
@@ -42,6 +43,7 @@ __all__ = [
     "MagicLinkPlugin",
     "MultiSessionPlugin",
     "OAuthPopupPlugin",
+    "OAuthProxyPlugin",
     "OneTapPlugin",
     "OneTimeTokenPlugin",
     "OrganizationPlugin",
