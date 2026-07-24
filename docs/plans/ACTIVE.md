@@ -296,7 +296,17 @@ origin check (W1). Straight to plugins.
       webauthn>=2 dep as [passkey] extra; no freshSessionMiddleware in port
       (default: inline now-createdAt<=fresh_age); rpName default "Better
       Auth"; client-side passkeyClient + authenticator-metadata excluded.
-- [ ] api-key, passkey (webauthn lib), sso-OIDC. OUT: scim, stripe, SAML.
+- [ ] W6 impl DISPATCHED 2026-07-24 (3 Opus high agents, parallel, in-tree):
+      api-key (plugins_ext/api_key.py), passkey (plugins_ext/passkey.py),
+      sso-OIDC waves A+B (plugins_ext/sso/ — schema/CRUD/SSRF/discovery/
+      register; waves C+D = later sequential dispatches). Contention
+      neutralized: deps webauthn>=2.7 (installed 3.0.0 — agents must adapt
+      the spec's 2.x mapping) + dnspython>=2.7 added by orchestrator as
+      [passkey]/[sso] extras + dev group; plugins_ext/__init__.py owned by
+      W5-C-A agent — W6 agents return their export line, orchestrator wires
+      at merge. Agents gate SCOPED (own tests + ruff/ty on own files);
+      whole-tree gate = orchestrator at each merge window.
+      OUT: scim, stripe, SAML.
 
 ## Security findings (from background commit review)
 

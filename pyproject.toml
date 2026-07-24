@@ -40,6 +40,8 @@ Changelog = "https://github.com/oumarbarry/better-auth-py/blob/main/CHANGELOG.md
 [project.optional-dependencies]
 fastapi = ["fastapi>=0.110"]
 sqlalchemy = ["sqlalchemy[asyncio]>=2.0"]
+passkey = ["webauthn>=2.7"]
+sso = ["dnspython>=2.7"]
 
 [dependency-groups]
 dev = [
@@ -52,6 +54,8 @@ dev = [
     "uvicorn>=0.30",
     "ty>=0.0.57",
     "pre-commit>=4.6.0",
+    "webauthn>=2.7",
+    "dnspython>=2.7",
 ]
 
 [build-system]
