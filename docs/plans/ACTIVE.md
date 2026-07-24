@@ -188,7 +188,7 @@ HMAC helper: utf8 key/data, hex + base64url(nopad) encodings.
 - [ ] oauth-popup, siwe, one-tap, oauth-proxy; oauth-provider pkg (subset,
       replaces deprecated oidc-provider/mcp per decision log); open-api.
 
-## Wave 6 — Ecosystem (pending user IN/OUT confirmation; default from spec 06)
+## Wave 6 — Ecosystem (USER-CONFIRMED 2026-07-24)
 - [ ] api-key, passkey (webauthn lib), sso-OIDC. OUT: scim, stripe, SAML.
 
 ## Security findings (from background commit review)
@@ -238,8 +238,8 @@ HMAC helper: utf8 key/data, hex + base64url(nopad) encodings.
   attribute overrides; Q6 → already done (disable_refresh exists); Q8 →
   sensitive session middleware = existing fresh_age gate, no new variant.
 
-## Parked questions (batch for user)
+## Parked questions — ALL RESOLVED (user, 2026-07-24: "applique tes recos")
 
-- Python client library (httpx-based createAuthClient equivalent) — wanted?
-- Ecosystem packages (api-key, passkey, sso, scim, stripe, oauth-provider):
-  confirm IN/OUT after agent 06's recommendation lands.
+- Python client library: OUT of scope for this project — server-side parity
+  only; a separate httpx client package may exist later.
+- Ecosystem Wave 6: IN = api-key, passkey, sso-OIDC; OUT = scim, stripe, SAML.
