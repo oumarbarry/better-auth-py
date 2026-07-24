@@ -235,6 +235,36 @@ origin check (W1). Straight to plugins.
       real Keccak-256, atomic nonce). plugins_ext exports wired (21 plugins).
       Session-limit outage mid-volley: 3 agents died, all resumed to
       completion without rework (oauth-popup was 3 lint items from done).
+## >>> HANDOFF SNAPSHOT (2026-07-24, session ended mid-flight) <<<
+
+Last commit: f5ec13e (W5-A exports). Tree at handoff: EXPECT UNCOMMITTED WIP
+from 3 background agents whose session died — their partial work is ON DISK
+only. A new session CANNOT wait for their notifications. For each, check
+git status/diff, then either finish directly (if near-done) or redispatch a
+fresh agent seeded with the on-disk state:
+
+1. ORG PHASE 4 dynamic-AC (organization.py + test_organization.py, IN
+   PROGRESS): DAC tests + routes() wiring + config plumbing are written;
+   MISSING at last report: the handler/helper implementations —
+   _create_role, _delete_role, _list_roles, _get_role, _update_role,
+   _filter_dynamic_role_names (ty flags them as unresolved attributes).
+   Baseline before its WIP: 134 org tests / suite 1344. Done-condition:
+   those pass + new DAC tests green + org-closure statement vs TS.
+2. W5-B oauth-proxy (plugins_ext/oauth_proxy.py + tests/plugins/
+   test_oauth_proxy.py): state unknown at handoff — inspect disk; full
+   dispatch spec = the W5-B entry below + open-redirect guards emphasis.
+3. Spec agent writing docs/plans/gap/07-oauth-provider.md (spec ONLY, no
+   src changes): if the file looks complete, validate (spot-check vs TS
+   packages/oauth-provider) and use it to dispatch W5-C sub-phases; if
+   absent/partial, redispatch (prompt essence: full gap spec in the house
+   style of gap/04-05, reconciled against the already-far-along port).
+
+Gate command (ALWAYS cd first — shell cwd resets to the outer workspace):
+cd /Users/oumarbarry/CODESPACE/uzumaki/OPENSOURCE/better-auth-py/better-auth-py
+&& uv run pytest -q && uv run ruff check . && uv run ty check
+Validated-work-only gets committed; selective git add (never -A while WIP
+from parallel agents sits in the tree).
+
 - [ ] W5-B: oauth-proxy (L; spec flags possible YAGNI for single-deployment —
       port per plan, schedule last of the Ms).
 - [ ] W5-C: oauth-provider package subset (XL, replaces deprecated
