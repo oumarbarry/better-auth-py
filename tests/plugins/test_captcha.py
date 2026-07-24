@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl
 import httpx
 import pytest
 
-from better_auth import AuthRequest, BetterAuth, Ctx, RateLimit
+from better_auth import AuthRequest, BetterAuth, Ctx, IPAddressOptions, RateLimit
 from better_auth.plugins_ext.captcha import (
     CAPTCHA_VERIFY_TIMEOUT,
     DEFAULT_ENDPOINTS,
@@ -329,6 +329,58 @@ async def test_turnstile_omits_remoteip_when_no_client_ip():
     await plugin.on_request(ctx)
 
     assert "remoteip" not in captured["body"]
+
+
+async def test_turnstile_remoteip_uses_get_request_ip_advanced_options():
+    # index.ts:68 resolves remoteIP via getIp(request, ctx.options), not the raw socket
+    # peer. Default options (no trusted_proxies) can't trust a multi-hop forwarded chain,
+    # so a spoofed 2-value header falls back to the untouched socket peer.
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"success": True, "hostname": "x"})
+
+    plugin = CaptchaPlugin(provider="cloudflare-turnstile", secret_key="xx-secret-key")
+    auth = make_auth(plugins=[plugin], http_client=mock_http(handler))
+    ctx = ctx_for(
+        auth,
+        "/sign-in/email",
+        headers={"x-captcha-response": "token", "x-forwarded-for": "1.1.1.1, 2.2.2.2"},
+        client_ip="9.9.9.9",
+    )
+
+    await plugin.on_request(ctx)
+
+    assert captured["body"]["remoteip"] == "9.9.9.9"
+
+
+async def test_turnstile_remoteip_resolves_via_trusted_proxies():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"success": True, "hostname": "x"})
+
+    plugin = CaptchaPlugin(provider="cloudflare-turnstile", secret_key="xx-secret-key")
+    auth = make_auth(
+        plugins=[plugin],
+        http_client=mock_http(handler),
+        ip_address=IPAddressOptions(trusted_proxies=["10.0.0.0/8"]),
+    )
+    ctx = ctx_for(
+        auth,
+        "/sign-in/email",
+        headers={
+            "x-captcha-response": "token",
+            "x-forwarded-for": "203.0.113.7, 10.0.0.5",
+        },
+        client_ip="9.9.9.9",
+    )
+
+    await plugin.on_request(ctx)
+
+    assert captured["body"]["remoteip"] == "203.0.113.7"
 
 
 async def test_turnstile_rejects_mismatched_expected_action():

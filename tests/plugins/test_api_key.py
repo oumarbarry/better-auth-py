@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from better_auth import Where
+from better_auth import IPAddressOptions, Where
 from better_auth.crypto import default_key_hasher
 from better_auth.plugins_ext.api_key import API_KEY_ERROR_CODES, ApiKeyPlugin
 from better_auth.plugins_ext.organization import OrganizationPlugin
@@ -490,6 +490,44 @@ async def test_session_mock_consumes_rate_limit():
         body = second.json()
         assert body["code"] == "RATE_LIMITED"
         assert body["details"]["tryAgainIn"] >= 1
+
+
+async def test_session_mock_ip_uses_get_request_ip_advanced_options():
+    # index.ts:249 resolves ipAddress via getIp(ctx.request, ctx.context.options), not the
+    # raw socket peer. Default options (no trusted_proxies) can't trust a multi-hop
+    # forwarded chain, so a spoofed 2-value header falls back to the socket peer.
+    auth = ak_auth({"enable_session_for_api_keys": True})
+    _, raw = await _seed_user_key(auth)
+    ctx = Ctx(
+        auth=auth,
+        request=AuthRequest(
+            method="GET",
+            path="/get-session",
+            headers={"x-api-key": raw, "x-forwarded-for": "1.1.1.1, 2.2.2.2"},
+            client_ip="9.9.9.9",
+        ),
+    )
+    await _plugin(auth)._session_hook(ctx)
+    assert ctx._session["session"]["ipAddress"] == "9.9.9.9"
+
+
+async def test_session_mock_ip_resolves_via_trusted_proxies():
+    auth = ak_auth(
+        {"enable_session_for_api_keys": True},
+        ip_address=IPAddressOptions(trusted_proxies=["10.0.0.0/8"]),
+    )
+    _, raw = await _seed_user_key(auth)
+    ctx = Ctx(
+        auth=auth,
+        request=AuthRequest(
+            method="GET",
+            path="/get-session",
+            headers={"x-api-key": raw, "x-forwarded-for": "203.0.113.7, 10.0.0.5"},
+            client_ip="9.9.9.9",
+        ),
+    )
+    await _plugin(auth)._session_hook(ctx)
+    assert ctx._session["session"]["ipAddress"] == "203.0.113.7"
 
 
 async def test_session_mock_rejects_org_owned_key():

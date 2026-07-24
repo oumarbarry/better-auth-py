@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from ..ip import get_request_ip
 from ..plugins import Plugin
 from ..types import AuthResponse, Ctx
 
@@ -128,7 +129,8 @@ class CaptchaPlugin(Plugin):
                 raise RuntimeError(INTERNAL_ERROR_CODES["MISSING_SECRET_KEY"])
 
             captcha_response = ctx.request.headers.get("x-captcha-response")
-            remote_ip = ctx.request.client_ip
+            # captcha/index.ts:68 — getIp(request, ctx.options), honors advanced.ipAddress
+            remote_ip = get_request_ip(ctx.request, ctx.auth.ip_address)
 
             if not captcha_response:
                 return AuthResponse(

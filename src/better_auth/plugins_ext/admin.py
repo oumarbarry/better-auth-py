@@ -25,6 +25,7 @@ from ..access_control import ADMIN_DEFAULT_ROLES, Role
 from ..adapters.base import Where
 from ..crypto import generate_id, sign_value, unsign_value
 from ..endpoints import EMAIL_RE
+from ..ip import get_request_ip
 from ..plugins import HookSet, Plugin, PluginHook, Route
 from ..schema import Field, Schema
 from ..session import build_cookie, clear_cookie, cookie_name, get_session
@@ -520,7 +521,10 @@ class AdminPlugin(Plugin):
             "userId": target["id"],
             "impersonatedBy": session["user"]["id"],
             "expiresAt": now + timedelta(seconds=self.impersonation_session_duration),
-            "ipAddress": ctx.request.client_ip or "",
+            # routes.ts:1272 hands off to internalAdapter.createSession, whose default
+            # ipAddress is getIp(headers, options) (internal-adapter.ts:349); this hand-built
+            # row bypasses create_session so it resolves ip itself to keep that behavior.
+            "ipAddress": get_request_ip(ctx.request, ctx.auth.ip_address) or "",
             "userAgent": ctx.request.headers.get("user-agent", ""),
             "createdAt": now,
             "updatedAt": now,

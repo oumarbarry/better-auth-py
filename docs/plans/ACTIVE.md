@@ -79,6 +79,18 @@ priority, or release chores (version bump, CHANGELOG).
       consume-atomic :1249, ponytail-noted). disableCleanup NOT ported —
       port never had the expired-row sweep it disables (noted).
       DB-default path behaviorally identical (full suite green).
+- [ ] B6 HS256/disableJwtPlugin mode: DISPATCHED (Opus xhigh). Owns
+      oauth_provider/ + its tests. Lifts the last EdDSA-first init
+      restriction: HS256 id tokens w/ decrypted client secret, encrypted
+      secrets reachable end-to-end, secret_config threaded into call
+      sites, discovery w/o jwks_uri.
+- [x] B7 plugin IP call-site audit: DONE, validated (156 tests green incl.
+      6 new; Fable re-ran gate + confirmed routing in code). All 3 sites
+      were getIp consumers in TS (admin via internal-adapter.ts:349,
+      api-key index.ts:248-250, captcha index.ts:68) → all routed through
+      get_request_ip with TS-anchor comments. Admin test uses a 3-hop
+      chain + disable_ip_tracking to distinguish naive-leftmost from the
+      trusted-proxy walk (fastapi client_ip pre-resolution masks 2-hop).
 
 ## Phase 0 — Gap analysis (IN PROGRESS)
 

@@ -11,6 +11,7 @@ from datetime import timedelta
 
 import pytest
 
+from better_auth import IPAddressOptions
 from better_auth.adapters.base import Where
 from better_auth.crypto import hash_password
 from better_auth.plugins_ext.admin import ADMIN_ERROR_CODES, AdminPlugin
@@ -660,6 +661,49 @@ async def test_impersonate_and_stop_round_trip():
         # restored to admin
         who2 = await client.get("/api/auth/get-session")
         assert who2.json()["user"]["id"] == admin["id"]
+
+
+async def test_impersonate_ip_disable_tracking_stores_empty():
+    # routes.ts:1272 hands ipAddress resolution to internalAdapter.createSession, which
+    # resolves via getIp(headers, options) (internal-adapter.ts:349) — honoring
+    # advanced.ipAddress. The Python port hand-builds the session row instead (a fixed
+    # impersonation-duration expiry create_session can't express), so it must call
+    # get_request_ip itself to keep that behavior. A raw client_ip read would never
+    # honor disable_ip_tracking; get_request_ip does.
+    auth = make_auth(
+        plugins=[AdminPlugin()], ip_address=IPAddressOptions(disable_ip_tracking=True)
+    )
+    async with make_client(auth) as client:
+        await _become_admin(auth, client)
+        target = await _seed_user(auth, email="bob@x.com")
+        imp = await client.post(
+            "/api/auth/admin/impersonate-user",
+            json={"userId": target["id"]},
+            headers={"x-forwarded-for": "203.0.113.7"},
+        )
+        assert imp.status_code == 200
+        assert imp.json()["session"]["ipAddress"] == ""
+
+
+async def test_impersonate_ip_resolves_via_trusted_proxies():
+    # A 3-hop forwarded chain where a spoofed hop sits left of the real client: naive
+    # leftmost parsing (the old raw client_ip path) would pick the spoofed "203.0.113.7"
+    # entry; get_request_ip walks the chain right-to-left, skips the trusted proxy, and
+    # lands on the true client "1.2.3.4".
+    auth = make_auth(
+        plugins=[AdminPlugin()],
+        ip_address=IPAddressOptions(trusted_proxies=["10.0.0.0/8"]),
+    )
+    async with make_client(auth) as client:
+        await _become_admin(auth, client)
+        target = await _seed_user(auth, email="bob@x.com")
+        imp = await client.post(
+            "/api/auth/admin/impersonate-user",
+            json={"userId": target["id"]},
+            headers={"x-forwarded-for": "203.0.113.7, 1.2.3.4, 10.0.0.5"},
+        )
+        assert imp.status_code == 200
+        assert imp.json()["session"]["ipAddress"] == "1.2.3.4"
 
 
 async def test_impersonate_denied_for_non_admin():

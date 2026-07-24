@@ -35,6 +35,7 @@ from typing import Any
 from ..access_control import role as make_role
 from ..adapters.base import Where
 from ..crypto import default_key_hasher, generate_random_string
+from ..ip import get_request_ip
 from ..plugins import HookSet, Plugin, PluginHook, Route
 from ..schema import Field, Schema
 from ..session import get_session, utcnow
@@ -1072,7 +1073,8 @@ class ApiKeyPlugin(Plugin):
                 "token": key,
                 "userId": api_key["referenceId"],
                 "userAgent": ctx.request.headers.get("user-agent"),
-                "ipAddress": ctx.request.client_ip,
+                # index.ts:249 — getIp(ctx.request, ctx.context.options), honors advanced.ipAddress
+                "ipAddress": get_request_ip(ctx.request, ctx.auth.ip_address),
                 "createdAt": now,
                 "updatedAt": now,
                 "expiresAt": expires_at,
