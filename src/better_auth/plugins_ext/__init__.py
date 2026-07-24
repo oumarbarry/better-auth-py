@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .admin import AdminPlugin
 from .anonymous import AnonymousPlugin
+from .api_key import ApiKeyPlugin
 from .bearer import BearerPlugin
 from .captcha import CaptchaPlugin
 from .custom_session import CustomSessionPlugin
@@ -33,6 +34,7 @@ from .username import UsernamePlugin
 __all__ = [
     "AdminPlugin",
     "AnonymousPlugin",
+    "ApiKeyPlugin",
     "BearerPlugin",
     "CaptchaPlugin",
     "CustomSessionPlugin",

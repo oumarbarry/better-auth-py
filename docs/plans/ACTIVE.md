@@ -319,6 +319,17 @@ origin check (W1). Straight to plugins.
       thrown. Export wired by Fable in the W5-C-A merge window (imports
       verified, 79 combined tests green).
       One connection-drop mid-run, resumed via SendMessage without rework.
+- [x] W6 api-key: DONE, validated (Fable re-ran scoped gate: 41 tests green,
+      ruff/ty clean; spot-checked 52-char alphabet, prefix-inside-hash via
+      default_key_hasher(full_key), 4 guarded increment_one CAS sites
+      mirroring TS verify-api-key.ts:244-357, cross-runtime hash vector
+      SHA-256("hello") asserted byte-exact). CAS single-winner trio present.
+      Ponytail deviations: database mode only (secondary storage raises at
+      ctor); deferUpdates synchronous; RATE_LIMITED try_again_in surfaced
+      only in verify wrapper error object (APIError lacks details —
+      backlog); server-only surface = plugin methods (verify_api_key,
+      create/update_api_key, delete_all_expired_api_keys), HTTP routes
+      client-path only (one-time-token precedent). Export wired by Fable.
 - [ ] W6 impl DISPATCHED 2026-07-24 (3 Opus high agents, parallel, in-tree):
       api-key (plugins_ext/api_key.py), passkey (plugins_ext/passkey.py),
       sso-OIDC waves A+B (plugins_ext/sso/ — schema/CRUD/SSRF/discovery/
