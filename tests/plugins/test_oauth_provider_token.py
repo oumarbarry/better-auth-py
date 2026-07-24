@@ -602,6 +602,46 @@ async def test_concurrent_refresh_rotation_one_winner():
         assert sorted([r1.status_code, r2.status_code]) == [200, 400]
 
 
+async def test_concurrent_revoke_vs_rotate_one_winner():
+    # revoke.ts:179 CAS vs token.ts:365 rotation CAS race the same revoked=null guard, so exactly
+    # one mutates. /oauth2/revoke is RFC 7009 always-200, so the outcome is observable through the
+    # refresh result: rotate won -> new refresh_token; revoke won -> refresh is invalid_grant.
+    auth = provider_auth()
+    await seed(auth, scopes=["openid", "offline_access"])
+    async with make_client(auth) as c:
+        await sign_up(c)
+        rt = await _issue_refresh(c)
+
+        async def rotate():
+            return await token(
+                c, grant_type="refresh_token", client_id="client-1",
+                client_secret=SECRET, refresh_token=rt,
+            )
+
+        async def revoke():
+            return await c.post(
+                "/api/auth/oauth2/revoke",
+                data=dict(
+                    client_id="client-1", client_secret=SECRET, token=rt,
+                    token_type_hint="refresh_token",
+                ),
+            )
+
+        rotate_res, revoke_res = await asyncio.gather(rotate(), revoke())
+        assert revoke_res.status_code == 200  # RFC 7009 §2.2 always-200
+        if rotate_res.status_code == 200:
+            assert rotate_res.json()["refresh_token"]
+        else:
+            assert rotate_res.json()["error"] == "invalid_grant"
+        # in both orderings, replaying the parent now fails closed
+        replay = await token(
+            c, grant_type="refresh_token", client_id="client-1",
+            client_secret=SECRET, refresh_token=rt,
+        )
+        assert replay.status_code == 400
+        assert replay.json()["error"] == "invalid_grant"
+
+
 # --- hashed-at-rest ------------------------------------------------------------------
 
 

@@ -293,10 +293,28 @@ origin check (W1). Straight to plugins.
       resource param only; concurrent-code loser 401 == TS UNAUTHORIZED.
       Revoke CAS deferred to Phase D per spec option. One connection drop,
       resumed via SendMessage without rework.
-      NEXT: Phase D (userinfo + revocation + end-session + pairwise
-      finalization, items 19-20), then W5-D open-api decision.
-- [ ] W5-D: open-api — decide at end of wave (needs route-metadata registry;
-      deferred since Wave 3).
+      Phase D DONE, validated (25 new tests; Fable re-ran full gate: 1781
+      pass, ruff/ty clean). Userinfo + RFC 7009 revoke (opaque delete,
+      refresh CAS, already-revoked family teardown, revoke-vs-rotate
+      single-winner) + end-session (enableEndSession gate, iss/aud verify,
+      sid session delete, exact-match post-logout redirect) + pairwise
+      consistency (same sub id_token/userinfo/introspect, distinct across
+      hosts, JWT-access sub stays real). Fable merge-window fix: removed
+      WWW-Authenticate header on userinfo 401 — Fable's phase-D prompt had
+      wrongly required it; TS userinfo.ts:46 sets none (only excluded
+      client-side mcp.ts does) — wire parity restored, test asserts
+      absence. Kept deviation: SafeUrl belt-and-braces on post-logout
+      redirect (additive, registered URIs already validated).
+      W5-C OAUTH-PROVIDER PLUGIN CLOSED vs TS v1.6.23 (4 phases, 166
+      plugin tests). Backlog carried: encrypted client secrets +
+      disableJwtPlugin/HS256 + non-EdDSA JWKS (secrets-rotation
+      prerequisite), PAR built-in store, multi-resource param.
+- [x] W5-D: open-api — DECIDED 2026-07-24 (Fable ruling, revisitable):
+      OUT of parity scope. Rationale: dev-tooling only — zero wire/storage
+      contract (the prime directive doesn't bind it); porting requires a
+      cross-cutting route-metadata registry touching every endpoint for a
+      static docs page. Revisit on user demand as a standalone follow-up.
+      WAVE 5 COMPLETE.
 
 ## Wave 6 — Ecosystem (USER-CONFIRMED 2026-07-24) — COMPLETE 2026-07-24
 (api-key 0b2686d, passkey 0cf1b65, sso-OIDC c78ffb3+d6a75bd. All validated.)
@@ -432,6 +450,10 @@ origin check (W1). Straight to plugins.
 
 - 2026-07-22: JWT dependency = `pyjwt` (HS256 now; add `cryptography` only when
   EdDSA/RS256 lands in waves 2/4). Boring, ubiquitous, EdDSA-capable.
+
+- 2026-07-24: open-api plugin ruled OUT of parity scope (dev tooling, no
+  wire/storage contract, needs cross-cutting route-metadata registry).
+  Revisitable on user demand. This closed Wave 5.
 
 - 2026-07-23 (Wave 3 kickoff, spec-04 open questions resolved by defaults):
   Q1 → (b) path-aware overridable password-hash seam (no full ctx.password

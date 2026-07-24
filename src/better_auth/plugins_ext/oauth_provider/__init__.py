@@ -39,6 +39,7 @@ from .consent_crud import (
     update_consent_endpoint,
 )
 from .introspect import introspect_endpoint
+from .logout import rp_initiated_logout_endpoint
 from .metadata import (
     build_auth_server_metadata,
     build_oidc_server_metadata,
@@ -46,6 +47,7 @@ from .metadata import (
 )
 from .oauth_continue import continue_endpoint  # `continue` is a reserved word -> oauth_continue
 from .register import register_endpoint
+from .revoke import revoke_endpoint
 from .schema import OAUTH_PROVIDER_SCHEMA
 from .signed_query import (
     POST_LOGIN_CLEARED_PARAM,
@@ -54,6 +56,7 @@ from .signed_query import (
     parse_query,
 )
 from .token import token_endpoint
+from .userinfo import userinfo_endpoint
 from .utils import (
     OAuthError,
     get_jwt_plugin,
@@ -253,6 +256,10 @@ class OAuthProviderPlugin(Plugin):
             ("GET", "/oauth2/authorize", self._authorize),
             ("POST", "/oauth2/token", self._token),
             ("POST", "/oauth2/introspect", self._introspect),
+            ("POST", "/oauth2/revoke", self._revoke),
+            ("GET", "/oauth2/userinfo", self._userinfo),
+            ("POST", "/oauth2/userinfo", self._userinfo),
+            ("GET", "/oauth2/end-session", self._end_session),
             ("POST", "/oauth2/consent", self._consent),
             ("POST", "/oauth2/continue", self._continue),
             ("GET", "/oauth2/get-consent", self._get_consent),
@@ -269,6 +276,8 @@ class OAuthProviderPlugin(Plugin):
             ("/oauth2/authorize", (60, 30)),
             ("/oauth2/token", (60, 20)),
             ("/oauth2/introspect", (60, 100)),
+            ("/oauth2/revoke", (60, 30)),
+            ("/oauth2/userinfo", (60, 60)),
         ):
             cfg = (self.rate_limit_config or {}).get(path.rsplit("/", 1)[-1])
             if cfg is False:
@@ -404,6 +413,15 @@ class OAuthProviderPlugin(Plugin):
 
     async def _introspect(self, ctx: Ctx) -> Any:
         return await introspect_endpoint(ctx, self)
+
+    async def _revoke(self, ctx: Ctx) -> Any:
+        return await revoke_endpoint(ctx, self)
+
+    async def _userinfo(self, ctx: Ctx) -> Any:
+        return await userinfo_endpoint(ctx, self)
+
+    async def _end_session(self, ctx: Ctx) -> Any:
+        return await rp_initiated_logout_endpoint(ctx, self)
 
     async def _run_authorize(
         self, ctx: Ctx, query: dict[str, Any], settings: dict[str, Any]
