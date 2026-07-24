@@ -1,10 +1,11 @@
-"""organization plugin — PHASE 1 (core-org): orgs, members, static roles/permissions.
+"""organization plugin — core-org + invitations + teams (phases 1-3); static roles only.
 
-Port of better-auth's ``plugins/organization`` (v1.6.23), core-org subset only:
-create/update/delete/list/get-full/set-active organizations, member management
-(list/leave/remove/update-role/get-active/has-permission), and check-slug. Verified
-against ``routes/crud-org.ts``, ``routes/crud-members.ts``, ``organization.ts``,
-``has-permission.ts``, ``permission.ts``, ``adapter.ts`` and ``error-codes.ts``.
+Port of better-auth's ``plugins/organization`` (v1.6.23): create/update/delete/list/
+get-full/set-active organizations, member management (list/leave/remove/update-role/
+get-active/has-permission), check-slug, invitations, and teams (opt-in). Verified against
+``routes/crud-org.ts``, ``routes/crud-members.ts``, ``routes/crud-invites.ts``,
+``routes/crud-team.ts``, ``organization.ts``, ``has-permission.ts``, ``permission.ts``,
+``adapter.ts``, ``types.ts`` and ``error-codes.ts``.
 
 Wire/storage fidelity is the contract (a Python app and a TS app share one DB): the
 camelCase ``organization`` / ``member`` tables, ``session.activeOrganizationId``
@@ -14,12 +15,18 @@ string match the TS source exactly.
 Phase 2 (invitations) is implemented: the ``invitation`` table, invite/accept/reject/
 cancel/get/list/list-user endpoints, ``sendInvitationEmail`` config, the invitation cascade
 in :meth:`_delete_org`, and ``invitations`` population in :meth:`_find_full_org`. Verified
-against ``routes/crud-invites.ts`` and the ``adapter.ts`` invitation methods. ``teamId`` on
-the invitation is deferred (phase 3); the accept path's team-membership branch is phase 3.
+against ``routes/crud-invites.ts`` and the ``adapter.ts`` invitation methods.
 
-SEAMS for later phases (do not implement here):
-- Phase 3 (teams): the ``team``/``teamMember`` tables, ``session.activeTeamId``, team
-  endpoints, and the default-team creation branch in ``create``.
+Phase 3 (teams) is implemented (gated on ``teams={"enabled": True}``): the ``team`` /
+``teamMember`` tables, ``invitation.teamId``, ``session.activeTeamId``, the nine team
+endpoints (create/update/remove/list/set-active/list-user/list-members/add-member/remove-member),
+the ``teams`` config surface (defaultTeam / maximumTeams / maximumMembersPerTeam /
+allowRemovingAllTeams), the default-team branch in ``create``, the ``teamId`` invite
+validation + accept-path team-membership branch, and the ``before/after`` team hooks.
+Verified against ``routes/crud-team.ts``, the team branches of ``routes/crud-invites.ts``,
+``adapter.ts`` team methods, ``organization.ts`` wiring/schema, and ``types.ts``.
+
+SEAM for a later phase (do not implement here):
 - Phase 4 (dynamic access control): the ``organizationRole`` table and the dynamic-role
   merge inside :func:`has_permission` (single resolver seam) + the unknown-role lookup in
   ``update-member-role``. This phase resolves STATIC roles only.
@@ -269,6 +276,10 @@ class OrganizationPlugin(Plugin):
         cancel_pending_invitations_on_re_invite: bool = False,
         require_email_verification_on_invitation: bool | None = None,
         send_invitation_email: Callable[..., Any] | None = None,
+        # --- teams (phase 3) — TS OrganizationOptions.teams (dict; snake_case sub-keys) -----
+        # {"enabled", "default_team": {"enabled", "custom_create_default_team"?},
+        #  "maximum_teams": int|fn, "maximum_members_per_team": int|fn, "allow_removing_all_teams"}
+        teams: dict[str, Any] | None = None,
         organization_hooks: dict[str, Callable[..., Any]] | None = None,
         # {"organization": {name: Field}, "member": {...}, "invitation": {...}} — extra columns.
         additional_fields: dict[str, dict[str, Field]] | None = None,
@@ -285,6 +296,8 @@ class OrganizationPlugin(Plugin):
         self.cancel_pending_invitations_on_re_invite = cancel_pending_invitations_on_re_invite
         self.require_email_verification_on_invitation = require_email_verification_on_invitation
         self.send_invitation_email = send_invitation_email
+        self.teams = teams
+        self._teams_enabled = bool(teams and teams.get("enabled"))
         self.organization_hooks = organization_hooks or {}
         self._additional_fields = additional_fields or {}
         #: the default cap for list-members / full-org member fetch (TS: membershipLimit || 100)
@@ -334,22 +347,60 @@ class OrganizationPlugin(Plugin):
                 ),
                 "email": Field("string", required=True, sortable=True, index=True),
                 "role": Field("string", required=False, sortable=True),
+                # teamId only exists when teams are enabled (organization.ts:1157-1166)
+                **(
+                    {"teamId": Field("string", required=False, sortable=True)}
+                    if self._teams_enabled
+                    else {}
+                ),
                 "status": Field("string", required=True, default="pending", sortable=True),
                 "expiresAt": Field("datetime", required=True),
                 "createdAt": Field("datetime", required=True),
-                "inviterId": Field(
-                    "string", required=True, references=Reference("user", "id")
-                ),
+                "inviterId": Field("string", required=True, references=Reference("user", "id")),
                 **self._extra("invitation"),
             },
-            # activeTeamId (teams) is intentionally NOT added here — phase 3.
-            "session": {"activeOrganizationId": Field("string", required=False, input=False)},
+            "session": {
+                "activeOrganizationId": Field("string", required=False, input=False),
+                # activeTeamId only when teams enabled (organization.ts:1230-1239)
+                **(
+                    {"activeTeamId": Field("string", required=False, input=False)}
+                    if self._teams_enabled
+                    else {}
+                ),
+            },
+            # team + teamMember tables only when teams enabled (organization.ts:940-1006)
+            **(self._team_schema() if self._teams_enabled else {}),
+        }
+
+    def _team_schema(self) -> Schema:
+        """team + teamMember tables — TS TeamDefaultFields / TeamMemberDefaultFields (schema.ts)."""
+        return {
+            "team": {
+                "id": Field("string", required=True, unique=True),
+                "name": Field("string", required=True),
+                "organizationId": Field(
+                    "string", required=True, references=Reference("organization", "id"), index=True
+                ),
+                "createdAt": Field("datetime", required=True),
+                "updatedAt": Field("datetime", required=False),
+                **self._extra("team"),
+            },
+            "teamMember": {
+                "id": Field("string", required=True, unique=True),
+                "teamId": Field(
+                    "string", required=True, references=Reference("team", "id"), index=True
+                ),
+                "userId": Field(
+                    "string", required=True, references=Reference("user", "id"), index=True
+                ),
+                "createdAt": Field("datetime", required=False),
+            },
         }
 
     # --- routes -----------------------------------------------------------------------
 
     def routes(self) -> list[Route]:
-        return [
+        routes: list[Route] = [
             ("POST", "/organization/create", self._create),
             ("POST", "/organization/update", self._update),
             ("POST", "/organization/delete", self._delete),
@@ -372,6 +423,20 @@ class OrganizationPlugin(Plugin):
             ("GET", "/organization/list-invitations", self._list_invitations_route),
             ("GET", "/organization/list-user-invitations", self._list_user_invitations),
         ]
+        # --- teams (phase 3) — registered only when teams.enabled (organization.ts:915-920)
+        if self._teams_enabled:
+            routes += [
+                ("POST", "/organization/create-team", self._create_team_route),
+                ("POST", "/organization/update-team", self._update_team_route),
+                ("POST", "/organization/remove-team", self._remove_team_route),
+                ("GET", "/organization/list-teams", self._list_teams_route),
+                ("POST", "/organization/set-active-team", self._set_active_team_route),
+                ("GET", "/organization/list-user-teams", self._list_user_teams_route),
+                ("GET", "/organization/list-team-members", self._list_team_members_route),
+                ("POST", "/organization/add-team-member", self._add_team_member_route),
+                ("POST", "/organization/remove-team-member", self._remove_team_member_route),
+            ]
+        return routes
 
     # --- hooks --------------------------------------------------------------------------
 
@@ -465,9 +530,7 @@ class OrganizationPlugin(Plugin):
         )
         return self._shape_member(member, user) if member is not None else None
 
-    async def _check_membership(
-        self, ctx: Ctx, user_id: str, org_id: str
-    ) -> dict[str, Any] | None:
+    async def _check_membership(self, ctx: Ctx, user_id: str, org_id: str) -> dict[str, Any] | None:
         return await ctx.adapter.find_one(
             "member", [Where("userId", user_id), Where("organizationId", org_id)]
         )
@@ -531,9 +594,7 @@ class OrganizationPlugin(Plugin):
         total = await ctx.adapter.count("member", where)
         user_map = await self._users_by_ids(ctx, [m["userId"] for m in members])
         shaped = [
-            self._shape_member(m, user_map[m["userId"]])
-            for m in members
-            if m["userId"] in user_map
+            self._shape_member(m, user_map[m["userId"]]) for m in members if m["userId"] in user_map
         ]
         return {"members": shaped, "total": total}
 
@@ -551,18 +612,19 @@ class OrganizationPlugin(Plugin):
         )
         user_map = await self._users_by_ids(ctx, [m["userId"] for m in members])
         shaped = [
-            self._shape_member(m, user_map[m["userId"]])
-            for m in members
-            if m["userId"] in user_map
+            self._shape_member(m, user_map[m["userId"]]) for m in members if m["userId"] in user_map
         ]
         invitations = await ctx.adapter.find_many(
             "invitation", [Where("organizationId", org["id"])]
         )
-        return {
+        result: dict[str, Any] = {
             **self._filter_org(org),
             "members": shaped,
             "invitations": [self._filter_invitation(i) for i in invitations],
         }
+        if self._teams_enabled:  # getFullOrganization includeTeams (crud-org.ts:697)
+            result["teams"] = await self._list_teams(ctx, org["id"])
+        return result
 
     async def _update_org(
         self, ctx: Ctx, org_id: str, data: dict[str, Any]
@@ -577,14 +639,20 @@ class OrganizationPlugin(Plugin):
         result["metadata"] = _parse_metadata(result.get("metadata"))
         return result
 
-    async def _update_member(
-        self, ctx: Ctx, member_id: str, role: str
-    ) -> dict[str, Any] | None:
+    async def _update_member(self, ctx: Ctx, member_id: str, role: str) -> dict[str, Any] | None:
         member = await ctx.adapter.update("member", [Where("id", member_id)], {"role": role})
         return filter_output_fields(member, self.schema["member"]) if member is not None else None
 
-    async def _delete_member(self, ctx: Ctx, member_id: str) -> None:
+    async def _delete_member(
+        self, ctx: Ctx, member_id: str, *, org_id: str | None = None, user_id: str | None = None
+    ) -> None:
         await ctx.adapter.delete("member", [Where("id", member_id)])
+        # teams: drop the departing user's team memberships across this org's teams
+        # (adapter.ts:387-405). Per-team delete_many avoids MemoryAdapter's `in` operator,
+        # which lowercases mixed-case ids and never matches (see _users_by_ids).
+        if self._teams_enabled and org_id and user_id:
+            for team in await self._list_teams(ctx, org_id):
+                await self._remove_team_member_row(ctx, team["id"], user_id)
 
     async def _delete_org(self, ctx: Ctx, org_id: str) -> None:
         # ponytail: TS wraps this in a transaction for atomicity; MemoryAdapter isn't
@@ -769,7 +837,42 @@ class OrganizationPlugin(Plugin):
             "after_add_member", {"member": member, "user": user, "organization": organization}
         )
 
-        # PHASE 3 SEAM: when teams.defaultTeam is enabled, create the default team + join it.
+        # teams.defaultTeam: create the default team + join it (crud-org.ts:220-263)
+        team_member: dict[str, Any] | None = None
+        if self._teams_enabled:
+            default_team = (self.teams or {}).get("default_team")
+            if default_team is None or default_team.get("enabled") is not False:
+                team_data: dict[str, Any] = {
+                    "organizationId": organization["id"],
+                    "name": organization["name"],
+                    "createdAt": utcnow(),
+                }
+                merged = await self._run_before_hook(
+                    "before_create_team",
+                    {
+                        "team": {
+                            "organizationId": organization["id"],
+                            "name": organization["name"],
+                        },
+                        "user": user,
+                        "organization": organization,
+                    },
+                )
+                if merged is not None:
+                    team_data = {**team_data, **merged}
+                custom = default_team.get("custom_create_default_team") if default_team else None
+                default_team_row = (
+                    await _maybe_await(custom(organization, ctx))
+                    if custom is not None
+                    else await self._create_team(ctx, team_data)
+                )
+                team_member = await self._find_or_create_team_member(
+                    ctx, default_team_row["id"], user["id"]
+                )
+                await self._run_after_hook(
+                    "after_create_team",
+                    {"team": default_team_row, "user": user, "organization": organization},
+                )
 
         await self._run_after_hook(
             "after_create_organization",
@@ -778,6 +881,8 @@ class OrganizationPlugin(Plugin):
 
         if not body.get("keepCurrentActiveOrganization"):
             await self._set_active_org(ctx, session["session"]["token"], organization["id"])
+            if team_member is not None:
+                await self._set_active_team(ctx, session["session"]["token"], team_member["teamId"])
 
         return AuthResponse(body={**organization, "members": [member]})
 
@@ -796,8 +901,10 @@ class OrganizationPlugin(Plugin):
             raise APIError(400, "INVALID_BODY", "name must not be empty")
         if "slug" in data and (not isinstance(data["slug"], str) or not data["slug"]):
             raise APIError(400, "INVALID_BODY", "slug must not be empty")
-        if "metadata" in data and data["metadata"] is not None and not isinstance(
-            data["metadata"], dict
+        if (
+            "metadata" in data
+            and data["metadata"] is not None
+            and not isinstance(data["metadata"], dict)
         ):
             raise APIError(400, "INVALID_BODY", "metadata must be an object")
         allowed = {"name", "slug", "logo", "metadata", *self._extra("organization")}
@@ -875,8 +982,10 @@ class OrganizationPlugin(Plugin):
         session = await self._require_session(ctx)
         query = ctx.request.query
         org_slug = query.get("organizationSlug")
-        org_id = org_slug or query.get("organizationId") or session["session"].get(
-            "activeOrganizationId"
+        org_id = (
+            org_slug
+            or query.get("organizationId")
+            or session["session"].get("activeOrganizationId")
         )
         if not org_id:
             return AuthResponse(body=None)
@@ -953,7 +1062,7 @@ class OrganizationPlugin(Plugin):
             owners = [m for m in members if creator_role in m["role"].split(",")]
             if len(owners) <= 1:
                 raise _err(400, "YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER")
-        await self._delete_member(ctx, member["id"])
+        await self._delete_member(ctx, member["id"], org_id=org_id, user_id=member["userId"])
         if session["session"].get("activeOrganizationId") == org_id:
             await self._set_active_org(ctx, session["session"]["token"], None)
         return AuthResponse(body=member)
@@ -1041,10 +1150,13 @@ class OrganizationPlugin(Plugin):
             "before_remove_member",
             {"member": to_remove, "user": removed_user, "organization": organization},
         )
-        await self._delete_member(ctx, to_remove["id"])
-        if session["user"]["id"] == to_remove["userId"] and session["session"].get(
-            "activeOrganizationId"
-        ) == to_remove["organizationId"]:
+        await self._delete_member(
+            ctx, to_remove["id"], org_id=to_remove["organizationId"], user_id=to_remove["userId"]
+        )
+        if (
+            session["user"]["id"] == to_remove["userId"]
+            and session["session"].get("activeOrganizationId") == to_remove["organizationId"]
+        ):
             await self._set_active_org(ctx, session["session"]["token"], None)
         await self._run_after_hook(
             "after_remove_member",
@@ -1266,6 +1378,27 @@ class OrganizationPlugin(Plugin):
         if len(pending) >= limit:
             raise _err(403, "INVITATION_LIMIT_REACHED")
 
+        # teams: validate requested teamId(s) (crud-invites.ts:455-538)
+        team_ids: list[str] = []
+        if self._teams_enabled and body.get("teamId"):
+            raw_team = body["teamId"]
+            team_ids = [raw_team] if isinstance(raw_team, str) else list(raw_team)
+            if any("," in t for t in team_ids):
+                raise _err(400, "INVALID_TEAM_ID")
+            for tid in team_ids:  # every team must belong to this organization
+                if await self._find_team_by_id(ctx, tid, org_id=org_id) is None:
+                    raise _err(400, "TEAM_NOT_FOUND")
+            if (self.teams or {}).get("maximum_members_per_team") is not None:
+                for tid in team_ids:
+                    team = await self._find_team_by_id(
+                        ctx, tid, org_id=org_id, include_members=True
+                    )
+                    if team is None:
+                        raise _err(400, "TEAM_NOT_FOUND")
+                    resolved = await self._resolve_max_members_per_team(tid, org_id, session)
+                    if resolved is not None and len(team["members"]) >= resolved:
+                        raise _err(403, "TEAM_MEMBER_LIMIT_REACHED")
+
         invitation_data: dict[str, Any] = {"role": roles, "email": email, "organizationId": org_id}
         for key in self._extra("invitation"):
             if key in body:
@@ -1273,14 +1406,20 @@ class OrganizationPlugin(Plugin):
         merged = await self._run_before_hook(
             "before_create_invitation",
             {
-                # teamId is phase 3 — always None here (kept for TS payload-shape parity).
-                "invitation": {**invitation_data, "inviterId": user["id"], "teamId": None},
+                "invitation": {
+                    **invitation_data,
+                    "inviterId": user["id"],
+                    "teamId": team_ids[0] if team_ids else None,
+                },
                 "inviter": user,
                 "organization": organization,
             },
         )
         if merged is not None:
             invitation_data = {**invitation_data, **merged}
+        # teamIds → teamId column (comma-joined) — derived from the request, TS wins over hook
+        if self._teams_enabled:
+            invitation_data["teamId"] = ",".join(team_ids) if team_ids else None
 
         invitation = await self._create_invitation(ctx, invitation_data, user)
         await self._maybe_send_invitation_email(ctx, invitation, organization, member, user)
@@ -1359,6 +1498,37 @@ class OrganizationPlugin(Plugin):
         )
         if accepted is None:
             raise _err(400, "INVITATION_NOT_FOUND")
+
+        # teams: create the team membership(s) the invitation carried (crud-invites.ts:755-823)
+        team_active_session: dict[str, Any] | None = None
+        if self._teams_enabled and accepted.get("teamId"):
+            try:
+                invited_team_ids = accepted["teamId"].split(",")
+                for tid in invited_team_ids:
+                    team = await self._find_team_by_id(ctx, tid, org_id=accepted["organizationId"])
+                    if team is None:
+                        raise _err(400, "TEAM_NOT_FOUND")
+                    resolved = await self._resolve_max_members_per_team(
+                        tid, accepted["organizationId"], session
+                    )
+                    if resolved is not None:
+                        result = await self._add_team_member_with_limit(
+                            ctx, tid, user["id"], resolved
+                        )
+                        if result["status"] == "limitReached":
+                            raise _err(403, "TEAM_MEMBER_LIMIT_REACHED")
+                    else:
+                        await self._find_or_create_team_member(ctx, tid, user["id"])
+                if len(invited_team_ids) == 1:  # single team → set it active + refresh cookie
+                    team_active_session = await self._set_active_team(
+                        ctx, session["session"]["token"], invited_team_ids[0]
+                    )
+            except (
+                Exception
+            ):  # release the claim so the invitee can retry (crud-invites.ts:839-847)
+                await self._update_invitation(ctx, invitation_id, "pending")
+                raise
+
         member = await self._create_member(
             ctx,
             {
@@ -1377,7 +1547,12 @@ class OrganizationPlugin(Plugin):
                 "organization": organization,
             },
         )
-        return AuthResponse(body={"invitation": accepted, "member": member})
+        resp = AuthResponse(body={"invitation": accepted, "member": member})
+        if team_active_session is not None:
+            self._apply_session_cookie(
+                ctx, resp, session["session"]["token"], team_active_session, user
+            )
+        return resp
 
     async def _reject_invitation(self, ctx: Ctx) -> AuthResponse:
         session = await self._require_session(ctx)
@@ -1505,3 +1680,488 @@ class OrganizationPlugin(Plugin):
         invitations = await self._list_user_invitation_rows(ctx, user_email)
         pending = [i for i in invitations if i["status"] == "pending"]
         return AuthResponse(body=pending)
+
+    # --- team adapter helpers (adapter.ts team methods) --------------------------------
+
+    def _filter_team(self, team: dict[str, Any]) -> dict[str, Any]:
+        return filter_output_fields(team, self.schema["team"])
+
+    def _filter_team_member(self, tm: dict[str, Any]) -> dict[str, Any]:
+        return filter_output_fields(tm, self.schema["teamMember"])
+
+    async def _create_team(self, ctx: Ctx, data: dict[str, Any]) -> dict[str, Any]:
+        team = await ctx.adapter.create("team", {"id": generate_id(), **data})
+        return self._filter_team(team)
+
+    async def _find_team_by_id(
+        self, ctx: Ctx, team_id: str, *, org_id: str | None = None, include_members: bool = False
+    ) -> dict[str, Any] | None:
+        where = [Where("id", team_id)]
+        if org_id:
+            where.append(Where("organizationId", org_id))
+        team = await ctx.adapter.find_one("team", where)
+        if team is None:
+            return None
+        result = self._filter_team(team)
+        if include_members:
+            members = await ctx.adapter.find_many("teamMember", [Where("teamId", team_id)])
+            result["members"] = [self._filter_team_member(m) for m in members]
+        return result
+
+    async def _update_team(
+        self, ctx: Ctx, team_id: str, data: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        update = {k: v for k, v in data.items() if k not in ("id", "organizationId")}
+        update["updatedAt"] = utcnow()  # TS team.updatedAt onUpdate (organization.ts:966-971)
+        team = await ctx.adapter.update("team", [Where("id", team_id)], update)
+        return self._filter_team(team) if team is not None else None
+
+    async def _delete_team(self, ctx: Ctx, team_id: str) -> None:
+        await ctx.adapter.delete_many("teamMember", [Where("teamId", team_id)])
+        await ctx.adapter.delete("team", [Where("id", team_id)])
+
+    async def _list_teams(self, ctx: Ctx, org_id: str) -> list[dict[str, Any]]:
+        teams = await ctx.adapter.find_many("team", [Where("organizationId", org_id)])
+        return [self._filter_team(t) for t in teams]
+
+    async def _set_active_team(
+        self, ctx: Ctx, token: str, team_id: str | None
+    ) -> dict[str, Any] | None:
+        return await ctx.internal.update_session(token, {"activeTeamId": team_id})
+
+    async def _find_team_member(
+        self, ctx: Ctx, team_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        tm = await ctx.adapter.find_one(
+            "teamMember", [Where("teamId", team_id), Where("userId", user_id)]
+        )
+        return self._filter_team_member(tm) if tm is not None else None
+
+    async def _create_team_member_row(self, ctx: Ctx, team_id: str, user_id: str) -> dict[str, Any]:
+        tm = await ctx.adapter.create(
+            "teamMember",
+            {"id": generate_id(), "teamId": team_id, "userId": user_id, "createdAt": utcnow()},
+        )
+        return self._filter_team_member(tm)
+
+    async def _find_or_create_team_member(
+        self, ctx: Ctx, team_id: str, user_id: str
+    ) -> dict[str, Any]:
+        existing = await self._find_team_member(ctx, team_id, user_id)
+        if existing is not None:
+            return existing
+        return await self._create_team_member_row(ctx, team_id, user_id)
+
+    async def _add_team_member_with_limit(
+        self, ctx: Ctx, team_id: str, user_id: str, maximum: int
+    ) -> dict[str, Any]:
+        # ponytail: count-then-create races under concurrency (TS FIXME team-cap-race);
+        # MemoryAdapter is single-process, so this is exact. Add a unique constraint for a real DB.
+        existing = await self._find_team_member(ctx, team_id, user_id)
+        if existing is not None:
+            return {"status": "added", "member": existing}
+        count = await ctx.adapter.count("teamMember", [Where("teamId", team_id)])
+        if count >= maximum:
+            return {"status": "limitReached"}
+        member = await self._create_team_member_row(ctx, team_id, user_id)
+        return {"status": "added", "member": member}
+
+    async def _remove_team_member_row(self, ctx: Ctx, team_id: str, user_id: str) -> None:
+        await ctx.adapter.delete_many(
+            "teamMember", [Where("teamId", team_id), Where("userId", user_id)]
+        )
+
+    async def _list_team_members(self, ctx: Ctx, team_id: str) -> list[dict[str, Any]]:
+        members = await ctx.adapter.find_many("teamMember", [Where("teamId", team_id)])
+        return [self._filter_team_member(m) for m in members]
+
+    async def _list_teams_by_user(self, ctx: Ctx, user_id: str) -> list[dict[str, Any]]:
+        tms = await ctx.adapter.find_many("teamMember", [Where("userId", user_id)])
+        teams: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for tm in tms:  # per-id lookup — MemoryAdapter `in` lowercases ids (see _users_by_ids)
+            tid = tm["teamId"]
+            if tid in seen:
+                continue
+            seen.add(tid)
+            team = await ctx.adapter.find_one("team", [Where("id", tid)])
+            if team is not None:
+                teams.append(self._filter_team(team))
+        return teams
+
+    async def _resolve_maximum_teams(
+        self, ctx: Ctx, org_id: str, session: dict[str, Any] | None
+    ) -> int | None:
+        mt = (self.teams or {}).get("maximum_teams")
+        if mt is None or isinstance(mt, bool):
+            return None  # unlimited; bool isn't a numeric cap
+        if isinstance(mt, int):
+            return mt
+        return await _maybe_await(mt({"organizationId": org_id, "session": session}, ctx))
+
+    async def _resolve_max_members_per_team(
+        self, team_id: str, org_id: str, session: dict[str, Any] | None
+    ) -> int | None:
+        """TS resolveMaximumMembersPerTeam (adapter.ts:34) — None when unconfigured."""
+        m = (self.teams or {}).get("maximum_members_per_team")
+        if m is None or isinstance(m, bool):
+            return None
+        if isinstance(m, int):
+            return m
+        if session is None:  # fn needs a session; over HTTP one always exists
+            raise APIError(500, "INTERNAL_SERVER_ERROR", "maximumMembersPerTeam needs a session")
+        return await _maybe_await(
+            m({"teamId": team_id, "session": session, "organizationId": org_id})
+        )
+
+    async def _drop_team_from_pending_invitations(
+        self, ctx: Ctx, org_id: str, team_id: str
+    ) -> None:
+        """crud-team.ts:353-381 — strip the removed team from pending invitations' teamId list."""
+        pending = await self._find_pending_invitations(ctx, org_id)
+        for inv in pending:
+            team_id_str = inv.get("teamId")
+            if not team_id_str:
+                continue
+            team_ids = team_id_str.split(",")
+            if team_id not in team_ids:
+                continue
+            remaining = [t for t in team_ids if t != team_id]
+            await ctx.adapter.update(
+                "invitation",
+                [Where("id", inv["id"])],
+                {"teamId": ",".join(remaining) if remaining else None},
+            )
+
+    # --- team endpoints (routes/crud-team.ts) -----------------------------------------
+
+    async def _create_team_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        body = ctx.body()
+        org_id = body.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        name = _required_str(body, "name")
+        member = await self._find_member_by_org(ctx, session["user"]["id"], org_id)
+        if member is None:  # TS reuses the invite error string here (crud-team.ts:122-127)
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_INVITE_USERS_TO_THIS_ORGANIZATION")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"team": ["create"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_CREATE_TEAMS_IN_THIS_ORGANIZATION")
+
+        existing_teams = await self._list_teams(ctx, org_id)
+        maximum = await self._resolve_maximum_teams(ctx, org_id, session)
+        if maximum and len(existing_teams) >= maximum:
+            raise _err(400, "YOU_HAVE_REACHED_THE_MAXIMUM_NUMBER_OF_TEAMS")
+
+        organization = await self._find_org_by_id(ctx, org_id)
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+
+        extra = {k: v for k, v in body.items() if k in self._extra("team")}
+        team_data = {
+            "name": name,
+            "organizationId": org_id,
+            "createdAt": utcnow(),
+            "updatedAt": utcnow(),
+            **extra,
+        }
+        merged = await self._run_before_hook(
+            "before_create_team",
+            {
+                "team": {"name": name, "organizationId": org_id, **extra},
+                "user": session["user"],
+                "organization": organization,
+            },
+        )
+        if merged is not None:
+            team_data = {**team_data, **merged}
+        created = await self._create_team(ctx, team_data)
+        await self._run_after_hook(
+            "after_create_team",
+            {"team": created, "user": session["user"], "organization": organization},
+        )
+        return AuthResponse(body=created)
+
+    async def _update_team_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        body = ctx.body()
+        team_id = _required_str(body, "teamId")
+        data = body.get("data")
+        if not isinstance(data, dict):
+            raise APIError(400, "INVALID_BODY", "data is required")
+        org_id = data.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        member = await self._find_member_by_org(ctx, session["user"]["id"], org_id)
+        if member is None:
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_TEAM")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"team": ["update"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_TEAM")
+        team = await self._find_team_by_id(ctx, team_id, org_id=org_id)
+        if team is None or team["organizationId"] != org_id:
+            raise _err(400, "TEAM_NOT_FOUND")
+        organization = await self._find_org_by_id(ctx, org_id)
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        updates = {k: v for k, v in data.items() if k not in ("organizationId", "id")}
+        merged = await self._run_before_hook(
+            "before_update_team",
+            {
+                "team": team,
+                "updates": updates,
+                "user": session["user"],
+                "organization": organization,
+            },
+        )
+        # TS: when the hook returns data, that data IS the update (not merged with updates)
+        updated = await self._update_team(
+            ctx, team["id"], merged if merged is not None else updates
+        )
+        await self._run_after_hook(
+            "after_update_team",
+            {"team": updated, "user": session["user"], "organization": organization},
+        )
+        return AuthResponse(body=updated)
+
+    async def _remove_team_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        body = ctx.body()
+        team_id = _required_str(body, "teamId")
+        org_id = body.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        member = await self._find_member_by_org(ctx, session["user"]["id"], org_id)
+        # cannot delete your own active team (crud-team.ts:286)
+        if member is None or session["session"].get("activeTeamId") == team_id:
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_DELETE_THIS_TEAM")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"team": ["delete"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_DELETE_TEAMS_IN_THIS_ORGANIZATION")
+        team = await self._find_team_by_id(ctx, team_id, org_id=org_id)
+        if team is None or team["organizationId"] != org_id:
+            raise _err(400, "TEAM_NOT_FOUND")
+        if not (self.teams or {}).get("allow_removing_all_teams"):
+            teams = await self._list_teams(ctx, org_id)
+            if len(teams) <= 1:
+                raise _err(400, "UNABLE_TO_REMOVE_LAST_TEAM")
+        organization = await self._find_org_by_id(ctx, org_id)
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        # before_delete_team is fire-only (no data merge), like before_delete_organization
+        await self._run_after_hook(
+            "before_delete_team",
+            {"team": team, "user": session["user"], "organization": organization},
+        )
+        await self._delete_team(ctx, team["id"])
+        await self._drop_team_from_pending_invitations(ctx, org_id, team["id"])
+        await self._run_after_hook(
+            "after_delete_team",
+            {"team": team, "user": session["user"], "organization": organization},
+        )
+        return AuthResponse(body={"message": "Team removed successfully."})
+
+    async def _list_teams_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        query = ctx.request.query
+        org_id = query.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        if await self._find_member_by_org(ctx, session["user"]["id"], org_id) is None:
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_ACCESS_THIS_ORGANIZATION")
+        return AuthResponse(body=await self._list_teams(ctx, org_id))
+
+    async def _set_active_team_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        body = ctx.body()
+        token = session["session"]["token"]
+
+        # explicit null → unset (only if there is an active team to clear)
+        if "teamId" in body and body["teamId"] is None:
+            if not session["session"].get("activeTeamId"):
+                return AuthResponse(body=None)
+            updated = await self._set_active_team(ctx, token, None)
+            resp = AuthResponse(body=None)
+            self._apply_session_cookie(ctx, resp, token, updated, session["user"])
+            return resp
+
+        team_id = body.get("teamId")
+        if not team_id:
+            active = session["session"].get("activeTeamId")
+            if not active:
+                return AuthResponse(body=None)
+            team_id = active
+
+        active_org = session["session"].get("activeOrganizationId")
+        if not active_org:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        team = await self._find_team_by_id(ctx, team_id, org_id=active_org)
+        if team is None:
+            raise _err(400, "TEAM_NOT_FOUND")
+        if await self._find_team_member(ctx, team_id, session["user"]["id"]) is None:
+            raise _err(403, "USER_IS_NOT_A_MEMBER_OF_THE_TEAM")
+        updated = await self._set_active_team(ctx, token, team["id"])
+        resp = AuthResponse(body=team)
+        self._apply_session_cookie(ctx, resp, token, updated, session["user"])
+        return resp
+
+    async def _list_user_teams_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user_id = session["user"]["id"]
+        teams = await self._list_teams_by_user(ctx, user_id)
+        # keep only teams whose org the caller is actually a member of (crud-team.ts:862-881)
+        result: list[dict[str, Any]] = []
+        member_of: dict[str, bool] = {}
+        for team in teams:
+            oid = team["organizationId"]
+            if oid not in member_of:
+                member_of[oid] = await self._check_membership(ctx, user_id, oid) is not None
+            if member_of[oid]:
+                result.append(team)
+        return AuthResponse(body=result)
+
+    async def _list_team_members_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        query = ctx.request.query
+        team_id = query.get("teamId") or session["session"].get("activeTeamId")
+        if not team_id:
+            raise _err(400, "YOU_DO_NOT_HAVE_AN_ACTIVE_TEAM")
+        team = await self._find_team_by_id(ctx, team_id)
+        if team is None:
+            raise _err(400, "TEAM_NOT_FOUND")
+        # org membership (not just a teamMember row) is the requirement (crud-team.ts:969-978)
+        if await self._check_membership(ctx, session["user"]["id"], team["organizationId"]) is None:
+            raise _err(400, "USER_IS_NOT_A_MEMBER_OF_THE_TEAM")
+        if await self._find_team_member(ctx, team_id, session["user"]["id"]) is None:
+            raise _err(400, "USER_IS_NOT_A_MEMBER_OF_THE_TEAM")
+        return AuthResponse(body=await self._list_team_members(ctx, team_id))
+
+    async def _add_team_member_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        body = ctx.body()
+        org_id = body.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        team_id = _required_str(body, "teamId")
+        target_user_id = _required_str(body, "userId")
+        current = await self._find_member_by_org(ctx, session["user"]["id"], org_id)
+        if current is None:
+            raise _err(400, "USER_IS_NOT_A_MEMBER_OF_THE_ORGANIZATION")
+        if not await has_permission(
+            role=current["role"],
+            permissions={"member": ["update"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_CREATE_A_NEW_TEAM_MEMBER")
+        to_add = await self._find_member_by_org(ctx, target_user_id, org_id)
+        if to_add is None:
+            raise _err(400, "USER_IS_NOT_A_MEMBER_OF_THE_ORGANIZATION")
+        team = await self._find_team_by_id(ctx, team_id, org_id=org_id)
+        if team is None:
+            raise _err(400, "TEAM_NOT_FOUND")
+        organization = await self._find_org_by_id(ctx, org_id)
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        user_being_added = await ctx.adapter.find_one("user", [Where("id", target_user_id)])
+        if user_being_added is None:
+            raise APIError(400, "BAD_REQUEST", "User not found")
+        await self._run_after_hook(  # before_add_team_member is fire-only (TS ignores the merge)
+            "before_add_team_member",
+            {
+                "teamMember": {"teamId": team_id, "userId": target_user_id},
+                "team": team,
+                "user": user_being_added,
+                "organization": organization,
+            },
+        )
+        maximum = await self._resolve_max_members_per_team(team_id, org_id, session)
+        if maximum is not None:
+            result = await self._add_team_member_with_limit(ctx, team_id, target_user_id, maximum)
+            if result["status"] == "limitReached":
+                raise _err(403, "TEAM_MEMBER_LIMIT_REACHED")
+            team_member = result["member"]
+        else:
+            team_member = await self._find_or_create_team_member(ctx, team_id, target_user_id)
+        await self._run_after_hook(
+            "after_add_team_member",
+            {
+                "teamMember": team_member,
+                "team": team,
+                "user": user_being_added,
+                "organization": organization,
+            },
+        )
+        return AuthResponse(body=team_member)
+
+    async def _remove_team_member_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        body = ctx.body()
+        org_id = body.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        team_id = _required_str(body, "teamId")
+        target_user_id = _required_str(body, "userId")
+        current = await self._find_member_by_org(ctx, session["user"]["id"], org_id)
+        if current is None:
+            raise _err(400, "USER_IS_NOT_A_MEMBER_OF_THE_ORGANIZATION")
+        if not await has_permission(
+            role=current["role"],
+            permissions={"member": ["delete"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_REMOVE_A_TEAM_MEMBER")
+        to_remove = await self._find_member_by_org(ctx, target_user_id, org_id)
+        if to_remove is None:
+            raise _err(400, "USER_IS_NOT_A_MEMBER_OF_THE_ORGANIZATION")
+        team = await self._find_team_by_id(ctx, team_id, org_id=org_id)
+        if team is None:
+            raise _err(400, "TEAM_NOT_FOUND")
+        organization = await self._find_org_by_id(ctx, org_id)
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        user_being_removed = await ctx.adapter.find_one("user", [Where("id", target_user_id)])
+        if user_being_removed is None:
+            raise APIError(400, "BAD_REQUEST", "User not found")
+        team_member = await self._find_team_member(ctx, team_id, target_user_id)
+        if team_member is None:
+            raise _err(400, "USER_IS_NOT_A_MEMBER_OF_THE_TEAM")
+        await self._run_after_hook(
+            "before_remove_team_member",
+            {
+                "teamMember": team_member,
+                "team": team,
+                "user": user_being_removed,
+                "organization": organization,
+            },
+        )
+        await self._remove_team_member_row(ctx, team_id, target_user_id)
+        await self._run_after_hook(
+            "after_remove_team_member",
+            {
+                "teamMember": team_member,
+                "team": team,
+                "user": user_being_removed,
+                "organization": organization,
+            },
+        )
+        return AuthResponse(body={"message": "Team member removed successfully."})
