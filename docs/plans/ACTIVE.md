@@ -218,8 +218,15 @@ the admin agent's ownership (sole consumer, no separate dispatch).
       awaited inline (TS runInBackgroundOrAwait); accept CAS instead of
       transaction+rollback. Seams: teamId/team branches -> phase 3;
       dynamicAccessControl role lookup on invite -> phase 4.
-- [ ] Organization phase 3 teams (+ session.activeTeamId), phase 4 dynamic
-      AC (organizationRole rows merged in _resolve_roles).
+- [x] Organization phases 3+4: DONE — teams committed 6bec82c (40 tests);
+      dynamic AC committed (27 tests, org suite 161, full 1371 green).
+      organizationRole table (permission singular, JSON-string), 5 role
+      endpoints, union-merge precedence (dynamic AUGMENTS same-named static
+      role, never shadows — has-permission.ts:65-68), ac instance required
+      (MISSING_AC_INSTANCE 501), both unknown-role SEAMs consult dynamic
+      roles, 16 DAC error strings byte-exact. ORGANIZATION PLUGIN CLOSED
+      vs TS v1.6.23. BACKLOG: missingPermissions[] error-body array (needs
+      types.py/auth.py APIError extension); cacheAllRoles optimization.
 
 ## Wave 5 — Advanced plugins (spec: gap/06-plugins-advanced.md)
 
@@ -243,13 +250,8 @@ only. A new session CANNOT wait for their notifications. For each, check
 git status/diff, then either finish directly (if near-done) or redispatch a
 fresh agent seeded with the on-disk state:
 
-1. ORG PHASE 4 dynamic-AC (organization.py + test_organization.py, IN
-   PROGRESS): DAC tests + routes() wiring + config plumbing are written;
-   MISSING at last report: the handler/helper implementations —
-   _create_role, _delete_role, _list_roles, _get_role, _update_role,
-   _filter_dynamic_role_names (ty flags them as unresolved attributes).
-   Baseline before its WIP: 134 org tests / suite 1344. Done-condition:
-   those pass + new DAC tests green + org-closure statement vs TS.
+1. ORG PHASE 4 dynamic-AC: DONE+committed before the handoff after all —
+   see the [x] entry below; organization plugin is CLOSED (4/4 phases).
 2. W5-B oauth-proxy (plugins_ext/oauth_proxy.py + tests/plugins/
    test_oauth_proxy.py): state unknown at handoff — inspect disk; full
    dispatch spec = the W5-B entry below + open-redirect guards emphasis.

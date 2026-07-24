@@ -1,4 +1,4 @@
-"""organization plugin — core-org + invitations + teams (phases 1-3); static roles only.
+"""organization plugin — core-org + invitations + teams + dynamic access control (phases 1-4).
 
 Port of better-auth's ``plugins/organization`` (v1.6.23): create/update/delete/list/
 get-full/set-active organizations, member management (list/leave/remove/update-role/
@@ -26,10 +26,14 @@ validation + accept-path team-membership branch, and the ``before/after`` team h
 Verified against ``routes/crud-team.ts``, the team branches of ``routes/crud-invites.ts``,
 ``adapter.ts`` team methods, ``organization.ts`` wiring/schema, and ``types.ts``.
 
-SEAM for a later phase (do not implement here):
-- Phase 4 (dynamic access control): the ``organizationRole`` table and the dynamic-role
-  merge inside :func:`has_permission` (single resolver seam) + the unknown-role lookup in
-  ``update-member-role``. This phase resolves STATIC roles only.
+Phase 4 (dynamic access control) is implemented (gated on ``dynamic_access_control={"enabled":
+True}``): the ``organizationRole`` table, the create/list/get/update/delete role endpoints
+(``ac`` resource permissions + subset validation + maximumRolesPerOrganization), the dynamic-
+role union merge inside :func:`has_permission`, and the DAC branch of the unknown-role lookup
+in ``update-member-role`` / ``invite-member``. Verified against ``routes/crud-access-control.ts``,
+``has-permission.ts``, ``permission.ts``, ``organization.ts`` and ``types.ts``. v1.6.23 defines
+no role-specific hooks (``types.ts`` ``organizationHooks`` covers only org/member/invitation/team),
+so none exist to port.
 """
 
 from __future__ import annotations
@@ -198,12 +202,22 @@ def parse_roles(roles: str | list[str]) -> str:
 # --- permission resolution (has-permission.ts + permission.ts) --------------------
 
 
+def _is_valid_role_permission(value: Any) -> bool:
+    """TS ``z.record(z.string(), z.array(z.string()))`` shape guard for a parsed permission."""
+    if not isinstance(value, dict):
+        return False
+    return all(
+        isinstance(k, str) and isinstance(v, list) and all(isinstance(a, str) for a in v)
+        for k, v in value.items()
+    )
+
+
 def _resolve_roles(options: OrganizationPlugin) -> dict[str, Role]:
     """The static role table: defaults overridden by ``options.roles`` (custom ac/roles).
 
-    PHASE 4 SEAM: this is the single resolver where dynamic ``organizationRole`` rows will
-    be merged (load rows for the org, JSON-parse each ``permission``, dedup per resource,
-    rebuild via ``options.ac.new_role(merged)``). Static roles only in this phase.
+    Dynamic ``organizationRole`` rows are merged on top of this in :func:`has_permission`
+    (the async resolver that has ``ctx`` / ``organization_id`` to query the DB), mirroring
+    TS ``has-permission.ts``. This returns a fresh mutable dict so that merge can layer in.
     """
     return {**ORG_DEFAULT_ROLES, **(options.roles or {})}
 
@@ -238,13 +252,34 @@ async def has_permission(
     ctx: Ctx,
     allow_creator_all_permissions: bool = False,
 ) -> bool:
-    """TS ``hasPermission`` — ASYNC because phase 4 loads dynamic roles from the DB.
+    """TS ``hasPermission`` (has-permission.ts): resolve static roles, then merge the org's
+    dynamic ``organizationRole`` rows on top (union per resource) before authorizing.
 
-    In THIS phase it resolves STATIC roles only (via :func:`_resolve_roles`) and delegates
-    to :func:`_has_permission_fn`. ``organization_id`` / ``ctx`` are unused now but are the
-    inputs the phase-4 dynamic-role query needs, so the signature is already the final one.
+    A dynamic role UNIONS with a same-named static role (dynamic augments static, never
+    shadows); a dynamic name with no static counterpart becomes a fresh role. The merge runs
+    only when ``dynamicAccessControl.enabled`` and an ``ac`` instance is configured.
     """
     ac_roles = _resolve_roles(options)
+    if ctx is not None and organization_id and options._dac_enabled and options.ac is not None:
+        # ponytail: TS keeps a module-level `cacheAllRoles` + `useMemoryCache` to skip these
+        # reads inside checkIfMemberHasPermission; dropped because the new role isn't persisted
+        # until after those checks, so re-reading the DB yields the identical role set. Add the
+        # cache back if per-request DB round-trips ever matter.
+        rows = await ctx.adapter.find_many(
+            "organizationRole", [Where("organizationId", organization_id)]
+        )
+        for row in rows:
+            role_name = row["role"]
+            parsed = json.loads(row["permission"])
+            if not _is_valid_role_permission(parsed):
+                raise APIError(
+                    500, "INTERNAL_SERVER_ERROR", f"Invalid permissions for role {role_name}"
+                )
+            existing = ac_roles.get(role_name)
+            merged: dict[str, list[str]] = dict(existing.statements) if existing is not None else {}
+            for key, actions in parsed.items():
+                merged[key] = list(dict.fromkeys([*merged.get(key, []), *actions]))
+            ac_roles[role_name] = options.ac.new_role(merged)
     return _has_permission_fn(role, permissions, options, ac_roles, allow_creator_all_permissions)
 
 
@@ -269,6 +304,9 @@ class OrganizationPlugin(Plugin):
         membership_limit: int | Callable[..., Any] = 100,
         ac: AccessControl | None = None,
         roles: dict[str, Role] | None = None,
+        # --- dynamic access control (phase 4) — TS OrganizationOptions.dynamicAccessControl.
+        # {"enabled": bool, "maximum_roles_per_organization": int | (org_id) -> Awaitable[int]}
+        dynamic_access_control: dict[str, Any] | None = None,
         disable_organization_deletion: bool = False,
         # --- invitations (phase 2) — TS OrganizationOptions invitation knobs -----------
         invitation_expires_in: int = 48 * 60 * 60,  # seconds; TS default 48h
@@ -290,6 +328,8 @@ class OrganizationPlugin(Plugin):
         self.membership_limit = membership_limit
         self.ac = ac
         self.roles = roles
+        self.dynamic_access_control = dynamic_access_control
+        self._dac_enabled = bool(dynamic_access_control and dynamic_access_control.get("enabled"))
         self.disable_organization_deletion = disable_organization_deletion
         self.invitation_expires_in = invitation_expires_in
         self.invitation_limit = invitation_limit
@@ -370,6 +410,27 @@ class OrganizationPlugin(Plugin):
             },
             # team + teamMember tables only when teams enabled (organization.ts:940-1006)
             **(self._team_schema() if self._teams_enabled else {}),
+            # organizationRole only when dynamicAccessControl.enabled (organization.ts:1008-1048)
+            **(self._organization_role_schema() if self._dac_enabled else {}),
+        }
+
+    def _organization_role_schema(self) -> Schema:
+        """organizationRole table — TS OrganizationRoleDefaultFields (organization.ts:1010-1046).
+
+        ``permission`` is a JSON-stringified ``Record<str, list[str]>`` (column is a string).
+        """
+        return {
+            "organizationRole": {
+                "id": Field("string", required=True, unique=True),
+                "organizationId": Field(
+                    "string", required=True, references=Reference("organization", "id"), index=True
+                ),
+                "role": Field("string", required=True, index=True),
+                "permission": Field("string", required=True),  # JSON-stringified permissions
+                "createdAt": Field("datetime", required=True),
+                "updatedAt": Field("datetime", required=False, on_update=utcnow),
+                **self._extra("organizationRole"),
+            }
         }
 
     def _team_schema(self) -> Schema:
@@ -435,6 +496,15 @@ class OrganizationPlugin(Plugin):
                 ("GET", "/organization/list-team-members", self._list_team_members_route),
                 ("POST", "/organization/add-team-member", self._add_team_member_route),
                 ("POST", "/organization/remove-team-member", self._remove_team_member_route),
+            ]
+        # --- dynamic access control (phase 4) — only when enabled (organization.ts:929-934)
+        if self._dac_enabled:
+            routes += [
+                ("POST", "/organization/create-role", self._create_role),
+                ("POST", "/organization/delete-role", self._delete_role),
+                ("GET", "/organization/list-roles", self._list_roles),
+                ("GET", "/organization/get-role", self._get_role),
+                ("POST", "/organization/update-role", self._update_role),
             ]
         return routes
 
@@ -1187,9 +1257,10 @@ class OrganizationPlugin(Plugin):
         valid_static = set(_resolve_roles(self).keys())
         unknown = [r for r in role_to_set if r not in valid_static]
         if unknown:
-            # PHASE 4 SEAM: when dynamicAccessControl is enabled, resolve unknown names
-            # against organizationRole rows before rejecting.
-            raise APIError(400, "ROLE_NOT_FOUND", f"ROLE_NOT_FOUND: {', '.join(unknown)}")
+            # DAC: consult organizationRole rows before rejecting (crud-members.ts:576-602).
+            still_invalid = await self._filter_dynamic_role_names(ctx, org_id, unknown)
+            if still_invalid:
+                raise APIError(400, "ROLE_NOT_FOUND", f"ROLE_NOT_FOUND: {', '.join(still_invalid)}")
 
         actor = await self._find_member_by_org(ctx, session["user"]["id"], org_id)
         if actor is None:
@@ -1336,11 +1407,14 @@ class OrganizationPlugin(Plugin):
         valid_static = set(_resolve_roles(self).keys())
         unknown = [r for r in roles_array if r not in valid_static]
         if unknown:
-            # PHASE 4 SEAM: when dynamicAccessControl is enabled, resolve unknown names
-            # against organizationRole rows before rejecting.
-            raise APIError(
-                400, "ROLE_NOT_FOUND", f"{ERROR_CODES['ROLE_NOT_FOUND']}: {', '.join(unknown)}"
-            )
+            # DAC: consult organizationRole rows before rejecting (crud-invites.ts:299-322).
+            still_invalid = await self._filter_dynamic_role_names(ctx, org_id, unknown)
+            if still_invalid:
+                raise APIError(
+                    400,
+                    "ROLE_NOT_FOUND",
+                    f"{ERROR_CODES['ROLE_NOT_FOUND']}: {', '.join(still_invalid)}",
+                )
         member_roles = [r.strip() for r in member["role"].split(",")]
         if creator_role not in member_roles and creator_role in roles.split(","):
             raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_INVITE_USER_WITH_THIS_ROLE")
@@ -2165,3 +2239,329 @@ class OrganizationPlugin(Plugin):
             },
         )
         return AuthResponse(body={"message": "Team member removed successfully."})
+
+    # --- dynamic access control (routes/crud-access-control.ts) ------------------------
+
+    def _filter_role(self, role: dict[str, Any]) -> dict[str, Any]:
+        return filter_output_fields(role, self.schema["organizationRole"])
+
+    def _predefined_role_names(self) -> list[str]:
+        """TS ``options.roles ? Object.keys(options.roles) : ["owner","admin","member"]``."""
+        return list(self.roles.keys()) if self.roles else ["owner", "admin", "member"]
+
+    async def _resolve_maximum_roles(self, org_id: str) -> float:
+        """TS ``maximumRolesPerOrganization`` (default ``Number.POSITIVE_INFINITY``)."""
+        m = (self.dynamic_access_control or {}).get("maximum_roles_per_organization")
+        if m is None or isinstance(m, bool):
+            return float("inf")
+        if isinstance(m, int):
+            return m
+        return await _maybe_await(m(org_id))
+
+    def _role_additional_from_body(self, additional: dict[str, Any]) -> dict[str, Any]:
+        """Client-settable additionalFields present in the payload (``input:false`` skipped;
+        the adapter applies their default)."""
+        result: dict[str, Any] = {}
+        for key, field in self._extra("organizationRole").items():
+            if field.input is False:
+                continue
+            if key in additional:
+                result[key] = additional[key]
+        return result
+
+    def _check_role_name_taken_by_predefined(self, role_name: str) -> None:
+        if role_name in self._predefined_role_names():
+            raise _err(400, "ROLE_NAME_IS_ALREADY_TAKEN")
+
+    async def _check_role_name_taken_in_db(self, ctx: Ctx, org_id: str, role_name: str) -> None:
+        existing = await ctx.adapter.find_one(
+            "organizationRole", [Where("organizationId", org_id), Where("role", role_name)]
+        )
+        if existing is not None:
+            raise _err(400, "ROLE_NAME_IS_ALREADY_TAKEN")
+
+    def _check_invalid_resources(self, permission: dict[str, Any]) -> None:
+        """checkForInvalidResources: every requested resource must be in ``ac.statements``."""
+        valid = set(self.ac.statements.keys()) if self.ac is not None else set()
+        if any(resource not in valid for resource in permission):
+            raise _err(400, "INVALID_RESOURCE")
+
+    async def _check_member_has_permission(
+        self,
+        ctx: Ctx,
+        *,
+        member: dict[str, Any],
+        organization_id: str,
+        permission_required: dict[str, Any],
+        action: str,
+    ) -> None:
+        """checkIfMemberHasPermission: the actor can only grant permissions they hold.
+
+        ponytail: TS surfaces the exact ``missingPermissions[]`` on the error body; APIError
+        carries only status/code/message (types.py is out of scope), so we raise the byte-exact
+        code/message on the first missing permission. Add the list if APIError grows `extra`.
+        """
+        codes = {
+            "create": "YOU_ARE_NOT_ALLOWED_TO_CREATE_A_ROLE",
+            "update": "YOU_ARE_NOT_ALLOWED_TO_UPDATE_A_ROLE",
+            "delete": "YOU_ARE_NOT_ALLOWED_TO_DELETE_A_ROLE",
+            "read": "YOU_ARE_NOT_ALLOWED_TO_READ_A_ROLE",
+            "list": "YOU_ARE_NOT_ALLOWED_TO_LIST_A_ROLE",
+        }
+        for resource, perms in permission_required.items():
+            for perm in perms:
+                if not await has_permission(
+                    role=member["role"],
+                    permissions={resource: [perm]},
+                    options=self,
+                    organization_id=organization_id,
+                    ctx=ctx,
+                ):
+                    raise _err(403, codes.get(action, "YOU_ARE_NOT_ALLOWED_TO_GET_A_ROLE"))
+
+    async def _filter_dynamic_role_names(
+        self, ctx: Ctx, org_id: str, unknown: list[str]
+    ) -> list[str]:
+        """crud-members/crud-invites: with DAC enabled, drop names that exist as
+        ``organizationRole`` rows for the org; the remainder is still invalid. Disabled → all
+        unknown names stay invalid."""
+        if not self._dac_enabled:
+            return unknown
+        # ponytail: fetch-all + filter instead of a `role IN (...)` query — dodges the
+        # MemoryAdapter `in` case quirk (see _users_by_ids); the found-name set is identical.
+        rows = await ctx.adapter.find_many("organizationRole", [Where("organizationId", org_id)])
+        found = {r["role"] for r in rows}
+        return [r for r in unknown if r not in found]
+
+    def _role_condition(self, source: dict[str, Any]) -> Where:
+        """The roleName/roleId selector (schema requires exactly one); ROLE_NOT_FOUND if absent."""
+        if source.get("roleName"):
+            return Where("role", source["roleName"])
+        if source.get("roleId"):
+            return Where("id", source["roleId"])
+        raise _err(400, "ROLE_NOT_FOUND")
+
+    async def _create_role(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        body = ctx.body()
+        role_name = body.get("role")
+        if not isinstance(role_name, str):
+            raise APIError(400, "INVALID_BODY", "role is required")
+        permission = body.get("permission")
+        if not isinstance(permission, dict):
+            raise APIError(400, "INVALID_BODY", "permission is required")
+        additional = body.get("additionalFields") or {}
+
+        if self.ac is None:
+            raise _err(501, "MISSING_AC_INSTANCE")
+
+        org_id = body.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "YOU_MUST_BE_IN_AN_ORGANIZATION_TO_CREATE_A_ROLE")
+
+        role_name = role_name.lower()  # normalizeRoleName
+        self._check_role_name_taken_by_predefined(role_name)
+
+        member = await self._check_membership(ctx, user["id"], org_id)
+        if member is None:
+            raise _err(403, "YOU_ARE_NOT_A_MEMBER_OF_THIS_ORGANIZATION")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"ac": ["create"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_CREATE_A_ROLE")
+
+        maximum = await self._resolve_maximum_roles(org_id)
+        roles_in_db = await ctx.adapter.count("organizationRole", [Where("organizationId", org_id)])
+        if roles_in_db >= maximum:
+            raise _err(400, "TOO_MANY_ROLES")
+
+        self._check_invalid_resources(permission)
+        await self._check_member_has_permission(
+            ctx,
+            member=member,
+            organization_id=org_id,
+            permission_required=permission,
+            action="create",
+        )
+        await self._check_role_name_taken_in_db(ctx, org_id, role_name)
+
+        new_role = self.ac.new_role(permission)
+        row = {
+            "organizationId": org_id,
+            "role": role_name,
+            "permission": _json_dumps(permission),
+            "createdAt": utcnow(),
+            **self._role_additional_from_body(additional),
+        }
+        created = await ctx.adapter.create("organizationRole", row)
+        role_data = {**self._filter_role(created), "permission": permission}
+        return AuthResponse(
+            body={"success": True, "roleData": role_data, "statements": new_role.statements}
+        )
+
+    async def _delete_role(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        body = ctx.body()
+        org_id = body.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        member = await self._check_membership(ctx, user["id"], org_id)
+        if member is None:
+            raise _err(403, "YOU_ARE_NOT_A_MEMBER_OF_THIS_ORGANIZATION")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"ac": ["delete"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_DELETE_A_ROLE")
+
+        role_name = body.get("roleName")
+        if role_name and role_name in self._predefined_role_names():
+            raise _err(400, "CANNOT_DELETE_A_PRE_DEFINED_ROLE")
+        condition = self._role_condition(body)
+
+        existing = await ctx.adapter.find_one(
+            "organizationRole", [Where("organizationId", org_id), condition]
+        )
+        if existing is None:
+            raise _err(400, "ROLE_NOT_FOUND")
+
+        # reject deletion while any member still holds the role (comma-split exact match).
+        role_to_delete = existing["role"]
+        members = await ctx.adapter.find_many(
+            "member",
+            [Where("organizationId", org_id), Where("role", role_to_delete, "contains")],
+        )
+        if any(role_to_delete in [r.strip() for r in m["role"].split(",")] for m in members):
+            raise _err(400, "ROLE_IS_ASSIGNED_TO_MEMBERS")
+
+        await ctx.adapter.delete_many(
+            "organizationRole", [Where("organizationId", org_id), condition]
+        )
+        return AuthResponse(body={"success": True})
+
+    async def _list_roles(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        query = ctx.request.query
+        org_id = query.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        member = await self._check_membership(ctx, user["id"], org_id)
+        if member is None:
+            raise _err(403, "YOU_ARE_NOT_A_MEMBER_OF_THIS_ORGANIZATION")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"ac": ["read"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_LIST_A_ROLE")
+        rows = await ctx.adapter.find_many("organizationRole", [Where("organizationId", org_id)])
+        return AuthResponse(
+            body=[{**self._filter_role(r), "permission": json.loads(r["permission"])} for r in rows]
+        )
+
+    async def _get_role(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        query = ctx.request.query
+        org_id = query.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        member = await self._check_membership(ctx, user["id"], org_id)
+        if member is None:
+            raise _err(403, "YOU_ARE_NOT_A_MEMBER_OF_THIS_ORGANIZATION")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"ac": ["read"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_READ_A_ROLE")
+        condition = self._role_condition(query)
+        role = await ctx.adapter.find_one(
+            "organizationRole", [Where("organizationId", org_id), condition]
+        )
+        if role is None:
+            raise _err(400, "ROLE_NOT_FOUND")
+        return AuthResponse(
+            body={**self._filter_role(role), "permission": json.loads(role["permission"])}
+        )
+
+    async def _update_role(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        body = ctx.body()
+        if self.ac is None:
+            raise _err(501, "MISSING_AC_INSTANCE")
+        org_id = body.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "NO_ACTIVE_ORGANIZATION")
+        member = await self._check_membership(ctx, user["id"], org_id)
+        if member is None:
+            raise _err(403, "YOU_ARE_NOT_A_MEMBER_OF_THIS_ORGANIZATION")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"ac": ["update"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_UPDATE_A_ROLE")
+
+        condition = self._role_condition(body)
+        role = await ctx.adapter.find_one(
+            "organizationRole", [Where("organizationId", org_id), condition]
+        )
+        if role is None:
+            raise _err(400, "ROLE_NOT_FOUND")
+        role["permission"] = json.loads(role["permission"]) if role.get("permission") else None
+
+        data = body.get("data")
+        if not isinstance(data, dict):
+            raise APIError(400, "INVALID_BODY", "data is required")
+        new_permission = data.get("permission")
+        new_role_name = data.get("roleName")
+
+        update_data = self._role_additional_from_body(
+            {k: v for k, v in data.items() if k not in ("permission", "roleName")}
+        )
+        if new_permission is not None:
+            self._check_invalid_resources(new_permission)
+            await self._check_member_has_permission(
+                ctx,
+                member=member,
+                organization_id=org_id,
+                permission_required=new_permission,
+                action="update",
+            )
+            update_data["permission"] = new_permission
+        if new_role_name:
+            new_role_name = new_role_name.lower()
+            self._check_role_name_taken_by_predefined(new_role_name)
+            await self._check_role_name_taken_in_db(ctx, org_id, new_role_name)
+            update_data["role"] = new_role_name
+
+        update = dict(update_data)
+        if update_data.get("permission") is not None:
+            update["permission"] = _json_dumps(update_data["permission"])
+        await ctx.adapter.update_many(
+            "organizationRole", [Where("organizationId", org_id), condition], update
+        )
+        role_data = {
+            **role,
+            **update,
+            "permission": update_data.get("permission") or role.get("permission") or None,
+        }
+        return AuthResponse(body={"success": True, "roleData": role_data})

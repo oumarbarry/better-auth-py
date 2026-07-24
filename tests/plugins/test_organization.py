@@ -10,9 +10,15 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
+from better_auth.access_control import (
+    ORG_DEFAULT_ROLES,
+    ORG_DEFAULT_STATEMENTS,
+    create_access_control,
+)
 from better_auth.adapters.base import Where
 from better_auth.crypto import generate_id
 from better_auth.plugins_ext.organization import ERROR_CODES, OrganizationPlugin
+from better_auth.schema import Field
 from better_auth.session import utcnow
 from conftest import make_auth, make_client, sign_up
 
@@ -2101,3 +2107,593 @@ def test_team_error_codes_match_ts_exactly():
         ERROR_CODES["YOU_ARE_NOT_ALLOWED_TO_ACCESS_THIS_ORGANIZATION"]
         == "You are not allowed to access this organization as an owner"
     )
+
+
+# ============================================================================
+# PHASE 4 — dynamic access control (routes/crud-access-control.ts,
+# has-permission.ts merge, organization.ts schema/wiring, types.ts config).
+# There are NO role-specific hooks in v1.6.23 (types.ts organizationHooks has
+# only org/member/invitation/team hooks), so none are ported/tested.
+# ============================================================================
+
+
+def _dac_plugin(**kwargs: Any) -> OrganizationPlugin:
+    """Org plugin wired for DAC: a custom ``ac`` statement universe (project/sales +
+    org defaults) and static owner/admin/member roles built from it, mirroring
+    crud-access-control.test.ts."""
+    ac = create_access_control(
+        {
+            "project": ["create", "read", "update", "delete"],
+            "sales": ["create", "read", "update", "delete"],
+            **ORG_DEFAULT_STATEMENTS,
+        }
+    )
+    roles = {
+        "owner": ac.new_role(
+            {
+                "project": ["create", "delete", "update", "read"],
+                "sales": ["create", "read", "update", "delete"],
+                **ORG_DEFAULT_ROLES["owner"].statements,
+            }
+        ),
+        "admin": ac.new_role(
+            {
+                "project": ["create", "read", "delete", "update"],
+                "sales": ["create", "read"],
+                **ORG_DEFAULT_ROLES["admin"].statements,
+            }
+        ),
+        "member": ac.new_role(
+            {
+                "project": ["read"],
+                "sales": ["read"],
+                **ORG_DEFAULT_ROLES["member"].statements,
+            }
+        ),
+    }
+    dac = kwargs.pop("dynamic_access_control", {"enabled": True})
+    return OrganizationPlugin(
+        ac=ac,
+        roles=roles,
+        dynamic_access_control=dac,
+        additional_fields={
+            "organizationRole": {
+                "color": Field("string", default="#ffffff", required=True),
+                "serverOnlyValue": Field(
+                    "string", default="server-only-value", input=False, required=True
+                ),
+            }
+        },
+        **kwargs,
+    )
+
+
+def _dac_auth(**kwargs: Any):
+    return make_auth(plugins=[_dac_plugin(**kwargs)])
+
+
+async def _create_role(client, *, role, permission, organizationId=None, **extra):
+    body: dict[str, Any] = {"role": role, "permission": permission}
+    if organizationId:
+        body["organizationId"] = organizationId
+    body.update(extra)
+    return await client.post("/api/auth/organization/create-role", json=body)
+
+
+# --- enabled gate -----------------------------------------------------------------
+
+
+async def test_dac_disabled_no_schema_and_endpoints_404():
+    auth = org_auth()  # DAC off
+    assert "organizationRole" not in auth.schema
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        res = await client.post(
+            "/api/auth/organization/create-role",
+            json={"role": "x", "permission": {"project": ["create"]}},
+        )
+        assert res.status_code == 404
+        assert (await client.get("/api/auth/organization/list-roles")).status_code == 404
+
+
+async def test_dac_enabled_adds_organization_role_schema():
+    auth = _dac_auth()
+    assert "organizationRole" in auth.schema
+    cols = auth.schema["organizationRole"]
+    assert cols["role"].type == "string" and cols["role"].required
+    assert cols["permission"].type == "string" and cols["permission"].required
+    assert cols["organizationId"].required and cols["organizationId"].references is not None
+    assert cols["createdAt"].type == "datetime"
+    assert "updatedAt" in cols and cols["updatedAt"].required is False
+
+
+# --- create role ------------------------------------------------------------------
+
+
+async def test_create_role_flow_normalizes_and_stores_json_string():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        res = await _create_role(
+            client,
+            role="Editor",
+            permission={"project": ["create"]},
+            additionalFields={"color": "#000000"},
+        )
+        assert res.status_code == 200, res.text
+        data = res.json()
+        assert data["success"] is True
+        assert data["roleData"]["role"] == "editor"  # normalizeRoleName lowercases
+        assert data["roleData"]["permission"] == {"project": ["create"]}
+        assert data["roleData"]["color"] == "#000000"
+        assert data["roleData"]["serverOnlyValue"] == "server-only-value"  # input:false default
+        assert data["statements"] == {"project": ["create"]}
+        row = await auth.adapter.find_one("organizationRole", [Where("id", data["roleData"]["id"])])
+        assert isinstance(row["permission"], str)
+        assert row["permission"] == '{"project":["create"]}'
+
+
+async def test_create_role_requires_ac_instance():
+    auth = make_auth(plugins=[OrganizationPlugin(dynamic_access_control={"enabled": True})])
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        res = await client.post(
+            "/api/auth/organization/create-role",
+            json={"role": "x", "permission": {"project": ["create"]}},
+        )
+        assert res.status_code == 501
+        assert res.json()["code"] == "MISSING_AC_INSTANCE"
+        assert res.json()["message"] == ERROR_CODES["MISSING_AC_INSTANCE"]
+
+
+async def test_create_role_name_collision_predefined_and_existing():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        res = await _create_role(client, role="admin", permission={"project": ["create"]})
+        assert res.status_code == 400
+        assert res.json()["code"] == "ROLE_NAME_IS_ALREADY_TAKEN"
+        assert res.json()["message"] == ERROR_CODES["ROLE_NAME_IS_ALREADY_TAKEN"]
+        assert (
+            await _create_role(client, role="dupe", permission={"project": ["read"]})
+        ).status_code == 200
+        res2 = await _create_role(client, role="dupe", permission={"project": ["create"]})
+        assert res2.status_code == 400
+        assert res2.json()["code"] == "ROLE_NAME_IS_ALREADY_TAKEN"
+
+
+async def test_create_role_invalid_resource_rejected():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        res = await _create_role(client, role="bad", permission={"nonexistent": ["read"]})
+        assert res.status_code == 400
+        assert res.json()["code"] == "INVALID_RESOURCE"
+        assert res.json()["message"] == ERROR_CODES["INVALID_RESOURCE"]
+
+
+async def test_create_role_subset_of_own_permissions_enforced():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as admin_c:
+        await sign_up(owner_c)
+        admin = await sign_up(admin_c, email="a@x.com", name="Admin")
+        org = (await _create_org(owner_c)).json()
+        await _seed_member(auth, org["id"], admin["user"]["id"], "admin")
+        # admin has sales:[create,read] but not delete/update -> rejected
+        res = await _create_role(
+            admin_c,
+            role="toobig",
+            permission={"sales": ["create", "delete", "update", "read"]},
+            organizationId=org["id"],
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_CREATE_A_ROLE"
+        assert res.json()["message"] == ERROR_CODES["YOU_ARE_NOT_ALLOWED_TO_CREATE_A_ROLE"]
+
+
+async def test_create_role_forbidden_without_ac_create_permission():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as mem_c:
+        await sign_up(owner_c)
+        mem = await sign_up(mem_c, email="m@x.com", name="Mem")
+        org = (await _create_org(owner_c)).json()
+        await _seed_member(auth, org["id"], mem["user"]["id"], "member")
+        res = await _create_role(
+            mem_c, role="x", permission={"project": ["create"]}, organizationId=org["id"]
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_CREATE_A_ROLE"
+
+
+async def test_maximum_roles_per_organization_number():
+    auth = _dac_auth(dynamic_access_control={"enabled": True, "maximum_roles_per_organization": 1})
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        assert (
+            await _create_role(client, role="one", permission={"project": ["read"]})
+        ).status_code == 200
+        res = await _create_role(client, role="two", permission={"project": ["read"]})
+        assert res.status_code == 400
+        assert res.json()["code"] == "TOO_MANY_ROLES"
+        assert res.json()["message"] == ERROR_CODES["TOO_MANY_ROLES"]
+
+
+async def test_maximum_roles_per_organization_fn():
+    async def limit(org_id):
+        return 1
+
+    auth = _dac_auth(
+        dynamic_access_control={"enabled": True, "maximum_roles_per_organization": limit}
+    )
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        assert (
+            await _create_role(client, role="one", permission={"project": ["read"]})
+        ).status_code == 200
+        assert (
+            await _create_role(client, role="two", permission={"project": ["read"]})
+        ).status_code == 400
+
+
+# --- list / get -------------------------------------------------------------------
+
+
+async def test_list_roles_returns_parsed_permission():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        await _create_role(client, role="r1", permission={"project": ["create"], "ac": ["read"]})
+        res = await client.get("/api/auth/organization/list-roles")
+        assert res.status_code == 200
+        roles = res.json()
+        assert isinstance(roles, list) and len(roles) >= 1
+        found = next(r for r in roles if r["role"] == "r1")
+        assert found["permission"] == {"project": ["create"], "ac": ["read"]}
+        assert found["color"] == "#ffffff"
+
+
+async def test_list_roles_forbidden_without_ac_read():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as mem_c:
+        await sign_up(owner_c)
+        mem = await sign_up(mem_c, email="m@x.com", name="Mem")
+        org = (await _create_org(owner_c)).json()
+        member_row = await _seed_member(auth, org["id"], mem["user"]["id"], "member")
+        await _create_role(owner_c, role="restricted", permission={"project": ["create"]})
+        await owner_c.post(
+            "/api/auth/organization/update-member-role",
+            json={"memberId": member_row["id"], "role": "restricted", "organizationId": org["id"]},
+        )
+        res = await mem_c.get(
+            "/api/auth/organization/list-roles", params={"organizationId": org["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_LIST_A_ROLE"
+
+
+async def test_get_role_by_id_and_name_and_not_found():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        created = (
+            await _create_role(
+                client,
+                role="g1",
+                permission={"project": ["read"]},
+                additionalFields={"color": "#abc123"},
+            )
+        ).json()["roleData"]
+        by_id = await client.get(
+            "/api/auth/organization/get-role",
+            params={"roleId": created["id"], "organizationId": org["id"]},
+        )
+        assert by_id.status_code == 200
+        assert by_id.json()["role"] == "g1"
+        assert by_id.json()["permission"] == {"project": ["read"]}
+        assert by_id.json()["color"] == "#abc123"
+        by_name = await client.get(
+            "/api/auth/organization/get-role",
+            params={"roleName": "g1", "organizationId": org["id"]},
+        )
+        assert by_name.status_code == 200
+        assert by_name.json()["id"] == created["id"]
+        nf = await client.get(
+            "/api/auth/organization/get-role",
+            params={"roleName": "ghost", "organizationId": org["id"]},
+        )
+        assert nf.status_code == 400
+        assert nf.json()["code"] == "ROLE_NOT_FOUND"
+
+
+# --- update -----------------------------------------------------------------------
+
+
+async def test_update_role_permission_is_replaced_not_merged():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        created = (
+            await _create_role(client, role="u1", permission={"project": ["create"]})
+        ).json()["roleData"]
+        res = await client.post(
+            "/api/auth/organization/update-role",
+            json={
+                "roleId": created["id"],
+                "data": {"permission": {"project": ["create", "delete"]}},
+            },
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["roleData"]["permission"] == {"project": ["create", "delete"]}
+        got = await client.get(
+            "/api/auth/organization/get-role",
+            params={"roleId": created["id"], "organizationId": org["id"]},
+        )
+        assert got.json()["permission"] == {"project": ["create", "delete"]}
+
+
+async def test_update_role_name_and_additional_fields():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        await _create_role(
+            client,
+            role="u2",
+            permission={"project": ["read"]},
+            additionalFields={"color": "#000"},
+        )
+        res = await client.post(
+            "/api/auth/organization/update-role",
+            json={"roleName": "u2", "data": {"roleName": "U2-Renamed", "color": "#fff"}},
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["roleData"]["role"] == "u2-renamed"  # normalized
+        assert res.json()["roleData"]["color"] == "#fff"
+        assert (
+            await client.get(
+                "/api/auth/organization/get-role",
+                params={"roleName": "u2-renamed", "organizationId": org["id"]},
+            )
+        ).status_code == 200
+
+
+async def test_update_role_forbidden_without_ac_update():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as mem_c:
+        await sign_up(owner_c)
+        mem = await sign_up(mem_c, email="m@x.com", name="Mem")
+        org = (await _create_org(owner_c)).json()
+        await _seed_member(auth, org["id"], mem["user"]["id"], "member")
+        created = (
+            await _create_role(owner_c, role="prot", permission={"project": ["read"]})
+        ).json()["roleData"]
+        res = await mem_c.post(
+            "/api/auth/organization/update-role",
+            json={
+                "roleId": created["id"],
+                "organizationId": org["id"],
+                "data": {"roleName": "hijack"},
+            },
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_UPDATE_A_ROLE"
+
+
+# --- delete -----------------------------------------------------------------------
+
+
+async def test_delete_role_by_id_and_by_name():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        r1 = (await _create_role(client, role="d1", permission={"project": ["read"]})).json()[
+            "roleData"
+        ]
+        res = await client.post("/api/auth/organization/delete-role", json={"roleId": r1["id"]})
+        assert res.status_code == 200 and res.json()["success"] is True
+        assert await auth.adapter.find_one("organizationRole", [Where("id", r1["id"])]) is None
+        (await _create_role(client, role="d2", permission={"project": ["read"]}))
+        res2 = await client.post("/api/auth/organization/delete-role", json={"roleName": "d2"})
+        assert res2.status_code == 200
+
+
+async def test_delete_predefined_role_rejected():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        res = await client.post("/api/auth/organization/delete-role", json={"roleName": "admin"})
+        assert res.status_code == 400
+        assert res.json()["code"] == "CANNOT_DELETE_A_PRE_DEFINED_ROLE"
+        assert res.json()["message"] == ERROR_CODES["CANNOT_DELETE_A_PRE_DEFINED_ROLE"]
+
+
+async def test_delete_role_not_found():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _create_org(client)
+        res = await client.post("/api/auth/organization/delete-role", json={"roleName": "ghost"})
+        assert res.status_code == 400
+        assert res.json()["code"] == "ROLE_NOT_FOUND"
+
+
+async def test_delete_role_assigned_to_member_rejected_then_allowed_after_reassign():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as mem_c:
+        await sign_up(owner_c)
+        mem = await sign_up(mem_c, email="m@x.com", name="Mem")
+        org = (await _create_org(owner_c)).json()
+        member_row = await _seed_member(auth, org["id"], mem["user"]["id"], "member")
+        await _create_role(owner_c, role="assigned", permission={"project": ["read"]})
+        await owner_c.post(
+            "/api/auth/organization/update-member-role",
+            json={"memberId": member_row["id"], "role": "assigned", "organizationId": org["id"]},
+        )
+        res = await owner_c.post(
+            "/api/auth/organization/delete-role", json={"roleName": "assigned"}
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "ROLE_IS_ASSIGNED_TO_MEMBERS"
+        assert res.json()["message"] == ERROR_CODES["ROLE_IS_ASSIGNED_TO_MEMBERS"]
+        await owner_c.post(
+            "/api/auth/organization/update-member-role",
+            json={"memberId": member_row["id"], "role": "member", "organizationId": org["id"]},
+        )
+        assert (
+            await owner_c.post("/api/auth/organization/delete-role", json={"roleName": "assigned"})
+        ).status_code == 200
+
+
+async def test_delete_role_rejected_when_member_has_it_among_multiple_roles():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as mem_c:
+        await sign_up(owner_c)
+        mem = await sign_up(mem_c, email="m@x.com", name="Mem")
+        org = (await _create_org(owner_c)).json()
+        await _create_role(owner_c, role="multi", permission={"project": ["read"]})
+        await _seed_member(auth, org["id"], mem["user"]["id"], "multi,member")
+        res = await owner_c.post("/api/auth/organization/delete-role", json={"roleName": "multi"})
+        assert res.status_code == 400
+        assert res.json()["code"] == "ROLE_IS_ASSIGNED_TO_MEMBERS"
+
+
+# --- permission merge -------------------------------------------------------------
+
+
+async def test_member_with_dynamic_role_passes_and_fails_has_permission():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as mem_c:
+        await sign_up(owner_c)
+        mem = await sign_up(mem_c, email="m@x.com", name="Mem")
+        org = (await _create_org(owner_c)).json()
+        member_row = await _seed_member(auth, org["id"], mem["user"]["id"], "member")
+        await _create_role(owner_c, role="creator", permission={"project": ["create"]})
+        assign = await owner_c.post(
+            "/api/auth/organization/update-member-role",
+            json={"memberId": member_row["id"], "role": "creator", "organizationId": org["id"]},
+        )
+        assert assign.status_code == 200, assign.text
+        ok = await mem_c.post(
+            "/api/auth/organization/has-permission",
+            json={"organizationId": org["id"], "permissions": {"project": ["create"]}},
+        )
+        assert ok.status_code == 200 and ok.json()["success"] is True
+        no = await mem_c.post(
+            "/api/auth/organization/has-permission",
+            json={"organizationId": org["id"], "permissions": {"project": ["delete"]}},
+        )
+        assert no.json()["success"] is False
+
+
+async def test_dynamic_role_unions_with_same_named_static_role():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as admin_c:
+        await sign_up(owner_c)
+        admin = await sign_up(admin_c, email="a@x.com", name="Admin")
+        org = (await _create_org(owner_c)).json()
+        await _seed_member(auth, org["id"], admin["user"]["id"], "admin")
+
+        async def can(perms):
+            r = await admin_c.post(
+                "/api/auth/organization/has-permission",
+                json={"organizationId": org["id"], "permissions": perms},
+            )
+            return r.json()["success"]
+
+        assert await can({"sales": ["delete"]}) is False  # static admin lacks sales:delete
+        # seed a dynamic role sharing the static name (bypasses the create-role name guard)
+        await auth.adapter.create(
+            "organizationRole",
+            {
+                "id": generate_id(),
+                "organizationId": org["id"],
+                "role": "admin",
+                "permission": '{"sales":["delete"]}',
+                "createdAt": utcnow(),
+            },
+        )
+        assert await can({"sales": ["delete"]}) is True  # union grants it now
+        assert await can({"organization": ["delete"]}) is False  # neither grants -> denied
+
+
+async def test_invalid_stored_permission_raises_500():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as mem_c:
+        await sign_up(owner_c)
+        mem = await sign_up(mem_c, email="m@x.com", name="Mem")
+        org = (await _create_org(owner_c)).json()
+        await _seed_member(auth, org["id"], mem["user"]["id"], "member")
+        await auth.adapter.create(
+            "organizationRole",
+            {
+                "id": generate_id(),
+                "organizationId": org["id"],
+                "role": "member",
+                "permission": '{"project":"notanarray"}',
+                "createdAt": utcnow(),
+            },
+        )
+        res = await mem_c.post(
+            "/api/auth/organization/has-permission",
+            json={"organizationId": org["id"], "permissions": {"project": ["read"]}},
+        )
+        assert res.status_code == 500
+
+
+# --- update-member-role / invite consult dynamic roles (SEAMs) --------------------
+
+
+async def test_update_member_role_unknown_role_still_rejected_with_dac():
+    auth = _dac_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as mem_c:
+        await sign_up(owner_c)
+        mem = await sign_up(mem_c, email="m@x.com", name="Mem")
+        org = (await _create_org(owner_c)).json()
+        member_row = await _seed_member(auth, org["id"], mem["user"]["id"], "member")
+        res = await owner_c.post(
+            "/api/auth/organization/update-member-role",
+            json={"memberId": member_row["id"], "role": "ghost", "organizationId": org["id"]},
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "ROLE_NOT_FOUND"
+        assert res.json()["message"] == "ROLE_NOT_FOUND: ghost"
+
+
+async def test_invite_member_accepts_dynamic_role_name():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        await _create_role(client, role="inviterole", permission={"project": ["read"]})
+        res = await client.post(
+            "/api/auth/organization/invite-member",
+            json={"email": "new@x.com", "role": "inviterole", "organizationId": org["id"]},
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["role"] == "inviterole"
+
+
+async def test_invite_member_unknown_role_rejected_with_dac():
+    auth = _dac_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        res = await client.post(
+            "/api/auth/organization/invite-member",
+            json={"email": "new@x.com", "role": "ghost", "organizationId": org["id"]},
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "ROLE_NOT_FOUND"
+        assert res.json()["message"] == f"{ERROR_CODES['ROLE_NOT_FOUND']}: ghost"
