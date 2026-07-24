@@ -267,7 +267,18 @@ origin check (W1). Straight to plugins.
 ## Wave 6 — Ecosystem (USER-CONFIRMED 2026-07-24)
 - [ ] W6-specs: gap specs 08-api-key / 09-passkey / 10-sso-oidc (format of 07)
       DISPATCHED 2026-07-24 (3 Opus high agents, parallel, docs-only — no code
-      conflict with W5-C-A). 09-passkey DELIVERED+VALIDATED (452 lines; Fable
+      conflict with W5-C-A). 08-api-key DELIVERED+VALIDATED (621 lines; Fable
+      spot-checked: defaultKeyHasher=SHA-256→b64url-nopad index.ts:27-35 ==
+      port default_key_hasher, 52-char a-zA-Z charset index.ts:129, CAS
+      claimUsageInDatabase via guarded incrementOne verify-api-key.ts:244-357,
+      verify returns 200 {valid,error,key} never throws — all confirmed).
+      Impl-dispatch decisions (defaults adopted): storage:"database" only,
+      secondary-storage/customStorage raises NotImplementedError at init;
+      deferUpdates → synchronous; legacy double-stringified metadata skip w/
+      defensive parse-on-read. Known envelope gap: RATE_LIMITED needs
+      details:{tryAgainIn} — port APIError lacks details (same backlog line
+      as org missingPermissions[]). One primary agent, single
+      plugins_ext/api_key.py. 09-passkey DELIVERED+VALIDATED (452 lines; Fable
       spot-checked vs routes.ts: publicKey=padded base64 :686, credentialID=
       base64url credential.id :690, transports join(",") :694, challenge=
       signed cookie + atomic consumeVerificationValue :321-335/578-590 — all
