@@ -11,10 +11,13 @@ camelCase ``organization`` / ``member`` tables, ``session.activeOrganizationId``
 (``input:false``), the JSON-string ``metadata`` column, response shapes, and every error
 string match the TS source exactly.
 
+Phase 2 (invitations) is implemented: the ``invitation`` table, invite/accept/reject/
+cancel/get/list/list-user endpoints, ``sendInvitationEmail`` config, the invitation cascade
+in :meth:`_delete_org`, and ``invitations`` population in :meth:`_find_full_org`. Verified
+against ``routes/crud-invites.ts`` and the ``adapter.ts`` invitation methods. ``teamId`` on
+the invitation is deferred (phase 3); the accept path's team-membership branch is phase 3.
+
 SEAMS for later phases (do not implement here):
-- Phase 2 (invitations): the ``invitation`` table, invite/accept/reject/cancel endpoints,
-  ``sendInvitationEmail`` config, and the invitation cascade in :meth:`_delete_org` /
-  ``invitations`` population in :meth:`_find_full_org` (currently always ``[]``).
 - Phase 3 (teams): the ``team``/``teamMember`` tables, ``session.activeTeamId``, team
   endpoints, and the default-team creation branch in ``create``.
 - Phase 4 (dynamic access control): the ``organizationRole`` table and the dynamic-role
@@ -26,12 +29,14 @@ from __future__ import annotations
 
 import inspect
 import json
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..access_control import ORG_DEFAULT_ROLES, AccessControl, Role
 from ..adapters.base import Where
 from ..cookie_cache import set_cookie_cache
 from ..crypto import generate_id
+from ..endpoints import validate_email
 from ..plugins import Plugin, Route
 from ..schema import Field, Reference, Schema, filter_output_fields
 from ..session import cookie_name, refresh_session_cookie, utcnow
@@ -258,8 +263,14 @@ class OrganizationPlugin(Plugin):
         ac: AccessControl | None = None,
         roles: dict[str, Role] | None = None,
         disable_organization_deletion: bool = False,
+        # --- invitations (phase 2) — TS OrganizationOptions invitation knobs -----------
+        invitation_expires_in: int = 48 * 60 * 60,  # seconds; TS default 48h
+        invitation_limit: int | Callable[..., Any] | None = 100,
+        cancel_pending_invitations_on_re_invite: bool = False,
+        require_email_verification_on_invitation: bool | None = None,
+        send_invitation_email: Callable[..., Any] | None = None,
         organization_hooks: dict[str, Callable[..., Any]] | None = None,
-        # {"organization": {name: Field}, "member": {name: Field}} — extra columns.
+        # {"organization": {name: Field}, "member": {...}, "invitation": {...}} — extra columns.
         additional_fields: dict[str, dict[str, Field]] | None = None,
     ) -> None:
         self.allow_user_to_create_organization = allow_user_to_create_organization
@@ -269,6 +280,11 @@ class OrganizationPlugin(Plugin):
         self.ac = ac
         self.roles = roles
         self.disable_organization_deletion = disable_organization_deletion
+        self.invitation_expires_in = invitation_expires_in
+        self.invitation_limit = invitation_limit
+        self.cancel_pending_invitations_on_re_invite = cancel_pending_invitations_on_re_invite
+        self.require_email_verification_on_invitation = require_email_verification_on_invitation
+        self.send_invitation_email = send_invitation_email
         self.organization_hooks = organization_hooks or {}
         self._additional_fields = additional_fields or {}
         #: the default cap for list-members / full-org member fetch (TS: membershipLimit || 100)
@@ -309,6 +325,23 @@ class OrganizationPlugin(Plugin):
                 "createdAt": Field("datetime", required=True),
                 **self._extra("member"),
             },
+            # invitation columns mirror organization.ts runtime schema (role is required=false
+            # there, not the schema.ts type). teamId is phase 3 — omitted.
+            "invitation": {
+                "id": Field("string", required=True, unique=True),
+                "organizationId": Field(
+                    "string", required=True, references=Reference("organization", "id"), index=True
+                ),
+                "email": Field("string", required=True, sortable=True, index=True),
+                "role": Field("string", required=False, sortable=True),
+                "status": Field("string", required=True, default="pending", sortable=True),
+                "expiresAt": Field("datetime", required=True),
+                "createdAt": Field("datetime", required=True),
+                "inviterId": Field(
+                    "string", required=True, references=Reference("user", "id")
+                ),
+                **self._extra("invitation"),
+            },
             # activeTeamId (teams) is intentionally NOT added here — phase 3.
             "session": {"activeOrganizationId": Field("string", required=False, input=False)},
         }
@@ -330,6 +363,14 @@ class OrganizationPlugin(Plugin):
             ("POST", "/organization/update-member-role", self._update_member_role),
             ("GET", "/organization/get-active-member", self._get_active_member),
             ("POST", "/organization/has-permission", self._has_permission),
+            # --- invitations (phase 2) ---------------------------------------------------
+            ("POST", "/organization/invite-member", self._invite_member),
+            ("POST", "/organization/accept-invitation", self._accept_invitation),
+            ("POST", "/organization/reject-invitation", self._reject_invitation),
+            ("POST", "/organization/cancel-invitation", self._cancel_invitation),
+            ("GET", "/organization/get-invitation", self._get_invitation),
+            ("GET", "/organization/list-invitations", self._list_invitations_route),
+            ("GET", "/organization/list-user-invitations", self._list_user_invitations),
         ]
 
     # --- hooks --------------------------------------------------------------------------
@@ -514,8 +555,14 @@ class OrganizationPlugin(Plugin):
             for m in members
             if m["userId"] in user_map
         ]
-        # PHASE 2 SEAM: populate ``invitations`` from the invitation table (always [] now).
-        return {**self._filter_org(org), "members": shaped, "invitations": []}
+        invitations = await ctx.adapter.find_many(
+            "invitation", [Where("organizationId", org["id"])]
+        )
+        return {
+            **self._filter_org(org),
+            "members": shaped,
+            "invitations": [self._filter_invitation(i) for i in invitations],
+        }
 
     async def _update_org(
         self, ctx: Ctx, org_id: str, data: dict[str, Any]
@@ -543,8 +590,94 @@ class OrganizationPlugin(Plugin):
         # ponytail: TS wraps this in a transaction for atomicity; MemoryAdapter isn't
         # concurrent, so a plain cascade suffices — wrap it when a real adapter needs it.
         await ctx.adapter.delete_many("member", [Where("organizationId", org_id)])
-        # PHASE 2 SEAM: also delete this org's invitation rows here.
+        await ctx.adapter.delete_many("invitation", [Where("organizationId", org_id)])
         await ctx.adapter.delete("organization", [Where("id", org_id)])
+
+    # --- invitation adapter helpers (adapter.ts invitation methods) --------------------
+
+    def _filter_invitation(self, inv: dict[str, Any]) -> dict[str, Any]:
+        return filter_output_fields(inv, self.schema["invitation"])
+
+    def _expiry(self, seconds: int) -> Any:
+        return utcnow() + timedelta(seconds=seconds)
+
+    def _require_verified_email_for_invitation(self) -> bool:
+        """TS ``shouldRequireVerifiedEmailForInvitationIdAction`` for accept/reject/get.
+
+        When the option is set, honour it. Otherwise the port always mints opaque random
+        invitation ids (:func:`crypto.generate_id`), so TS's built-in-opaque-id branch is
+        always taken → no verification required. Set the option to ``True`` to gate by-id
+        actions when ids may leak (e.g. exposed invitation lists).
+        """
+        if self.require_email_verification_on_invitation is not None:
+            return self.require_email_verification_on_invitation
+        return False
+
+    async def _find_invitation_by_id(self, ctx: Ctx, invitation_id: str) -> dict[str, Any] | None:
+        inv = await ctx.adapter.find_one("invitation", [Where("id", invitation_id)])
+        return self._filter_invitation(inv) if inv is not None else None
+
+    async def _find_pending_invitation(
+        self, ctx: Ctx, email: str, org_id: str
+    ) -> list[dict[str, Any]]:
+        rows = await ctx.adapter.find_many(
+            "invitation",
+            [
+                Where("email", email.lower()),
+                Where("organizationId", org_id),
+                Where("status", "pending"),
+            ],
+        )
+        now = utcnow()
+        return [self._filter_invitation(r) for r in rows if r["expiresAt"] > now]
+
+    async def _find_pending_invitations(self, ctx: Ctx, org_id: str) -> list[dict[str, Any]]:
+        rows = await ctx.adapter.find_many(
+            "invitation", [Where("organizationId", org_id), Where("status", "pending")]
+        )
+        now = utcnow()
+        return [self._filter_invitation(r) for r in rows if r["expiresAt"] > now]
+
+    async def _list_invitation_rows(self, ctx: Ctx, org_id: str) -> list[dict[str, Any]]:
+        rows = await ctx.adapter.find_many("invitation", [Where("organizationId", org_id)])
+        return [self._filter_invitation(r) for r in rows]
+
+    async def _list_user_invitation_rows(self, ctx: Ctx, email: str) -> list[dict[str, Any]]:
+        rows = await ctx.adapter.find_many("invitation", [Where("email", email.lower())])
+        result: list[dict[str, Any]] = []
+        for inv in rows:
+            org = await ctx.adapter.find_one("organization", [Where("id", inv["organizationId"])])
+            result.append(
+                {
+                    **self._filter_invitation(inv),
+                    "organizationName": org["name"] if org is not None else None,
+                }
+            )
+        return result
+
+    async def _create_invitation(
+        self, ctx: Ctx, invitation: dict[str, Any], user: dict[str, Any]
+    ) -> dict[str, Any]:
+        row = {
+            "id": generate_id(),
+            "status": "pending",
+            "expiresAt": self._expiry(self.invitation_expires_in),
+            "createdAt": utcnow(),
+            "inviterId": user["id"],
+            **invitation,  # role, email, organizationId (+ before-hook overrides) win
+        }
+        created = await ctx.adapter.create("invitation", row)
+        return self._filter_invitation(created)
+
+    async def _update_invitation(
+        self, ctx: Ctx, invitation_id: str, status: str, *, from_status: str | None = None
+    ) -> dict[str, Any] | None:
+        """Set the invitation status; ``from_status`` guards the transition (CAS)."""
+        where = [Where("id", invitation_id)]
+        if from_status is not None:
+            where.append(Where("status", from_status))
+        updated = await ctx.adapter.update("invitation", where, {"status": status})
+        return self._filter_invitation(updated) if updated is not None else None
 
     async def _set_active_org(
         self, ctx: Ctx, token: str, org_id: str | None
@@ -1046,3 +1179,329 @@ class OrganizationPlugin(Plugin):
             ctx=ctx,
         )
         return AuthResponse(body={"error": None, "success": result})
+
+    # --- invitation endpoints (routes/crud-invites.ts) --------------------------------
+
+    async def _invitation_limit(
+        self, user: dict[str, Any], organization: dict[str, Any], member: dict[str, Any], ctx: Ctx
+    ) -> int:
+        limit = self.invitation_limit
+        if limit is None or isinstance(limit, bool):
+            return 100  # None -> TS ?? 100; bool isn't a numeric cap
+        if isinstance(limit, int):
+            return limit
+        return await _maybe_await(
+            limit({"user": user, "organization": organization, "member": member}, ctx)
+        )
+
+    async def _invite_member(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        body = ctx.body()
+        org_id = body.get("organizationId") or session["session"].get("activeOrganizationId")
+        if not org_id:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        email = validate_email(_required_str(body, "email"))  # lowercased; INVALID_EMAIL on bad
+
+        member = await self._find_member_by_org(ctx, user["id"], org_id)
+        if member is None:
+            raise _err(400, "MEMBER_NOT_FOUND")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"invitation": ["create"]},
+            options=self,
+            organization_id=org_id,
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_INVITE_USERS_TO_THIS_ORGANIZATION")
+
+        creator_role = self.creator_role or "owner"
+        raw_role = body.get("role")
+        if not raw_role:
+            raise APIError(400, "INVALID_BODY", "role is required")
+        roles = parse_roles(raw_role)
+        roles_array = [r.strip() for r in roles.split(",") if r.strip()]
+        valid_static = set(_resolve_roles(self).keys())
+        unknown = [r for r in roles_array if r not in valid_static]
+        if unknown:
+            # PHASE 4 SEAM: when dynamicAccessControl is enabled, resolve unknown names
+            # against organizationRole rows before rejecting.
+            raise APIError(
+                400, "ROLE_NOT_FOUND", f"{ERROR_CODES['ROLE_NOT_FOUND']}: {', '.join(unknown)}"
+            )
+        member_roles = [r.strip() for r in member["role"].split(",")]
+        if creator_role not in member_roles and creator_role in roles.split(","):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_INVITE_USER_WITH_THIS_ROLE")
+
+        if await self._find_member_by_email(ctx, email, org_id) is not None:
+            raise _err(400, "USER_IS_ALREADY_A_MEMBER_OF_THIS_ORGANIZATION")
+        already_invited = await self._find_pending_invitation(ctx, email, org_id)
+        if (
+            already_invited
+            and not body.get("resend")
+            and not self.cancel_pending_invitations_on_re_invite
+        ):
+            raise _err(400, "USER_IS_ALREADY_INVITED_TO_THIS_ORGANIZATION")
+
+        organization = await self._find_org_by_id(ctx, org_id)
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+
+        # resend: reuse the existing invitation, refresh its expiry, re-send the email.
+        if already_invited and body.get("resend"):
+            existing = already_invited[0]
+            new_expires = self._expiry(self.invitation_expires_in)
+            await ctx.adapter.update(
+                "invitation", [Where("id", existing["id"])], {"expiresAt": new_expires}
+            )
+            updated = {**existing, "expiresAt": new_expires}
+            await self._maybe_send_invitation_email(ctx, updated, organization, member, user)
+            return AuthResponse(body=updated)
+
+        if already_invited and self.cancel_pending_invitations_on_re_invite:
+            await self._update_invitation(ctx, already_invited[0]["id"], "canceled")
+
+        limit = await self._invitation_limit(user, organization, member, ctx)
+        pending = await self._find_pending_invitations(ctx, org_id)
+        if len(pending) >= limit:
+            raise _err(403, "INVITATION_LIMIT_REACHED")
+
+        invitation_data: dict[str, Any] = {"role": roles, "email": email, "organizationId": org_id}
+        for key in self._extra("invitation"):
+            if key in body:
+                invitation_data[key] = body[key]
+        merged = await self._run_before_hook(
+            "before_create_invitation",
+            {
+                # teamId is phase 3 — always None here (kept for TS payload-shape parity).
+                "invitation": {**invitation_data, "inviterId": user["id"], "teamId": None},
+                "inviter": user,
+                "organization": organization,
+            },
+        )
+        if merged is not None:
+            invitation_data = {**invitation_data, **merged}
+
+        invitation = await self._create_invitation(ctx, invitation_data, user)
+        await self._maybe_send_invitation_email(ctx, invitation, organization, member, user)
+        await self._run_after_hook(
+            "after_create_invitation",
+            {"invitation": invitation, "inviter": user, "organization": organization},
+        )
+        return AuthResponse(body=invitation)
+
+    async def _maybe_send_invitation_email(
+        self,
+        ctx: Ctx,
+        invitation: dict[str, Any],
+        organization: dict[str, Any],
+        member: dict[str, Any],
+        user: dict[str, Any],
+    ) -> None:
+        if self.send_invitation_email is None:
+            return
+        # ponytail: TS runs this in the background (runInBackgroundOrAwait); we await it
+        # inline — simplest correct for a single-process app. Add a task runner if it ever
+        # needs to be fire-and-forget.
+        await _maybe_await(
+            self.send_invitation_email(
+                {
+                    "id": invitation["id"],
+                    "role": invitation["role"],
+                    "email": invitation["email"].lower(),
+                    "organization": organization,
+                    "inviter": {**member, "user": user},
+                    "invitation": invitation,
+                },
+                ctx.request,
+            )
+        )
+
+    async def _accept_invitation(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        invitation_id = _required_str(ctx.body(), "invitationId")
+        invitation = await self._find_invitation_by_id(ctx, invitation_id)
+        if (
+            invitation is None
+            or invitation["expiresAt"] < utcnow()
+            or invitation["status"] != "pending"
+        ):
+            raise _err(400, "INVITATION_NOT_FOUND")
+        if invitation["email"].lower() != user["email"].lower():
+            raise _err(403, "YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION")
+        if self._require_verified_email_for_invitation() and not user.get("emailVerified"):
+            raise _err(403, "EMAIL_VERIFICATION_REQUIRED_BEFORE_ACCEPTING_OR_REJECTING_INVITATION")
+
+        members_count = await ctx.adapter.count(
+            "member", [Where("organizationId", invitation["organizationId"])]
+        )
+        organization = await self._find_org_by_id(ctx, invitation["organizationId"])
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        membership_limit = self.membership_limit
+        if isinstance(membership_limit, bool):
+            limit = 100  # bool isn't a numeric cap
+        elif isinstance(membership_limit, int):
+            limit = membership_limit or 100  # TS `membershipLimit || 100` (0 -> 100)
+        else:
+            limit = await _maybe_await(membership_limit(user, organization))
+        if members_count >= limit:
+            raise _err(403, "ORGANIZATION_MEMBERSHIP_LIMIT_REACHED")
+
+        await self._run_before_hook(
+            "before_accept_invitation",
+            {"invitation": invitation, "user": user, "organization": organization},
+        )
+        # Claim the pending -> accepted transition atomically (fromStatus guard).
+        accepted = await self._update_invitation(
+            ctx, invitation_id, "accepted", from_status="pending"
+        )
+        if accepted is None:
+            raise _err(400, "INVITATION_NOT_FOUND")
+        member = await self._create_member(
+            ctx,
+            {
+                "userId": user["id"],
+                "organizationId": accepted["organizationId"],
+                "role": accepted["role"],
+            },
+        )
+        await self._set_active_org(ctx, session["session"]["token"], accepted["organizationId"])
+        await self._run_after_hook(
+            "after_accept_invitation",
+            {
+                "invitation": accepted,
+                "member": member,
+                "user": user,
+                "organization": organization,
+            },
+        )
+        return AuthResponse(body={"invitation": accepted, "member": member})
+
+    async def _reject_invitation(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        invitation_id = _required_str(ctx.body(), "invitationId")
+        invitation = await self._find_invitation_by_id(ctx, invitation_id)
+        # reject does not check expiry — only that it is still pending (TS parity).
+        if invitation is None or invitation["status"] != "pending":
+            raise APIError(400, "INVITATION_NOT_FOUND", "Invitation not found!")
+        if invitation["email"].lower() != user["email"].lower():
+            raise _err(403, "YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION")
+        if self._require_verified_email_for_invitation() and not user.get("emailVerified"):
+            raise _err(403, "EMAIL_VERIFICATION_REQUIRED_BEFORE_ACCEPTING_OR_REJECTING_INVITATION")
+        organization = await self._find_org_by_id(ctx, invitation["organizationId"])
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        await self._run_before_hook(
+            "before_reject_invitation",
+            {"invitation": invitation, "user": user, "organization": organization},
+        )
+        rejected = await self._update_invitation(ctx, invitation_id, "rejected")
+        await self._run_after_hook(
+            "after_reject_invitation",
+            {"invitation": rejected or invitation, "user": user, "organization": organization},
+        )
+        return AuthResponse(body={"invitation": rejected, "member": None})
+
+    async def _cancel_invitation(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        invitation_id = _required_str(ctx.body(), "invitationId")
+        invitation = await self._find_invitation_by_id(ctx, invitation_id)
+        if invitation is None:
+            raise _err(400, "INVITATION_NOT_FOUND")
+        member = await self._find_member_by_org(ctx, user["id"], invitation["organizationId"])
+        if member is None:
+            raise _err(400, "MEMBER_NOT_FOUND")
+        if not await has_permission(
+            role=member["role"],
+            permissions={"invitation": ["cancel"]},
+            options=self,
+            organization_id=invitation["organizationId"],
+            ctx=ctx,
+        ):
+            raise _err(403, "YOU_ARE_NOT_ALLOWED_TO_CANCEL_THIS_INVITATION")
+        organization = await self._find_org_by_id(ctx, invitation["organizationId"])
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        await self._run_before_hook(
+            "before_cancel_invitation",
+            {"invitation": invitation, "cancelledBy": user, "organization": organization},
+        )
+        canceled = await self._update_invitation(ctx, invitation_id, "canceled")
+        await self._run_after_hook(
+            "after_cancel_invitation",
+            {
+                "invitation": canceled or invitation,
+                "cancelledBy": user,
+                "organization": organization,
+            },
+        )
+        return AuthResponse(body=canceled)
+
+    async def _get_invitation(self, ctx: Ctx) -> AuthResponse:
+        session = await ctx.get_session()
+        if session is None:
+            raise APIError(401, "UNAUTHORIZED", "Not authenticated")
+        user = session["user"]
+        invitation_id = ctx.request.query.get("id")
+        if not invitation_id:
+            raise APIError(400, "BAD_REQUEST", "id is required")
+        invitation = await self._find_invitation_by_id(ctx, invitation_id)
+        if (
+            invitation is None
+            or invitation["status"] != "pending"
+            or invitation["expiresAt"] < utcnow()
+        ):
+            raise APIError(400, "BAD_REQUEST", "Invitation not found!")
+        if invitation["email"].lower() != user["email"].lower():
+            raise _err(403, "YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION")
+        if self._require_verified_email_for_invitation() and not user.get("emailVerified"):
+            raise _err(403, "EMAIL_VERIFICATION_REQUIRED_FOR_INVITATION")
+        organization = await self._find_org_by_id(ctx, invitation["organizationId"])
+        if organization is None:
+            raise _err(400, "ORGANIZATION_NOT_FOUND")
+        inviter = await self._find_member_by_org(
+            ctx, invitation["inviterId"], invitation["organizationId"]
+        )
+        if inviter is None:
+            raise _err(400, "INVITER_IS_NO_LONGER_A_MEMBER_OF_THE_ORGANIZATION")
+        return AuthResponse(
+            body={
+                **invitation,
+                "organizationName": organization["name"],
+                "organizationSlug": organization["slug"],
+                "inviterEmail": inviter["user"]["email"],
+            }
+        )
+
+    async def _list_invitations_route(self, ctx: Ctx) -> AuthResponse:
+        session = await self._require_session(ctx)
+        user = session["user"]
+        org_id = ctx.request.query.get("organizationId") or session["session"].get(
+            "activeOrganizationId"
+        )
+        if not org_id:
+            raise APIError(400, "BAD_REQUEST", "Organization ID is required")
+        if await self._find_member_by_org(ctx, user["id"], org_id) is None:
+            raise APIError(403, "FORBIDDEN", "You are not a member of this organization")
+        return AuthResponse(body=await self._list_invitation_rows(ctx, org_id))
+
+    async def _list_user_invitations(self, ctx: Ctx) -> AuthResponse:
+        session = await ctx.get_session()
+        # Over HTTP a request always exists, so a client-supplied email is always rejected;
+        # only sessionless server-side SDK calls (not this transport) may pass it.
+        if ctx.request.query.get("email"):
+            raise APIError(
+                400, "BAD_REQUEST", "User email cannot be passed for client side API calls."
+            )
+        if session is not None and not session["user"].get("emailVerified"):
+            raise _err(403, "EMAIL_VERIFICATION_REQUIRED_FOR_INVITATION")
+        user_email = session["user"]["email"] if session is not None else None
+        if not user_email:
+            raise APIError(400, "BAD_REQUEST", "Missing session headers, or email query parameter.")
+        invitations = await self._list_user_invitation_rows(ctx, user_email)
+        pending = [i for i in invitations if i["status"] == "pending"]
+        return AuthResponse(body=pending)

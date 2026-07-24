@@ -7,6 +7,7 @@ error-codes.ts). Invitations, teams, and dynamic access control are later phases
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from better_auth.adapters.base import Where
@@ -773,4 +774,668 @@ def test_error_codes_match_ts_exactly():
     assert (
         ERROR_CODES["YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER"]
         == "You cannot leave the organization as the only owner"
+    )
+
+
+# ==================================================================================
+# PHASE 2 — invitations (routes/crud-invites.ts, adapter.ts invitation methods)
+# ==================================================================================
+
+
+async def _invite(client, email, role="member", **body):
+    return await client.post(
+        "/api/auth/organization/invite-member", json={"email": email, "role": role, **body}
+    )
+
+
+async def _verify_email(auth, user_id: str) -> None:
+    await auth.adapter.update("user", [Where("id", user_id)], {"emailVerified": True})
+
+
+async def _seed_invitation(
+    auth,
+    org_id: str,
+    email: str,
+    inviter_id: str,
+    *,
+    role: str = "member",
+    status: str = "pending",
+    expires_in: int = 48 * 3600,
+) -> dict[str, Any]:
+    return await auth.adapter.create(
+        "invitation",
+        {
+            "id": generate_id(),
+            "organizationId": org_id,
+            "email": email.lower(),
+            "role": role,
+            "status": status,
+            "inviterId": inviter_id,
+            "expiresAt": utcnow() + timedelta(seconds=expires_in),
+            "createdAt": utcnow(),
+        },
+    )
+
+
+async def _owner_with_org(auth, client, *, slug="acme"):
+    owner = await sign_up(client)
+    org = (await _create_org(client, slug=slug)).json()
+    return owner, org
+
+
+# --- invite-member ----------------------------------------------------------------
+
+
+async def test_invite_member_creates_pending_invitation():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        owner, org = await _owner_with_org(auth, client)
+        res = await _invite(client, "Bob@Example.com", role="member")
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["email"] == "bob@example.com"  # lowercased
+        assert body["role"] == "member"
+        assert body["status"] == "pending"
+        assert body["organizationId"] == org["id"]
+        assert body["inviterId"] == owner["user"]["id"]
+        assert "id" in body and "expiresAt" in body
+        row = await auth.adapter.find_one("invitation", [Where("id", body["id"])])
+        assert row is not None and row["status"] == "pending"
+
+
+async def test_invite_member_no_org_rejected():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)  # no org, no active org
+        res = await _invite(client, "bob@example.com")
+        assert res.status_code == 400
+        assert res.json()["code"] == "ORGANIZATION_NOT_FOUND"
+
+
+async def test_invite_member_invalid_email_rejected():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        res = await _invite(client, "not-an-email")
+        assert res.status_code == 400
+        assert res.json()["code"] == "INVALID_EMAIL"
+
+
+async def test_invite_member_forbidden_for_plain_member():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as member_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        member = await sign_up(member_c, email="m@x.com", name="Mem")
+        await _seed_member(auth, org["id"], member["user"]["id"], "member")
+        res = await member_c.post(
+            "/api/auth/organization/invite-member",
+            json={"organizationId": org["id"], "email": "bob@example.com", "role": "member"},
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_INVITE_USERS_TO_THIS_ORGANIZATION"
+
+
+async def test_invite_member_non_member_rejected():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as other_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        await sign_up(other_c, email="o@x.com", name="Other")
+        res = await other_c.post(
+            "/api/auth/organization/invite-member",
+            json={"organizationId": org["id"], "email": "bob@example.com", "role": "member"},
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "MEMBER_NOT_FOUND"
+
+
+async def test_invite_member_unknown_role_rejected():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        res = await _invite(client, "bob@example.com", role="superadmin")
+        assert res.status_code == 400
+        assert res.json()["message"] == "Role not found: superadmin"
+
+
+async def test_admin_cannot_invite_owner_role():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as admin_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        admin = await sign_up(admin_c, email="ad@x.com", name="Ad")
+        await _seed_member(auth, org["id"], admin["user"]["id"], "admin")
+        res = await admin_c.post(
+            "/api/auth/organization/invite-member",
+            json={"organizationId": org["id"], "email": "bob@example.com", "role": "owner"},
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_INVITE_USER_WITH_THIS_ROLE"
+
+
+async def test_invite_member_already_member_rejected():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as m_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        member = await sign_up(m_c, email="already@x.com", name="Al")
+        await _seed_member(auth, org["id"], member["user"]["id"], "member")
+        res = await _invite(owner_c, "already@x.com")
+        assert res.status_code == 400
+        assert res.json()["code"] == "USER_IS_ALREADY_A_MEMBER_OF_THIS_ORGANIZATION"
+
+
+async def test_invite_member_duplicate_pending_rejected():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        assert (await _invite(client, "bob@example.com")).status_code == 200
+        res = await _invite(client, "bob@example.com")
+        assert res.status_code == 400
+        assert res.json()["code"] == "USER_IS_ALREADY_INVITED_TO_THIS_ORGANIZATION"
+
+
+async def test_invite_member_resend_reuses_invitation_and_resends_email():
+    sent: list[dict[str, Any]] = []
+
+    async def send(data, request=None):
+        sent.append(data)
+
+    auth = org_auth(send_invitation_email=send)
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        first = (await _invite(client, "bob@example.com")).json()
+        res = await _invite(client, "bob@example.com", resend=True)
+        assert res.status_code == 200
+        assert res.json()["id"] == first["id"]  # same invitation reused
+        assert len(sent) == 2  # sent on create and on resend
+        rows = await auth.adapter.find_many("invitation", [Where("email", "bob@example.com")])
+        assert len(rows) == 1  # no duplicate row
+
+
+async def test_invite_member_cancel_pending_on_reinvite():
+    auth = org_auth(cancel_pending_invitations_on_re_invite=True)
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        first = (await _invite(client, "bob@example.com")).json()
+        second = (await _invite(client, "bob@example.com")).json()
+        assert second["id"] != first["id"]
+        old = await auth.adapter.find_one("invitation", [Where("id", first["id"])])
+        new = await auth.adapter.find_one("invitation", [Where("id", second["id"])])
+        assert old["status"] == "canceled"
+        assert new["status"] == "pending"
+
+
+async def test_invitation_limit_reached():
+    auth = org_auth(invitation_limit=1)
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        assert (await _invite(client, "a@x.com")).status_code == 200
+        res = await _invite(client, "b@x.com")
+        assert res.status_code == 403
+        assert res.json()["code"] == "INVITATION_LIMIT_REACHED"
+
+
+async def test_send_invitation_email_payload_shape():
+    captured: list[Any] = []
+
+    async def send(data, request=None):
+        captured.append((data, request))
+
+    auth = org_auth(send_invitation_email=send)
+    async with make_client(auth) as client:
+        owner, org = await _owner_with_org(auth, client)
+        inv = (await _invite(client, "bob@example.com", role="admin")).json()
+        assert len(captured) == 1
+        data, request = captured[0]
+        assert data["id"] == inv["id"]
+        assert data["role"] == "admin"
+        assert data["email"] == "bob@example.com"
+        assert data["organization"]["id"] == org["id"]
+        assert data["invitation"]["id"] == inv["id"]
+        assert data["inviter"]["user"]["id"] == owner["user"]["id"]
+        assert data["inviter"]["role"] == "owner"
+        assert request is not None
+
+
+async def test_before_create_invitation_hook_merges_data():
+    async def before(data):
+        assert data["invitation"]["email"] == "bob@example.com"
+        assert data["invitation"]["inviterId"]
+        return {"data": {"role": "admin"}}
+
+    auth = org_auth(organization_hooks={"before_create_invitation": before})
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        res = await _invite(client, "bob@example.com", role="member")
+        assert res.status_code == 200
+        assert res.json()["role"] == "admin"
+
+
+async def test_after_create_invitation_hook_fires():
+    calls: list[str] = []
+
+    async def after(data):
+        calls.append(data["invitation"]["id"])
+
+    auth = org_auth(organization_hooks={"after_create_invitation": after})
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        inv = (await _invite(client, "bob@example.com")).json()
+        assert calls == [inv["id"]]
+
+
+# --- accept-invitation ------------------------------------------------------------
+
+
+async def test_accept_invitation_full_flow():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        inv = (await _invite(owner_c, "bob@example.com", role="admin")).json()
+        bob = await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["invitation"]["status"] == "accepted"
+        assert body["member"]["role"] == "admin"
+        assert body["member"]["userId"] == bob["user"]["id"]
+        assert body["member"]["organizationId"] == org["id"]
+        # active org set for the invitee
+        session = (await invitee_c.get("/api/auth/get-session")).json()
+        assert session["session"]["activeOrganizationId"] == org["id"]
+
+
+async def test_accept_invitation_wrong_recipient():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as carol_c:
+        _, _org = await _owner_with_org(auth, owner_c)
+        inv = (await _invite(owner_c, "bob@example.com")).json()
+        await sign_up(carol_c, email="carol@example.com", name="Carol")
+        res = await carol_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION"
+
+
+async def test_accept_invitation_expired():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        owner, org = await _owner_with_org(auth, owner_c)
+        inv = await _seed_invitation(
+            auth, org["id"], "bob@example.com", owner["user"]["id"], expires_in=-10
+        )
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "INVITATION_NOT_FOUND"
+
+
+async def test_accept_invitation_membership_limit_reached():
+    auth = org_auth(membership_limit=1)
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        owner, org = await _owner_with_org(auth, owner_c)
+        inv = await _seed_invitation(auth, org["id"], "bob@example.com", owner["user"]["id"])
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "ORGANIZATION_MEMBERSHIP_LIMIT_REACHED"
+
+
+async def test_accept_invitation_requires_verified_email_when_configured():
+    auth = org_auth(require_email_verification_on_invitation=True)
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        owner, org = await _owner_with_org(auth, owner_c)
+        inv = await _seed_invitation(auth, org["id"], "bob@example.com", owner["user"]["id"])
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")  # emailVerified False
+        res = await invitee_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 403
+        assert (
+            res.json()["code"]
+            == "EMAIL_VERIFICATION_REQUIRED_BEFORE_ACCEPTING_OR_REJECTING_INVITATION"
+        )
+
+
+async def test_accept_invitation_hooks_fire():
+    before: list[str] = []
+    after: list[str] = []
+
+    async def before_hook(data):
+        before.append(data["invitation"]["id"])
+
+    async def after_hook(data):
+        after.append(data["member"]["id"])
+
+    auth = org_auth(
+        organization_hooks={
+            "before_accept_invitation": before_hook,
+            "after_accept_invitation": after_hook,
+        }
+    )
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        _, _org = await _owner_with_org(auth, owner_c)
+        inv = (await _invite(owner_c, "bob@example.com")).json()
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 200
+        assert before == [inv["id"]]
+        assert len(after) == 1
+
+
+# --- reject-invitation ------------------------------------------------------------
+
+
+async def test_reject_invitation():
+    calls: list[str] = []
+    auth = org_auth(
+        organization_hooks={
+            "before_reject_invitation": lambda d: calls.append("before"),
+            "after_reject_invitation": lambda d: calls.append("after"),
+        }
+    )
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        _, _org = await _owner_with_org(auth, owner_c)
+        inv = (await _invite(owner_c, "bob@example.com")).json()
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.post(
+            "/api/auth/organization/reject-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["invitation"]["status"] == "rejected"
+        assert body["member"] is None
+        assert calls == ["before", "after"]
+
+
+async def test_reject_invitation_wrong_recipient():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as carol_c:
+        _, _org = await _owner_with_org(auth, owner_c)
+        inv = (await _invite(owner_c, "bob@example.com")).json()
+        await sign_up(carol_c, email="carol@example.com", name="Carol")
+        res = await carol_c.post(
+            "/api/auth/organization/reject-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION"
+
+
+async def test_reject_invitation_not_found():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        res = await client.post(
+            "/api/auth/organization/reject-invitation", json={"invitationId": "nope"}
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "INVITATION_NOT_FOUND"
+        assert res.json()["message"] == "Invitation not found!"
+
+
+# --- cancel-invitation ------------------------------------------------------------
+
+
+async def test_cancel_invitation_by_owner():
+    calls: list[str] = []
+    auth = org_auth(
+        organization_hooks={
+            "before_cancel_invitation": lambda d: calls.append(d["cancelledBy"]["id"]),
+            "after_cancel_invitation": lambda d: calls.append("after"),
+        }
+    )
+    async with make_client(auth) as client:
+        owner, _ = await _owner_with_org(auth, client)
+        inv = (await _invite(client, "bob@example.com")).json()
+        res = await client.post(
+            "/api/auth/organization/cancel-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "canceled"
+        assert calls == [owner["user"]["id"], "after"]
+
+
+async def test_cancel_invitation_forbidden_for_plain_member():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as member_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        member = await sign_up(member_c, email="m@x.com", name="Mem")
+        await _seed_member(auth, org["id"], member["user"]["id"], "member")
+        inv = (await _invite(owner_c, "bob@example.com")).json()
+        res = await member_c.post(
+            "/api/auth/organization/cancel-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_CANCEL_THIS_INVITATION"
+
+
+async def test_cancel_invitation_not_found():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        res = await client.post(
+            "/api/auth/organization/cancel-invitation", json={"invitationId": "nope"}
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "INVITATION_NOT_FOUND"
+
+
+# --- get-invitation ---------------------------------------------------------------
+
+
+async def test_get_invitation():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        owner, org = await _owner_with_org(auth, owner_c, slug="glob")
+        inv = (await _invite(owner_c, "bob@example.com", role="admin")).json()
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.get(
+            "/api/auth/organization/get-invitation", params={"id": inv["id"]}
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["id"] == inv["id"]
+        assert body["organizationName"] == org["name"]
+        assert body["organizationSlug"] == "glob"
+        assert body["inviterEmail"] == owner["user"]["email"]
+
+
+async def test_get_invitation_wrong_recipient():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as carol_c:
+        _, _org = await _owner_with_org(auth, owner_c)
+        inv = (await _invite(owner_c, "bob@example.com")).json()
+        await sign_up(carol_c, email="carol@example.com", name="Carol")
+        res = await carol_c.get(
+            "/api/auth/organization/get-invitation", params={"id": inv["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION"
+
+
+async def test_get_invitation_expired_not_found():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        owner, org = await _owner_with_org(auth, owner_c)
+        inv = await _seed_invitation(
+            auth, org["id"], "bob@example.com", owner["user"]["id"], expires_in=-10
+        )
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.get(
+            "/api/auth/organization/get-invitation", params={"id": inv["id"]}
+        )
+        assert res.status_code == 400
+        assert res.json()["message"] == "Invitation not found!"
+
+
+async def test_get_invitation_inviter_no_longer_member():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        # inviter id that is not a member of the org
+        inv = await _seed_invitation(auth, org["id"], "bob@example.com", "ghost-user")
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.get(
+            "/api/auth/organization/get-invitation", params={"id": inv["id"]}
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "INVITER_IS_NO_LONGER_A_MEMBER_OF_THE_ORGANIZATION"
+
+
+# --- list-invitations (org scoped) ------------------------------------------------
+
+
+async def test_list_invitations_org_scoped():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        _, _org = await _owner_with_org(auth, client)
+        await _invite(client, "bob@example.com")
+        await _invite(client, "carol@example.com")
+        res = await client.get("/api/auth/organization/list-invitations")
+        assert res.status_code == 200, res.text
+        emails = {i["email"] for i in res.json()}
+        assert emails == {"bob@example.com", "carol@example.com"}
+
+
+async def test_list_invitations_non_member_forbidden():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as other_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        await sign_up(other_c, email="o@x.com", name="Other")
+        res = await other_c.get(
+            "/api/auth/organization/list-invitations", params={"organizationId": org["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["message"] == "You are not a member of this organization"
+
+
+async def test_list_invitations_no_org_rejected():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)  # no active org
+        res = await client.get("/api/auth/organization/list-invitations")
+        assert res.status_code == 400
+
+
+# --- list-user-invitations (session-email scoped) ---------------------------------
+
+
+async def test_list_user_invitations_pending_only():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        owner, org = await _owner_with_org(auth, owner_c)
+        await _invite(owner_c, "bob@example.com")
+        # a non-pending invitation for the same email must be filtered out
+        await _seed_invitation(
+            auth, org["id"], "bob@example.com", owner["user"]["id"], status="rejected"
+        )
+        bob = await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        await _verify_email(auth, bob["user"]["id"])
+        res = await invitee_c.get("/api/auth/organization/list-user-invitations")
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert len(body) == 1
+        assert body[0]["status"] == "pending"
+        assert body[0]["organizationName"] == org["name"]
+
+
+async def test_list_user_invitations_requires_verified_email():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        await _owner_with_org(auth, owner_c)
+        await _invite(owner_c, "bob@example.com")
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")  # unverified
+        res = await invitee_c.get("/api/auth/organization/list-user-invitations")
+        assert res.status_code == 403
+        assert res.json()["code"] == "EMAIL_VERIFICATION_REQUIRED_FOR_INVITATION"
+
+
+async def test_list_user_invitations_email_query_rejected():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        user = await sign_up(client)
+        await _verify_email(auth, user["user"]["id"])
+        res = await client.get(
+            "/api/auth/organization/list-user-invitations", params={"email": "x@y.com"}
+        )
+        assert res.status_code == 400
+        assert res.json()["message"] == "User email cannot be passed for client side API calls."
+
+
+# --- full-org invitations population + delete cascade -----------------------------
+
+
+async def test_full_organization_includes_invitations():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        _, _org = await _owner_with_org(auth, client)
+        await _invite(client, "bob@example.com")
+        full = (await client.get("/api/auth/organization/get-full-organization")).json()
+        assert len(full["invitations"]) == 1
+        assert full["invitations"][0]["email"] == "bob@example.com"
+
+
+async def test_delete_org_cascades_invitations():
+    auth = org_auth()
+    async with make_client(auth) as client:
+        _, org = await _owner_with_org(auth, client)
+        await _invite(client, "bob@example.com")
+        await client.post("/api/auth/organization/delete", json={"organizationId": org["id"]})
+        assert (
+            await auth.adapter.find_many("invitation", [Where("organizationId", org["id"])]) == []
+        )
+
+
+# --- invitation error strings byte-exact ------------------------------------------
+
+
+def test_invitation_error_codes_match_ts_exactly():
+    assert ERROR_CODES["INVITATION_NOT_FOUND"] == "Invitation not found"
+    assert (
+        ERROR_CODES["YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION"]
+        == "You are not the recipient of the invitation"
+    )
+    assert (
+        ERROR_CODES["INVITER_IS_NO_LONGER_A_MEMBER_OF_THE_ORGANIZATION"]
+        == "Inviter is no longer a member of the organization"
+    )
+    assert (
+        ERROR_CODES["ORGANIZATION_MEMBERSHIP_LIMIT_REACHED"]
+        == "Organization membership limit reached"
+    )
+    assert ERROR_CODES["INVITATION_LIMIT_REACHED"] == "Invitation limit reached"
+    assert (
+        ERROR_CODES["USER_IS_ALREADY_INVITED_TO_THIS_ORGANIZATION"]
+        == "User is already invited to this organization"
+    )
+    assert (
+        ERROR_CODES["USER_IS_ALREADY_A_MEMBER_OF_THIS_ORGANIZATION"]
+        == "User is already a member of this organization"
+    )
+    assert (
+        ERROR_CODES["YOU_ARE_NOT_ALLOWED_TO_INVITE_USERS_TO_THIS_ORGANIZATION"]
+        == "You are not allowed to invite users to this organization"
+    )
+    assert (
+        ERROR_CODES["YOU_ARE_NOT_ALLOWED_TO_INVITE_USER_WITH_THIS_ROLE"]
+        == "You are not allowed to invite a user with this role"
+    )
+    assert (
+        ERROR_CODES["YOU_ARE_NOT_ALLOWED_TO_CANCEL_THIS_INVITATION"]
+        == "You are not allowed to cancel this invitation"
+    )
+    assert (
+        ERROR_CODES["EMAIL_VERIFICATION_REQUIRED_BEFORE_ACCEPTING_OR_REJECTING_INVITATION"]
+        == "Email verification required before accepting or rejecting invitation"
+    )
+    assert (
+        ERROR_CODES["EMAIL_VERIFICATION_REQUIRED_FOR_INVITATION"]
+        == "Email verification required to view or list invitations for the session email"
     )

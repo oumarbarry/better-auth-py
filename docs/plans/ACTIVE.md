@@ -210,14 +210,36 @@ the admin agent's ownership (sole consumer, no separate dispatch).
       BACKLOG: SQLAlchemyAdapter lacks insensitive mode for "in" op;
       secrets rotation/SecretConfig; server-API surface for sessionless
       create/addMember; flow._create_state requestSignUp slot.
-- [ ] Organization phases 2-4 (SEAMs marked in organization.py):
-      phase 2 invitations (+ membership_limit enforcement on accept),
-      phase 3 teams (+ session.activeTeamId), phase 4 dynamic AC
-      (organizationRole rows merged in _resolve_roles).
+- [x] Organization phase 2 invitations: DONE, 40 new tests (94 org total),
+      1202 suite green at its solo gate. CAS-guarded accept
+      (updateInvitation fromStatus:pending), verified-email gates, 8
+      invitation hooks (types.ts:584-661), sendInvitationEmail payload
+      asserted, delete cascade + full-org population. Ponytail: email send
+      awaited inline (TS runInBackgroundOrAwait); accept CAS instead of
+      transaction+rollback. Seams: teamId/team branches -> phase 3;
+      dynamicAccessControl role lookup on invite -> phase 4.
+- [ ] Organization phase 3 teams (+ session.activeTeamId), phase 4 dynamic
+      AC (organizationRole rows merged in _resolve_roles).
 
 ## Wave 5 — Advanced plugins (spec: gap/06-plugins-advanced.md)
-- [ ] oauth-popup, siwe, one-tap, oauth-proxy; oauth-provider pkg (subset,
-      replaces deprecated oidc-provider/mcp per decision log); open-api.
+
+Spec's "runtime items 1–5" ALL exist already (checked 2026-07-24): plugin
+system (W1-E), atomic consume (W3-A), crypto incl. PKCE/b64url/charset/
+constant-time (W2/W4-A), JWT machinery + jwt plugin (W4), signed cookies +
+origin check (W1). Straight to plugins.
+
+- [~] W5-A DISPATCHED (2026-07-24, 3 parallel agents, disjoint files, running
+      alongside org-phase-2): oauth-popup (Opus — completion script must be
+      byte-exact for CSP hash), siwe (Opus — ERC-4361 parser verbatim, EIP-55;
+      spec default: verify_message caller-supplied, small keccak dep for
+      checksum only), one-tap (Sonnet — Google id_token via existing oauth JWKS
+      machinery, hosted-domain check).
+- [ ] W5-B: oauth-proxy (L; spec flags possible YAGNI for single-deployment —
+      port per plan, schedule last of the Ms).
+- [ ] W5-C: oauth-provider package subset (XL, replaces deprecated
+      oidc-provider/mcp per decision log; sub-phase like organization).
+- [ ] W5-D: open-api — decide at end of wave (needs route-metadata registry;
+      deferred since Wave 3).
 
 ## Wave 6 — Ecosystem (USER-CONFIRMED 2026-07-24)
 - [ ] api-key, passkey (webauthn lib), sso-OIDC. OUT: scim, stripe, SAML.
