@@ -24,7 +24,7 @@ from .config import (
 )
 from .crypto import hash_password, resolve_secret_config
 from .endpoints import ROUTES
-from .internal_adapter import InternalAdapter
+from .internal_adapter import InternalAdapter, VerificationOptions
 from .oauth import OAuthProvider
 from .origin import check_origin, matches_origin_pattern
 from .plugins import Plugin
@@ -74,6 +74,7 @@ class BetterAuth:
         session: SessionOptions | None = None,
         user: UserOptions | None = None,
         account: AccountOptions | None = None,
+        verification: VerificationOptions | None = None,
         rate_limit: RateLimit | None = None,
         trusted_origins: list[str] | Callable[[Any], Any] | None = None,
         plugins: list[Plugin] | None = None,
@@ -110,6 +111,7 @@ class BetterAuth:
         self.session_options = session or SessionOptions()
         self.user = user or UserOptions()
         self.account = account or AccountOptions()
+        self.verification = verification or VerificationOptions()
         self.rate_limit = rate_limit or RateLimit()
         #: list of origin patterns (wildcards allowed) or a callable(request) -> list
         if callable(trusted_origins):
@@ -178,6 +180,8 @@ class BetterAuth:
             secondary_storage=secondary_storage,
             database_hooks=database_hooks,
             session_expires_in=self.session_options.expires_in,
+            verification_store_identifier=self.verification.store_identifier,
+            verification_store_in_database=self.verification.store_in_database,
         )
 
         self._http = http_client

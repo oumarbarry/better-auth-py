@@ -15,7 +15,7 @@ from .config import (
     RateLimit,
     SessionOptions,
 )
-from .internal_adapter import InternalAdapter
+from .internal_adapter import InternalAdapter, VerificationOptions
 from .oauth import (
     Discord,
     GitHub,
@@ -63,6 +63,7 @@ __all__ = [
     "Schema",
     "SecondaryStorage",
     "SessionOptions",
+    "VerificationOptions",
     "Where",
     "__version__",
     "rate_limit_model",

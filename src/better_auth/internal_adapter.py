@@ -18,11 +18,12 @@ import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .adapters.base import BaseAdapter, Where
-from .crypto import generate_id
+from .crypto import default_key_hasher, generate_id
 from .secondary_storage import SecondaryStorage
 
 DAY = 60 * 60 * 24
@@ -109,6 +110,64 @@ def _parse_dates(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _safe_json(raw: Any) -> Any:
+    """``JSON.parse`` that returns ``None`` on failure (TS ``safeJSONParse``)."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _expires_ms(value: Any) -> float:
+    """Coerce a verification ``expiresAt`` (datetime | ISO string | epoch-ms) to ms."""
+    if isinstance(value, datetime):
+        return _dt_ms(value)
+    if isinstance(value, str):
+        return _dt_ms(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    return float(value)
+
+
+def _get_storage_option(identifier: str, config: Any) -> Any:
+    """TS ``getStorageOption`` (db/verification-token-storage.ts:28): resolve the
+    per-identifier ``storeIdentifier`` option, honouring ``{default, overrides}``."""
+    if not config:
+        return None
+    if isinstance(config, dict) and "default" in config:
+        for prefix, option in (config.get("overrides") or {}).items():
+            if identifier.startswith(prefix):
+                return option
+        return config["default"]
+    return config
+
+
+async def _process_identifier(identifier: str, option: Any) -> str:
+    """TS ``processIdentifier`` (db/verification-token-storage.ts:12): ``plain`` (or
+    unset) returns the identifier verbatim; ``hashed`` applies the default base64url-
+    nopad SHA-256 hasher; ``{"hash": fn}`` calls the custom (sync or async) hasher."""
+    if not option or option == "plain":
+        return identifier
+    if option == "hashed":
+        return default_key_hasher(identifier)
+    if isinstance(option, dict) and "hash" in option:
+        return await _maybe_await(option["hash"](identifier))
+    return identifier
+
+
+def _hydrate_cached_verification(raw: Any) -> dict[str, Any] | None:
+    """TS ``hydrateCachedVerification`` (db/internal-adapter.ts:1272): parse a cached
+    verification and coerce ``expiresAt`` back to a datetime, dropping garbage rows."""
+    candidate = _safe_json(raw) if isinstance(raw, str) else raw
+    if not isinstance(candidate, dict):
+        return None
+    try:
+        parsed = _parse_dates(candidate)
+    except ValueError:
+        return None
+    if not isinstance(parsed.get("expiresAt"), datetime):
+        return None
+    return parsed
+
+
 def _normalize_hooks(database_hooks: DatabaseHooks | list[Any] | None) -> list[DatabaseHooks]:
     """Accept a single hooks dict or a list of entries; return a list of hooks dicts."""
     if not database_hooks:
@@ -127,6 +186,21 @@ def _normalize_hooks(database_hooks: DatabaseHooks | list[Any] | None) -> list[D
 CustomFn = dict[str, Any]
 
 
+@dataclass
+class VerificationOptions:
+    """``options.verification`` (TS init-options.ts:1193). ``store_identifier`` is
+    ``"plain"``/``"hashed"``/``{"hash": fn}`` or ``{"default": ..., "overrides": {prefix: ...}}``;
+    ``store_in_database`` keeps the DB copy alongside a configured secondary store.
+
+    ponytail: no ``disable_cleanup`` field — this port's ``find_verification_value``
+    never ran the expired-row sweep that TS's ``disableCleanup`` toggles, so there is
+    nothing to disable. Add it here (and the sweep in find) together if that lands.
+    """
+
+    store_identifier: Any = None
+    store_in_database: bool = False
+
+
 class InternalAdapter:
     def __init__(
         self,
@@ -136,12 +210,20 @@ class InternalAdapter:
         database_hooks: DatabaseHooks | list[Any] | None = None,
         session_expires_in: int = 7 * DAY,
         store_session_in_database: bool = False,
+        verification_store_identifier: Any = None,
+        verification_store_in_database: bool = False,
     ) -> None:
         self.adapter = adapter
         self.secondary_storage = secondary_storage
         self.hooks = _normalize_hooks(database_hooks)
         self.session_expires_in = session_expires_in
         self.store_session_in_database = store_session_in_database
+        #: ``options.verification.storeIdentifier`` — ``"plain"``/``"hashed"``/``{"hash": fn}``
+        #: or ``{"default": ..., "overrides": {...}}``; ``None`` == plain (raw at rest).
+        self.verification_store_identifier = verification_store_identifier
+        #: ``options.verification.storeInDatabase`` — keep the DB copy even when a
+        #: secondary store is configured (default: secondary-only).
+        self.verification_store_in_database = verification_store_in_database
         #: non-None while inside ``transaction`` — after-hooks are deferred until commit
         self._after_queue: list[Callable[[], Awaitable[None]]] | None = None
         #: per-identifier locks serializing consume_verification_value (TS consume lock)
@@ -298,6 +380,8 @@ class InternalAdapter:
                 database_hooks=None,
                 session_expires_in=self.session_expires_in,
                 store_session_in_database=self.store_session_in_database,
+                verification_store_identifier=self.verification_store_identifier,
+                verification_store_in_database=self.verification_store_in_database,
             )
             tx.hooks = self.hooks
             tx._after_queue = self._after_queue
@@ -389,22 +473,65 @@ class InternalAdapter:
 
     # --- verification ------------------------------------------------------------------
 
+    async def _stored_identifier(self, identifier: str) -> tuple[Any, str]:
+        """(``storeIdentifier`` option, at-rest identifier) for ``identifier`` — the
+        raw value when unset/``plain``, else the hash. When no option is configured
+        the stored id equals the raw id, so the DB-default path is unchanged."""
+        option = _get_storage_option(identifier, self.verification_store_identifier)
+        stored = await _process_identifier(identifier, option)
+        return option, stored
+
     async def create_verification_value(
         self, data: dict[str, Any], *, force_allow_id: bool = False
     ) -> dict[str, Any] | None:
+        _, stored = await self._stored_identifier(data["identifier"])
         now = _now()
-        payload = {"createdAt": now, "updatedAt": now, **data}
+        payload = {"createdAt": now, "updatedAt": now, **data, "identifier": stored}
+        custom_fn: CustomFn | None = None
+        if self.secondary_storage:
+            ss = self.secondary_storage
+
+            async def _fn(vdata: dict[str, Any]) -> dict[str, Any]:
+                ttl = _ttl_seconds(_expires_ms(vdata["expiresAt"]), _now_ms())
+                if ttl > 0:
+                    await ss.set(f"verification:{stored}", _dumps(vdata), ttl)
+                return vdata
+
+            custom_fn = {"fn": _fn, "execute_main_fn": self.verification_store_in_database}
         return await self._create(
-            "verification", payload, force_allow_id=force_allow_id, custom_fn=None
+            "verification", payload, force_allow_id=force_allow_id, custom_fn=custom_fn
         )
 
     async def find_verification_value(self, identifier: str) -> dict[str, Any] | None:
+        option, stored = await self._stored_identifier(identifier)
+        if self.secondary_storage:
+            cached = await self.secondary_storage.get(f"verification:{stored}")
+            if cached:
+                parsed = _hydrate_cached_verification(cached)
+                if parsed is not None:
+                    return parsed
+            if option and option != "plain":
+                plain_cached = await self.secondary_storage.get(f"verification:{identifier}")
+                if plain_cached:
+                    parsed = _hydrate_cached_verification(plain_cached)
+                    if parsed is not None:
+                        return parsed
+            if not self.verification_store_in_database:
+                return None
+
         rows = await self.adapter.find_many(
             "verification",
-            [Where("identifier", identifier)],
+            [Where("identifier", stored)],
             sort_by={"field": "createdAt", "direction": "desc"},
             limit=1,
         )
+        if not rows and option and option != "plain":
+            rows = await self.adapter.find_many(
+                "verification",
+                [Where("identifier", identifier)],
+                sort_by={"field": "createdAt", "direction": "desc"},
+                limit=1,
+            )
         return rows[0] if rows else None
 
     async def delete_verification_value(self, verification_id: str) -> None:
@@ -421,28 +548,75 @@ class InternalAdapter:
         gate every OTP / magic-link / one-time-token single-use guarantee rests on
         (TS ``internalAdapter.consumeVerificationValue``, db/internal-adapter.ts:1254).
 
-        ponytail: DB-backed only, matching this port's ``find_verification_value``
-        (secondary-storage verification isn't implemented here); the per-identifier
-        lock is the in-process analogue of TS ``withVerificationConsumeLock`` and,
-        together with the adapter transaction, is what makes find-then-delete a
-        single critical section under a scheduler that can interleave real DB awaits.
+        The DB path's per-identifier lock is the in-process analogue of TS
+        ``withVerificationConsumeLock`` and, together with the adapter transaction,
+        makes find-then-delete a single critical section under a scheduler that can
+        interleave real DB awaits.
+
+        ponytail: the secondary-storage-only path (``storeInDatabase`` false) is atomic
+        across processes only when the store implements ``get_and_delete``; without it
+        this falls back to an in-process lock around get+delete, which cannot coordinate
+        across processes — faithful to TS's non-atomic fallback (db/internal-adapter.ts:1288
+        + FIXME(consume-atomic) at :1249). Add a store-native atomic get-and-delete (or
+        require DB-backed storage) to close the cross-process race.
         """
-        async with self._verification_consume_lock(identifier):
+        option, stored = await self._stored_identifier(identifier)
+        identifiers_to_try = (
+            [stored, identifier] if (option and option != "plain") else [stored]
+        )
+        consumed: dict[str, Any] | None = None
 
-            async def _consume(tx: InternalAdapter) -> dict[str, Any] | None:
-                rows = await tx.adapter.find_many(
-                    "verification",
-                    [Where("identifier", identifier)],
-                    sort_by={"field": "createdAt", "direction": "desc"},
-                    limit=1,
-                )
-                latest = rows[0] if rows else None
-                if latest is None:
-                    return None
-                await tx._delete_many("verification", [Where("identifier", identifier)])
-                return latest
+        if self.secondary_storage and not self.verification_store_in_database:
+            ss = self.secondary_storage
 
-            consumed = await self.transaction(_consume)
+            async def _consume_cache_key(key: str) -> dict[str, Any] | None:
+                get_and_delete = getattr(ss, "get_and_delete", None)
+                if get_and_delete is not None:
+                    return _hydrate_cached_verification(await get_and_delete(key))
+                async with self._verification_consume_lock(key):
+                    parsed = _hydrate_cached_verification(await ss.get(key))
+                    if parsed is None:
+                        return None
+                    await ss.delete(key)
+                    return parsed
+
+            for stored_id in identifiers_to_try:
+                cached = await _consume_cache_key(f"verification:{stored_id}")
+                if cached is None:
+                    continue
+                for other in identifiers_to_try:
+                    if other != stored_id:
+                        await ss.delete(f"verification:{other}")
+                consumed = cached
+                break
+        else:
+
+            async def _consume_by_identifier(row_id: str) -> dict[str, Any] | None:
+                async with self._verification_consume_lock(f"verification:{row_id}"):
+
+                    async def _consume(tx: InternalAdapter) -> dict[str, Any] | None:
+                        rows = await tx.adapter.find_many(
+                            "verification",
+                            [Where("identifier", row_id)],
+                            sort_by={"field": "createdAt", "direction": "desc"},
+                            limit=1,
+                        )
+                        latest = rows[0] if rows else None
+                        if latest is None:
+                            return None
+                        await tx._delete_many("verification", [Where("identifier", row_id)])
+                        return latest
+
+                    return await self.transaction(_consume)
+
+            for stored_id in identifiers_to_try:
+                consumed = await _consume_by_identifier(stored_id)
+                if consumed:
+                    break
+            if consumed and self.secondary_storage:
+                for stored_id in identifiers_to_try:
+                    await self.secondary_storage.delete(f"verification:{stored_id}")
+
         if consumed is None or consumed["expiresAt"] < _now():
             return None
         return consumed
@@ -459,14 +633,38 @@ class InternalAdapter:
     ) -> dict[str, Any] | None:
         """TS ``updateVerificationByIdentifier`` (db/internal-adapter.ts:1498) — used by
         email-otp to bump the attempts counter."""
-        return await self._update(
-            "verification", [Where("identifier", identifier)], data, custom_fn=None
-        )
+        _, stored = await self._stored_identifier(identifier)
+        if self.secondary_storage:
+            cached = await self.secondary_storage.get(f"verification:{stored}")
+            if cached:
+                parsed = _safe_json(cached)
+                if parsed:
+                    updated = {**parsed, **data}
+                    ttl = _ttl_seconds(
+                        _expires_ms(updated.get("expiresAt") or parsed.get("expiresAt")),
+                        _now_ms(),
+                    )
+                    if ttl > 0:
+                        await self.secondary_storage.set(
+                            f"verification:{stored}", _dumps(updated), ttl
+                        )
+                    if not self.verification_store_in_database:
+                        return _parse_dates(updated)
+
+        if not self.secondary_storage or self.verification_store_in_database:
+            return await self._update(
+                "verification", [Where("identifier", stored)], data, custom_fn=None
+            )
+        return data
 
     async def delete_verification_by_identifier(self, identifier: str) -> None:
         """TS ``deleteVerificationByIdentifier`` (db/internal-adapter.ts:1207) — clears
         every row for the identifier."""
-        await self._delete_many("verification", [Where("identifier", identifier)])
+        _, stored = await self._stored_identifier(identifier)
+        if self.secondary_storage:
+            await self.secondary_storage.delete(f"verification:{stored}")
+        if not self.secondary_storage or self.verification_store_in_database:
+            await self._delete_many("verification", [Where("identifier", stored)])
 
     async def revoke_unproven_account_access(self, user_id: str) -> None:
         """Strip every credential and session accrued before control of an email was

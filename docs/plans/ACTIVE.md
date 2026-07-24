@@ -65,9 +65,20 @@ priority, or release chores (version bump, CHANGELOG).
       mirroring the file's eq/ne insensitive style; +3 tests, 82 adapter
       tests green). Agent verified TS adapters have NO insensitive-in
       precedent — MemoryAdapter semantics (memory.py:24-29) authoritative.
-- [ ] B5 verification secondaryStorage + storeIdentifier hashing:
-      DISPATCHED (Opus high). Owns internal_adapter.py; auth.py plumbing
-      via merge-window diff. Must verify actual v1.6.23 option fields.
+- [x] B5 verification secondaryStorage + storeIdentifier hashing: DONE,
+      validated (14 tests; full gate 1851/clean/clean after Fable merge
+      window: applied auth.py plumbing — verification=VerificationOptions
+      option → InternalAdapter kwargs — + __init__ re-export + 8 ty
+      narrowings in B5's test file). TS-verified: processIdentifier/
+      getStorageOption verbatim (verification-token-storage.ts:12/28,
+      hash = existing default_key_hasher byte-identical), secondaryStorage
+      branch map internal-adapter.ts:1119/1148/1217/1288/1511, key prefix
+      verification:, hashed find falls back [stored, raw]. Consume on
+      secondary = get_and_delete when the store has it, else TS's
+      non-atomic locked get→delete replicated faithfully (FIXME
+      consume-atomic :1249, ponytail-noted). disableCleanup NOT ported —
+      port never had the expired-row sweep it disables (noted).
+      DB-default path behaviorally identical (full suite green).
 
 ## Phase 0 — Gap analysis (IN PROGRESS)
 
