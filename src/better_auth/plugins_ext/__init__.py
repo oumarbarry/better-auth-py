@@ -28,6 +28,7 @@ from .organization import OrganizationPlugin
 from .passkey import PasskeyPlugin
 from .phone_number import PhoneNumberPlugin
 from .siwe import SiwePlugin
+from .sso import SSOPlugin
 from .two_factor import TwoFactorPlugin
 from .username import UsernamePlugin
 
@@ -54,6 +55,7 @@ __all__ = [
     "OrganizationPlugin",
     "PasskeyPlugin",
     "PhoneNumberPlugin",
+    "SSOPlugin",
     "SiwePlugin",
     "TwoFactorPlugin",
     "UsernamePlugin",

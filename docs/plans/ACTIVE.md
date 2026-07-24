@@ -330,6 +330,18 @@ origin check (W1). Straight to plugins.
       backlog); server-only surface = plugin methods (verify_api_key,
       create/update_api_key, delete_all_expired_api_keys), HTTP routes
       client-path only (one-time-token precedent). Export wired by Fable.
+- [x] W6 sso-OIDC waves A+B: DONE, validated (Fable re-ran scoped gate: 125
+      tests green, ruff/ty clean; near-whole-tree 1595 green = 1478 + 41
+      api-key + 125 sso − 49 oauth-provider phase-B-owned excluded).
+      Spot-checked vs TS: register DOES echo full parsed oidcConfig incl.
+      plaintext clientSecret (routes/sso.ts:913 result spread) — agent's
+      deviation faithful; sanitizeProvider masks clientId on reads. SSRF
+      classifier on stdlib ipaddress + explicit tunnel/metadata vectors;
+      DNS-rebind via injected resolver seam. Seams left for wave C
+      (sign-in/callback + handle_oauth_user_info trust flags) and D
+      (domain-verification endpoints + org auto-assign): ensure_runtime_
+      discovery, verification_identifier, domainVerified column,
+      has_org_plugin. Export wired by Fable (+ RUF022 __all__ sort fix).
 - [ ] W6 impl DISPATCHED 2026-07-24 (3 Opus high agents, parallel, in-tree):
       api-key (plugins_ext/api_key.py), passkey (plugins_ext/passkey.py),
       sso-OIDC waves A+B (plugins_ext/sso/ — schema/CRUD/SSRF/discovery/
