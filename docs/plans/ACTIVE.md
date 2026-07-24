@@ -296,6 +296,19 @@ origin check (W1). Straight to plugins.
       webauthn>=2 dep as [passkey] extra; no freshSessionMiddleware in port
       (default: inline now-createdAt<=fresh_age); rpName default "Better
       Auth"; client-side passkeyClient + authenticator-metadata excluded.
+- [x] W6 passkey: DONE, validated (Fable re-ran scoped gate: 30 tests green,
+      ruff/ty clean; code spot-check: publicKey padded-b64, deviceType
+      snake→camel map, real py_webauthn 3.0 verify driven by in-test ES256
+      software authenticator, challenge single-winner concurrency). Agent
+      documented 9 py_webauthn 3.0-vs-2.x mapping deltas (verify_* raise
+      instead of returning {verified}, flat dataclass results, enum
+      device_type — spec 09 was 2.x-based). Accepted deviations ponytail-
+      noted: freshness inlined reusing SESSION_REQUIRED; delete hides
+      existence (PASSKEY_NOT_FOUND 401, == TS notFoundError/forbiddenStatus,
+      Fable-verified routes.ts); client-only error codes surfaced but never
+      thrown. PENDING MERGE WINDOW: export `from .passkey import
+      PasskeyPlugin` in plugins_ext/__init__.py (file owned by W5-C-A agent).
+      One connection-drop mid-run, resumed via SendMessage without rework.
 - [ ] W6 impl DISPATCHED 2026-07-24 (3 Opus high agents, parallel, in-tree):
       api-key (plugins_ext/api_key.py), passkey (plugins_ext/passkey.py),
       sso-OIDC waves A+B (plugins_ext/sso/ — schema/CRUD/SSRF/discovery/
