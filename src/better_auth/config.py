@@ -176,6 +176,23 @@ class AdvancedDatabase:
 
 
 @dataclass
+class IPAddressOptions:
+    """``advanced.ipAddress`` — how the client IP is resolved for rate limiting and
+    session tracking (mirrors better-auth). Resolution lives in ``ip.get_request_ip``.
+    """
+
+    #: headers checked in order for the client IP (TS default ``["x-forwarded-for"]``)
+    ip_address_headers: list[str] = field(default_factory=lambda: ["x-forwarded-for"])
+    #: ⚠ security risk — no IP is stored on sessions and rate limiting shares one bucket
+    disable_ip_tracking: bool = False
+    #: IPv6 prefix length used to collapse addresses before keying; clamped to 0..128
+    ipv6_subnet: int = 64
+    #: trusted reverse-proxy IPs/CIDRs; when set, the forwarded chain is walked
+    #: right-to-left and the first untrusted hop is the client (see ``ip.py``)
+    trusted_proxies: list[str] = field(default_factory=list)
+
+
+@dataclass
 class RateLimit:
     """Rolling-window rate limiting, keyed by client IP + path (mirrors better-auth).
 

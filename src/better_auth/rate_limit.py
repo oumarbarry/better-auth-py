@@ -14,9 +14,9 @@ ponytail: uses the read-decide-write path (TS ``legacyConsume``) uniformly for a
 backends rather than per-backend atomic ``consume`` — correct for a single process;
 add an atomic primitive if a multi-worker deployment needs strict enforcement.
 
-ponytail: IP is taken from ``request.client_ip`` (resolved by the integration). The TS
-``advanced.ipAddress`` knobs (``ipAddressHeaders``/``trustedProxies``/``ipv6Subnet``)
-are not ported — that option group does not exist in the Python config yet.
+The client IP is resolved via ``ip.get_request_ip`` from the configured
+``advanced.ipAddress`` headers (TS ``getIp``); ``disable_ip_tracking`` skips per-IP
+limiting entirely.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from .adapters.rate_limit import (
     MemoryRateLimitStorage,
     SecondaryRateLimitStorage,
 )
+from .ip import get_request_ip
 
 if TYPE_CHECKING:
     from .auth import BetterAuth
@@ -139,8 +140,13 @@ class RateLimiter:
         if isinstance(custom, tuple):
             window, maximum = custom
 
-        ip = request.client_ip or NO_TRUSTED_IP
-        return f"{ip}|{path}", window, maximum
+        ip = get_request_ip(request, self.auth.ip_address)
+        if ip is None and self.auth.ip_address.disable_ip_tracking:
+            # IP tracking explicitly disabled; per-IP rate limiting does not apply.
+            return None
+        # Fail closed when no IP resolves: a shared per-path bucket still enforces the
+        # limit rather than letting a client drop the header to bypass it.
+        return f"{ip or NO_TRUSTED_IP}|{path}", window, maximum
 
     async def _resolve_custom(
         self, request: AuthRequest, path: str, window: int, maximum: int

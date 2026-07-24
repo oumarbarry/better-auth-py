@@ -50,8 +50,17 @@ priority, or release chores (version bump, CHANGELOG).
       TS entropy warnings dropped (logging-only). Backlog shrunk: encrypted
       client secrets no longer blocked on secrets rotation — remaining
       blocker for them is the HS256/disableJwtPlugin follow-up alone.
-- [ ] B3 advanced.ipAddress: DISPATCHED (Opus high). Owns auth.py/types.py/
-      rate_limit.py/session.py; internal_adapter diff via merge window.
+- [x] B3 advanced.ipAddress: DONE, validated (20 tests; Fable verified the
+      fail-closed chain semantics line-by-line vs core/src/utils/ip.ts:
+      289-340 — right-to-left walk, malformed hop → null, multi-hop without
+      trustedProxies → null, all 4 option fields exist in v1.6.23).
+      New ip.py (stdlib ipaddress), IPAddressOptions, rate-limit + session
+      wired, spoofed non-configured header ignored. Deviations: IPv6 key in
+      stdlib-compressed form (grouping identical, keys never cross runtime);
+      fallback = request.client_ip instead of TS dev-127.0.0.1.
+      Follow-up flagged (minor): plugins admin/api_key/captcha still read
+      raw ctx.request.client_ip — verify TS paths before routing them
+      through get_request_ip.
 - [x] B4 SQLAlchemy insensitive in/not_in: DONE, validated (7-line fix
       mirroring the file's eq/ne insensitive style; +3 tests, 82 adapter
       tests green). Agent verified TS adapters have NO insensitive-in

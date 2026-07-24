@@ -16,6 +16,7 @@ from .config import (
     CrossSubDomainCookies,
     EmailAndPassword,
     EmailVerification,
+    IPAddressOptions,
     OnAPIError,
     RateLimit,
     SessionOptions,
@@ -89,6 +90,7 @@ class BetterAuth:
         disable_csrf_check: bool | None = None,
         disable_origin_check: bool | list[str] = False,
         cross_sub_domain_cookies: CrossSubDomainCookies | None = None,
+        ip_address: IPAddressOptions | None = None,
     ):
         if not secret or len(secret) < 32:
             raise ValueError(
@@ -121,6 +123,8 @@ class BetterAuth:
         self.disable_csrf_check = bool(disable_csrf_check)
         self.disable_origin_check = disable_origin_check
         self.cross_sub_domain_cookies = cross_sub_domain_cookies or CrossSubDomainCookies()
+        #: advanced.ipAddress — client-IP resolution for rate limiting and session tracking
+        self.ip_address = ip_address or IPAddressOptions()
         self.plugins = list(plugins or [])
         #: request middleware — ``{"before": fn(ctx), "after": fn(ctx)}`` (TS ``options.hooks``).
         self.hooks: Mapping[str, RequestHook] = dict(hooks or {})

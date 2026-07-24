@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from .adapters.base import Where
 from .crypto import generate_id, sign_value, unsign_value
+from .ip import get_request_ip
 from .types import AuthRequest
 
 if TYPE_CHECKING:
@@ -99,7 +100,7 @@ async def create_session(
         "token": generate_id(32),
         "userId": user_id,
         "expiresAt": now + timedelta(seconds=expires_in),
-        "ipAddress": request.client_ip or "",
+        "ipAddress": get_request_ip(request, auth.ip_address) or "",
         "userAgent": request.headers.get("user-agent", ""),
         "createdAt": now,
         "updatedAt": now,

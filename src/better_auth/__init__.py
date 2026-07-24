@@ -11,6 +11,7 @@ from .config import (
     AdvancedDatabase,
     EmailAndPassword,
     EmailVerification,
+    IPAddressOptions,
     RateLimit,
     SessionOptions,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "Field",
     "GitHub",
     "Google",
+    "IPAddressOptions",
     "InternalAdapter",
     "MemoryAdapter",
     "MemorySecondaryStorage",
