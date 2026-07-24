@@ -181,8 +181,39 @@ HMAC helper: utf8 key/data, hex + base64url(nopad) encodings.
       Accepted deviations: digit-bounds raise ValueError (TS TypeError,
       no wire impact); envelope decrypt surface = optional keys dict
       (port has no SecretConfig yet — secrets-rotation backlog).
-- [ ] access-control subsystem → two-factor, admin, organization (XL,
-      sub-phased), multi-session, jwt, generic-oauth, device-authorization.
+Spec-05 "Phase 0" reconciled against landed code (2026-07-24, Fable audit):
+consume_one, guarded increment_one, all where ops, HMAC b64urlnopad,
+constant-time compare, internal-adapter session/user/verification helpers,
+plugin framework, schema attrs — ALL exist (W1–W4-A). Remaining core gap =
+4 admin-only internal-adapter helpers (list_users w/ query surface,
+count_total_users, update_password, link_account-if-missing) → folded into
+the admin agent's ownership (sole consumer, no separate dispatch).
+
+- [x] W4-C/W4-D: DONE — all 7 hard plugins + access-control ported, 1162
+      tests total (AC 51, jwt 42, two-factor 41, multi-session 17,
+      generic-oauth 50, device-authorization 48, admin 64 + 7 internal-adapter
+      helpers, organization-core 54, 3 merge-window regressions), full gate
+      green, zero merge conflicts. 3 agent connection drops/stalls, all
+      resumed via SendMessage without rework. Agents corrected two Fable
+      prompt errors (no TS discovery cache; no organizationCreation option)
+      and found 3 core bugs, fixed in the merge window: (e) check_origin now
+      parses form-urlencoded bodies (form_post callbacks; malicious form
+      callbackURL still validated), (f) memory-adapter in/not_in no longer
+      lowercases row values case-sensitively, plus the JS-truthiness
+      empty-array divergence caught in AC. internal_adapter gained
+      list_users/count_total_users/update_password (admin agent, sole owner).
+      Key accepted deviations (ponytail-noted in code): device-auth
+      OAuth-shaped wire errors + CAS-hardened lastPolledAt; jwt EdDSA-only,
+      custom jwks adapter skipped; two-factor sign-in gate pure-hook (no
+      endpoints.py change); impersonation session hand-built (create_session
+      lacks overrideAll); org server-only sessionless branch deferred.
+      BACKLOG: SQLAlchemyAdapter lacks insensitive mode for "in" op;
+      secrets rotation/SecretConfig; server-API surface for sessionless
+      create/addMember; flow._create_state requestSignUp slot.
+- [ ] Organization phases 2-4 (SEAMs marked in organization.py):
+      phase 2 invitations (+ membership_limit enforcement on accept),
+      phase 3 teams (+ session.activeTeamId), phase 4 dynamic AC
+      (organizationRole rows merged in _resolve_roles).
 
 ## Wave 5 — Advanced plugins (spec: gap/06-plugins-advanced.md)
 - [ ] oauth-popup, siwe, one-tap, oauth-proxy; oauth-provider pkg (subset,

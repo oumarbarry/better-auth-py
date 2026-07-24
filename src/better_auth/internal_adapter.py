@@ -336,6 +336,26 @@ class InternalAdapter:
         await self._delete_many("account", [Where("userId", user_id)])
         await self._delete("user", [Where("id", user_id)])
 
+    async def list_users(
+        self,
+        limit: int | None = None,
+        offset: int | None = None,
+        sort_by: dict[str, str] | None = None,
+        where: list[Where] | None = None,
+    ) -> list[dict[str, Any]]:
+        """TS ``internalAdapter.listUsers`` (db/internal-adapter.ts:257) — a thin
+        ``find_many`` over the user table. The admin ``/admin/list-users`` endpoint
+        builds ``where`` from its search/filter query params and maps ``sortBy`` onto
+        the adapter's ``{field, direction}`` sort surface."""
+        return await self.adapter.find_many(
+            "user", where, limit=limit, offset=offset, sort_by=sort_by
+        )
+
+    async def count_total_users(self, where: list[Where] | None = None) -> int:
+        """TS ``internalAdapter.countTotalUsers`` (db/internal-adapter.ts:277) — the
+        ``total`` in the admin list-users response, honouring the same ``where``."""
+        return await self.adapter.count("user", where)
+
     # --- account -----------------------------------------------------------------------
 
     async def create_account(
@@ -350,6 +370,22 @@ class InternalAdapter:
 
     async def delete_account(self, account_id: str) -> None:
         await self._delete("account", [Where("id", account_id)])
+
+    async def update_password(self, user_id: str, password: str) -> None:
+        """Set the password on a user's credential account (TS
+        ``internalAdapter.updatePassword``, db/internal-adapter.ts:1023) — backs the
+        admin ``/admin/set-user-password`` endpoint when a credential account exists.
+
+        ponytail: single-row ``_update`` (there is one credential account per user);
+        TS uses ``updateManyWithHooks``. Swap to a hook-running update-many only if
+        multi-credential accounts ever become possible.
+        """
+        await self._update(
+            "account",
+            [Where("userId", user_id), Where("providerId", "credential")],
+            {"password": password},
+            custom_fn=None,
+        )
 
     # --- verification ------------------------------------------------------------------
 

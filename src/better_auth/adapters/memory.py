@@ -25,7 +25,7 @@ def _eval(row: dict[str, Any], clause: Where) -> bool:
         if not isinstance(b, (list, tuple, set)):
             raise ValueError(f"operator {op!r} requires an array value")
         values = [_lower(v) for v in b] if insensitive else list(b)
-        found = _lower(a) in values
+        found = (_lower(a) if insensitive else a) in values
         return found if op == "in" else not found
     if op in ("contains", "starts_with", "ends_with"):
         if not (isinstance(a, str) and isinstance(b, str)):

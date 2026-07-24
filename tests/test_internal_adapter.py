@@ -275,3 +275,88 @@ async def test_session_goes_to_database_without_secondary_storage():
     assert await adapter.count("session") == 1
     found = _row(await ia.find_session(session["token"]))
     assert found["user"]["id"] == user["id"]
+
+
+# --- admin plugin helpers: list_users / count_total_users / update_password ----
+#
+# These back the admin plugin's /admin/list-users, its `total`, and set-user-password.
+# (link_account is NOT added: TS `createAccount` and `linkAccount` are byte-identical,
+# so `create_account` already covers it — see admin.py.)
+from better_auth.adapters.base import Where  # noqa: E402
+
+
+async def _seed_users(ia: InternalAdapter) -> None:
+    await ia.create_user({"name": "Ada", "email": "ada@example.com"})
+    await ia.create_user({"name": "Bob", "email": "bob@other.com"})
+    await ia.create_user({"name": "Cy", "email": "cy@example.com"})
+
+
+async def test_list_users_returns_all_without_filters():
+    ia = InternalAdapter(_adapter())
+    await _seed_users(ia)
+    users = await ia.list_users()
+    assert {u["email"] for u in users} == {"ada@example.com", "bob@other.com", "cy@example.com"}
+
+
+async def test_list_users_limit_and_offset_paginate():
+    ia = InternalAdapter(_adapter())
+    await _seed_users(ia)
+    page = await ia.list_users(limit=2, offset=0, sort_by={"field": "email", "direction": "asc"})
+    assert [u["email"] for u in page] == ["ada@example.com", "bob@other.com"]
+    page2 = await ia.list_users(limit=2, offset=2, sort_by={"field": "email", "direction": "asc"})
+    assert [u["email"] for u in page2] == ["cy@example.com"]
+
+
+async def test_list_users_sort_direction_desc():
+    ia = InternalAdapter(_adapter())
+    await _seed_users(ia)
+    users = await ia.list_users(sort_by={"field": "name", "direction": "desc"})
+    assert [u["name"] for u in users] == ["Cy", "Bob", "Ada"]
+
+
+async def test_list_users_where_filters():
+    ia = InternalAdapter(_adapter())
+    await _seed_users(ia)
+    users = await ia.list_users(
+        where=[Where("email", "@example.com", "ends_with")],
+        sort_by={"field": "email", "direction": "asc"},
+    )
+    assert [u["email"] for u in users] == ["ada@example.com", "cy@example.com"]
+
+
+async def test_count_total_users_all_and_filtered():
+    ia = InternalAdapter(_adapter())
+    await _seed_users(ia)
+    assert await ia.count_total_users() == 3
+    assert await ia.count_total_users([Where("email", "@example.com", "ends_with")]) == 2
+
+
+async def test_update_password_updates_credential_account():
+    ia = InternalAdapter(_adapter())
+    user = _row(await ia.create_user({"name": "Ada", "email": "ada@x.com"}))
+    await ia.create_account(
+        {"userId": user["id"], "accountId": user["id"], "providerId": "credential",
+         "password": "old-hash"}
+    )
+    await ia.update_password(user["id"], "new-hash")
+    account = await ia.adapter.find_one(
+        "account", [Where("userId", user["id"]), Where("providerId", "credential")]
+    )
+    assert _row(account)["password"] == "new-hash"
+
+
+async def test_update_password_only_touches_credential_provider():
+    ia = InternalAdapter(_adapter())
+    user = _row(await ia.create_user({"name": "Ada", "email": "ada@x.com"}))
+    await ia.create_account(
+        {"userId": user["id"], "accountId": "g1", "providerId": "google", "accessToken": "t"}
+    )
+    await ia.create_account(
+        {"userId": user["id"], "accountId": user["id"], "providerId": "credential",
+         "password": "old-hash"}
+    )
+    await ia.update_password(user["id"], "new-hash")
+    google = await ia.adapter.find_one(
+        "account", [Where("userId", user["id"]), Where("providerId", "google")]
+    )
+    assert _row(google).get("password") is None

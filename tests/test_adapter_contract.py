@@ -238,3 +238,15 @@ async def test_transaction_rolls_back(adapter):
         await adapter.transaction(work)
     assert await adapter.count("user") == 1
     assert await adapter.find_one("user", [Where("email", "x@example.com")]) is None
+
+
+async def test_in_operator_matches_generated_mixed_case_ids(adapter):
+    # regression: the memory adapter's case-sensitive "in"/"not_in" path lowercased
+    # the ROW value (but not the query values), so generated mixed-case ids and
+    # session tokens never matched
+    u1 = await _user(adapter)
+    u2 = await _user(adapter, email="b@example.com")
+    rows = await adapter.find_many("user", [Where("id", [u1["id"], u2["id"]], "in")])
+    assert {r["id"] for r in rows} == {u1["id"], u2["id"]}
+    kept = await adapter.find_many("user", [Where("id", [u1["id"]], "not_in")])
+    assert u1["id"] not in {r["id"] for r in kept}

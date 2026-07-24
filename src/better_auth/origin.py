@@ -13,7 +13,7 @@ from __future__ import annotations
 import inspect
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from .types import APIError, Ctx
 
@@ -184,6 +184,19 @@ def _should_skip_origin_check(auth: BetterAuth, path: str) -> bool:
     return False
 
 
+def _body_for_origin_check(ctx: Ctx) -> dict[str, object]:
+    """TS parses the body per content-type, so a form-encoded POST (e.g. an OAuth
+    ``response_mode=form_post`` callback) simply has no ``callbackURL`` — it must not
+    die with INVALID_BODY here. Parse forms; keep strict JSON errors for JSON."""
+    request = ctx.request
+    if not request.body:
+        return {}
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if content_type == "application/x-www-form-urlencoded":
+        return dict(parse_qsl(request.body.decode("utf-8", "replace")))
+    return ctx.body()
+
+
 async def check_origin(auth: BetterAuth, ctx: Ctx) -> None:
     """Router ``/**`` origin/CSRF check for state-changing requests (origin-check.ts:66)."""
     request = ctx.request
@@ -199,7 +212,7 @@ async def check_origin(auth: BetterAuth, ctx: Ctx) -> None:
     if _should_skip_origin_check(auth, request.path):
         return
 
-    body = ctx.body() if request.body else {}
+    body = _body_for_origin_check(ctx)
     query = request.query
     await _validate_url(
         auth, request, body.get("callbackURL") or query.get("callbackURL"), "callbackURL"
