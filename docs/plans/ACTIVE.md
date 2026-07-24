@@ -35,11 +35,21 @@ priority, or release chores (version bump, CHANGELOG).
       (was first-miss-only). Sweep verdict (sub-agent): admin/two-factor
       clean; device-auth + oauth-provider TS {error,error_description}
       already matched by the port's _oauth_error pattern — no action.
-- [ ] B2 SecretConfig + encrypted client secrets: DISPATCHED (Opus xhigh).
-      Owns crypto.py/oauth_provider. Versioned $ba$ envelope mint/decrypt,
-      TS-generated cross-runtime vector, oauth-provider encrypt guard truth
-      table; returns auth.py plumbing diff for Fable merge window (auth.py
-      owned by B1 this volley). Plain-string byte-parity vectors sacred.
+- [x] B2 SecretConfig + encrypted client secrets: DONE, validated (30 new
+      tests; full gate 1814/clean/clean after Fable merge-window actions:
+      applied the auth.py plumbing — secrets=[(version, value)] option →
+      resolve_secret_config → self.secret_config, TS create-context.ts:
+      169-186 surface — plus 4 ruff fixes + 2 isinstance narrowings in B2's
+      test files). Cross-runtime PROVEN both ways: TS-minted $ba$2$ envelope
+      decrypts in Python (3 hardcoded vectors: current version, retired-but-
+      present version, legacy bare-hex) AND Python-minted envelope decrypted
+      live under real TS symmetricDecrypt. Guard truth table == oauth.ts:
+      157-178. Ponytail: "encrypted" literal still unreachable end-to-end
+      (gated behind disable_jwt_plugin reject) — threading ctx secret_config
+      into register/token call sites lands with the HS256 follow-up;
+      TS entropy warnings dropped (logging-only). Backlog shrunk: encrypted
+      client secrets no longer blocked on secrets rotation — remaining
+      blocker for them is the HS256/disableJwtPlugin follow-up alone.
 
 ## Phase 0 — Gap analysis (IN PROGRESS)
 

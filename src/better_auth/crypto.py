@@ -16,6 +16,8 @@ import re
 import secrets
 import time
 import unicodedata
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, unquote, urlencode
 
@@ -133,27 +135,81 @@ def unsign_value(secret: str, signed: str) -> str | None:
 ENVELOPE_PREFIX = "$ba$"  # TS crypto/index.ts formatEnvelope; key-rotation envelope "$ba$<v>$<hex>"
 _HEX_RE = re.compile(r"[0-9a-f]+")
 
+#: TS ``utils/constants.ts`` — the built-in fallback secret; never adopted as a legacy key.
+DEFAULT_SECRET = "better-auth-secret-12345678901234567890"
+
+
+@dataclass(frozen=True)
+class SecretConfig:
+    """Versioned secret material for key rotation — TS ``core/types/secret.ts`` ``SecretConfig``.
+
+    ``keys`` maps a version number to its secret; ``current_version`` is minted into new
+    ``$ba$<v>$<hex>`` envelopes; ``legacy_secret`` decrypts pre-rotation bare-hex payloads
+    (``BETTER_AUTH_SECRET`` unless it is the built-in ``DEFAULT_SECRET``)."""
+
+    keys: dict[int, str] = field(default_factory=dict)
+    current_version: int = 0
+    legacy_secret: str | None = None
+
+
+# A resolved secret is either a plain string (bare-hex path) or a versioned SecretConfig.
+SecretLike = str | SecretConfig
+
 
 def _symmetric_key(secret: str) -> bytes:
     return hashlib.sha256(secret.encode()).digest()
 
 
-def symmetric_encrypt(secret: str, data: str) -> str:
-    """XChaCha20-Poly1305 encrypt ``data`` with ``SHA-256(secret)`` as the key — byte-parity with
-    TS ``symmetricEncrypt`` (``crypto/index.ts``, string key → bare hex). Output is lowercase hex of
-    ``nonce(24) || ciphertext || tag(16)``: libsodium combined mode == noble's sealed output; the
-    24-byte random nonce is prepended, matching ``managedNonce``."""
+def _raw_encrypt(secret: str, data: str) -> str:
+    """XChaCha20-Poly1305 encrypt with ``SHA-256(secret)`` → bare lowercase hex of
+    ``nonce(24) || ciphertext || tag(16)`` (TS ``rawEncrypt``; libsodium combined == noble
+    sealed output, 24-byte random ``managedNonce`` prepended)."""
     key = _symmetric_key(secret)
     nonce = secrets.token_bytes(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES)  # 24
     combined = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(data.encode(), b"", nonce, key)
     return (nonce + combined).hex()
 
 
-def symmetric_decrypt(secret: str, payload: str, *, keys: dict[int, str] | None = None) -> str:
-    """Decrypt a bare-hex XChaCha20 payload (TS string-key output). A ``$ba$<v>$<hex>`` key-rotation
-    envelope is decrypted with ``keys[version]`` — the port has no ``SecretConfig`` yet, so the
-    versioned secrets are passed explicitly; an envelope with no matching key raises ``ValueError``.
+def symmetric_encrypt(secret: SecretLike, data: str) -> str:
+    """Encrypt ``data`` — byte-parity with TS ``symmetricEncrypt`` (``crypto/index.ts``).
+
+    A plain ``str`` key produces bare hex (unchanged, byte-identical to prior vectors). A
+    :class:`SecretConfig` encrypts with ``keys[current_version]`` and wraps the result in a
+    ``$ba$<current_version>$<hex>`` envelope."""
+    if isinstance(secret, SecretConfig):
+        key = secret.keys.get(secret.current_version)
+        if key is None:
+            raise ValueError(f"Secret version {secret.current_version} not found in keys")
+        return format_envelope(secret.current_version, _raw_encrypt(key, data))
+    return _raw_encrypt(secret, data)
+
+
+def symmetric_decrypt(
+    secret: SecretLike, payload: str, *, keys: dict[int, str] | None = None
+) -> str:
+    """Decrypt an XChaCha20 payload — TS ``symmetricDecrypt`` (``crypto/index.ts``).
+
+    With a :class:`SecretConfig`: a ``$ba$<v>$<hex>`` envelope resolves to ``keys[v]`` (missing
+    version → ``ValueError``, the key was retired); a bare-hex payload falls back to
+    ``legacy_secret`` (absent → ``ValueError``). With a plain ``str``: bare hex decrypts
+    directly; the ``keys`` kwarg still resolves an envelope for callers without a SecretConfig.
     Tamper / wrong key raises ``nacl.exceptions.CryptoError``."""
+    if isinstance(secret, SecretConfig):
+        envelope = parse_envelope(payload)
+        if envelope is not None:
+            version, ciphertext = envelope
+            key = secret.keys.get(version)
+            if key is None:
+                raise ValueError(
+                    f"Secret version {version} not found in keys (key may have been retired)"
+                )
+            return _raw_decrypt(key, ciphertext)
+        if secret.legacy_secret:
+            return _raw_decrypt(secret.legacy_secret, payload)
+        raise ValueError(
+            "Cannot decrypt legacy bare-hex payload: no legacy secret available. "
+            "Set BETTER_AUTH_SECRET for backwards compatibility."
+        )
     envelope = parse_envelope(payload)
     if envelope is not None:
         version, ciphertext = envelope
@@ -161,6 +217,86 @@ def symmetric_decrypt(secret: str, payload: str, *, keys: dict[int, str] | None 
             raise ValueError(f"Cannot decrypt envelope: secret version {version} not in keys")
         return _raw_decrypt(keys[version], ciphertext)
     return _raw_decrypt(secret, payload)
+
+
+def _normalize_secret_entry(entry: Any) -> tuple[int, str]:
+    if isinstance(entry, Mapping):
+        return int(entry["version"]), entry["value"]
+    version, value = entry
+    return int(version), value
+
+
+def parse_secrets_env(env_value: str | None) -> list[tuple[int, str]] | None:
+    """Parse ``BETTER_AUTH_SECRETS`` (``"<version>:<secret>,<version>:<secret>"``) into
+    ``[(version, value), …]`` — TS ``context/secret-utils.ts`` ``parseSecretsEnv``. Returns
+    ``None`` when unset/empty; raises ``ValueError`` on a malformed entry."""
+    if not env_value:
+        return None
+    out: list[tuple[int, str]] = []
+    for raw in env_value.split(","):
+        item = raw.strip()
+        colon = item.find(":")
+        if colon == -1:
+            raise ValueError(
+                f'Invalid BETTER_AUTH_SECRETS entry: "{item}". '
+                'Expected format: "<version>:<secret>"'
+            )
+        version_str = item[:colon]
+        try:
+            version = int(version_str)
+        except ValueError:
+            version = -1
+        if version < 0 or str(version) != version_str.strip():
+            raise ValueError(
+                f'Invalid version in BETTER_AUTH_SECRETS: "{version_str}". '
+                "Version must be a non-negative integer."
+            )
+        value = item[colon + 1 :].strip()
+        if not value:
+            raise ValueError(f"Empty secret value for version {version} in BETTER_AUTH_SECRETS.")
+        out.append((version, value))
+    return out
+
+
+def resolve_secret_config(
+    secret: str,
+    secrets: Sequence[tuple[int, str] | Mapping[str, Any]] | None = None,
+) -> SecretLike:
+    """Resolve the effective secret — TS ``context/create-context.ts`` + ``buildSecretConfig``.
+
+    No ``secrets`` → the plain ``secret`` string (bare-hex path). With ``secrets`` (each
+    ``(version, value)`` or ``{"version", "value"}``): a :class:`SecretConfig` whose
+    ``current_version`` is the FIRST entry, and whose ``legacy_secret`` is ``secret`` unless it
+    is the built-in :data:`DEFAULT_SECRET`. Raises ``ValueError`` on an empty array, a
+    negative/non-integer/duplicate version, or an empty value (TS ``validateSecretsArray``).
+
+    # ponytail: entropy/length WARNINGS from validateSecretsArray are logging-only, dropped —
+    # add if a warn channel is wired for the SDK.
+    """
+    if secrets is None:
+        return secret
+    entries = [_normalize_secret_entry(e) for e in secrets]
+    if not entries:
+        raise ValueError("`secrets` array must contain at least one entry.")
+    seen: set[int] = set()
+    for version, value in entries:
+        if version < 0:
+            raise ValueError(
+                f"Invalid version {version} in `secrets`. Version must be a non-negative integer."
+            )
+        if not value:
+            raise ValueError(f"Empty secret value for version {version} in `secrets`.")
+        if version in seen:
+            raise ValueError(
+                f"Duplicate version {version} in `secrets`. Each version must be unique."
+            )
+        seen.add(version)
+    legacy = secret if secret and secret != DEFAULT_SECRET else None
+    return SecretConfig(
+        keys={v: val for v, val in entries},
+        current_version=entries[0][0],
+        legacy_secret=legacy,
+    )
 
 
 def _raw_decrypt(secret: str, hex_ct: str) -> str:

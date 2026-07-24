@@ -25,6 +25,8 @@ from ...crypto import (
     b64url_decode_nopad,
     default_key_hasher,
     generate_random_string,
+    symmetric_decrypt,
+    symmetric_encrypt,
 )
 from ...session import utcnow
 from ...types import AuthResponse, Ctx
@@ -278,27 +280,45 @@ def _client_secret_prefix(opts: Any) -> str | None:
     return prefix.get("clientSecret") if isinstance(prefix, dict) else None
 
 
-async def store_client_secret(opts: Any, client_secret: str) -> str:
-    """Store a client secret per ``store_client_secret`` — default ``"hashed"`` via
-    ``default_key_hasher`` (base64url-nopad SHA-256), or a custom ``{"hash": fn}`` object.
-    ``"encrypted"`` is blocked in this port (see BINDING DECISIONS)."""
+async def store_client_secret(opts: Any, client_secret: str, secret_config: Any = None) -> str:
+    """Store a client secret per ``store_client_secret`` — TS ``storeClientSecret``
+    (utils/index.ts:314). ``"hashed"`` (default) hashes via ``default_key_hasher``;
+    ``"encrypted"`` symmetric-encrypts with ``secret_config`` (``str`` or ``SecretConfig``);
+    a custom ``{"hash": fn}`` or ``{"encrypt": fn}`` object delegates.
+
+    The plugin init guard (oauth.ts:157-178) rejects ``"encrypted"``/``{encrypt}`` while the
+    jwt plugin is enabled, and this port rejects ``disable_jwt_plugin`` outright — so at
+    runtime only the hashed/{hash} branches are reachable; the encrypt branches exist for the
+    util-level API (and the future HS256 path)."""
     method = getattr(opts, "store_client_secret", None) or "hashed"
+    if method == "encrypted":
+        return symmetric_encrypt(secret_config, client_secret)
     if method == "hashed":
         return default_key_hasher(client_secret)
     if isinstance(method, dict) and "hash" in method:
         return await _maybe_await(method["hash"](client_secret))
-    if method == "encrypted" or (isinstance(method, dict) and "encrypt" in method):
-        raise ValueError(
-            "store_client_secret 'encrypted' is not supported in this port "
-            "(blocked on secrets-rotation backlog); use 'hashed' or a custom {hash, verify}"
-        )
+    if isinstance(method, dict) and "encrypt" in method:
+        return await _maybe_await(method["encrypt"](client_secret))
     raise ValueError(f"unsupported store_client_secret: {method!r}")
 
 
-async def verify_client_secret(opts: Any, stored: str, provided: str | None) -> bool:
+async def _decrypt_stored_client_secret(method: Any, stored: str, secret_config: Any) -> str:
+    """TS ``decryptStoredClientSecret`` (utils/index.ts:213)."""
+    if method == "encrypted":
+        return symmetric_decrypt(secret_config, stored)
+    if isinstance(method, dict) and "decrypt" in method:
+        return await _maybe_await(method["decrypt"](stored))
+    raise ValueError(f"Unsupported decryption storageMethod type {method!r}")
+
+
+async def verify_client_secret(
+    opts: Any, stored: str, provided: str | None, secret_config: Any = None
+) -> bool:
     """Constant-time verify a presented secret against the stored value — TS
-    ``verifyStoredClientSecret``. Strips ``prefix.clientSecret`` first (never stored); a
-    present-but-mismatched prefix is a hard reject."""
+    ``verifyStoredClientSecret`` (utils/index.ts:237). Strips ``prefix.clientSecret`` first
+    (never stored); a present-but-mismatched prefix is a hard reject. ``"encrypted"`` decrypts
+    then constant-time compares, swallowing decrypt errors as ``False`` (matching the TS
+    try/catch); a custom ``{"decrypt": fn}`` compares without the catch."""
     method = getattr(opts, "store_client_secret", None) or "hashed"
     prefix = _client_secret_prefix(opts)
     if provided and prefix:
@@ -318,6 +338,15 @@ async def verify_client_secret(opts: Any, stored: str, provided: str | None) -> 
         if not provided:
             return False
         return constant_time_equal(await _maybe_await(method["hash"](provided)), stored)
+    if method == "encrypted":
+        try:
+            decrypted = await _decrypt_stored_client_secret(method, stored, secret_config)
+        except Exception:
+            return False
+        return bool(provided) and constant_time_equal(decrypted, provided)
+    if isinstance(method, dict) and "decrypt" in method:
+        decrypted = await _decrypt_stored_client_secret(method, stored, secret_config)
+        return bool(provided) and constant_time_equal(decrypted, provided)
     raise ValueError(f"unsupported store_client_secret: {method!r}")
 
 

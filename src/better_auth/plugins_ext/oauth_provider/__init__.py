@@ -141,14 +141,21 @@ class OAuthProviderPlugin(Plugin):
                 "(EdDSA-first; the HS256/encrypted-secret path is a follow-up)."
             )
 
-        # BINDING DECISION: only "hashed" + custom {hash, verify}; "encrypted" is blocked.
+        # Init guard truth table — TS oauth.ts:157-178.
+        #   disableJwtPlugin && (hashed | {hash})       -> throw  (id tokens signed with secret)
+        #   !disableJwtPlugin && (encrypted | {encrypt|decrypt}) -> throw  (use hashed/hash)
+        # The first branch is subsumed by the EdDSA-first `disable_jwt_plugin` rejection above
+        # (it always fires first with NotImplementedError), so only the second branch is live
+        # here. With the jwt plugin enabled, "encrypted"/{encrypt,decrypt} are therefore never
+        # selectable via init; the store/verify utils still support them at the function level.
+        # ponytail: the hashed+jwt-disabled branch is dead while disable_jwt_plugin is rejected;
+        # restore it verbatim when the HS256/disable_jwt path lands.
         if store_client_secret == "encrypted" or (
             isinstance(store_client_secret, dict)
             and ("encrypt" in store_client_secret or "decrypt" in store_client_secret)
         ):
             raise ValueError(
-                "oauth-provider: store_client_secret 'encrypted' is not supported in this port "
-                "(blocked on secrets-rotation backlog); use 'hashed' or a custom {hash, verify}."
+                "encryption method not recommended, please use 'hashed' or the 'hash' function"
             )
 
         scope_set = {s for s in (scopes or _DEFAULT_SCOPES) if s}

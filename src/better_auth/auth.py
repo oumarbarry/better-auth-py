@@ -21,7 +21,7 @@ from .config import (
     SessionOptions,
     UserOptions,
 )
-from .crypto import hash_password
+from .crypto import hash_password, resolve_secret_config
 from .endpoints import ROUTES
 from .internal_adapter import InternalAdapter
 from .oauth import OAuthProvider
@@ -63,6 +63,7 @@ class BetterAuth:
         self,
         *,
         secret: str,
+        secrets: list[tuple[int, str]] | None = None,
         adapter: BaseAdapter | None = None,
         base_url: str = "http://localhost:8000",
         base_path: str = "/api/auth",
@@ -95,6 +96,10 @@ class BetterAuth:
                 " `openssl rand -base64 32`"
             )
         self.secret = secret
+        #: TS create-context.ts:169-186 — versioned SecretConfig when ``secrets`` given,
+        #: else the plain string. Consumers still read ``.secret``; threading
+        #: ``.secret_config`` into encrypt call sites lands with the HS256 follow-up.
+        self.secret_config = resolve_secret_config(secret, secrets)
         self.base_url = base_url.rstrip("/")
         stripped = base_path.strip("/")
         self.base_path = f"/{stripped}" if stripped else ""
