@@ -97,14 +97,15 @@ _DAY_MS = 1000 * 60 * 60 * 24
 
 
 class _RateLimitedError(APIError):
-    """Rate-limit deny (custom TS code ``RATE_LIMITED`` + ``details.tryAgainIn``). The port's
-    ``APIError`` has no ``details`` slot; ``try_again_in`` rides on the exception and is
-    surfaced only in the verify wrapper's ``error`` object (spec reconciliation, default (b)).
-    The bare before-hook 429 drops it (tests assert status, not body)."""
+    """Rate-limit deny — rate-limit.ts:87 + verify-api-key.ts:293-297 throw
+    ``{code: "RATE_LIMITED", details: {tryAgainIn}}``; better-call serializes
+    APIError.body verbatim, so both the thrown 429 response and the server-only
+    verify wrapper's spread (``...error.body``) carry ``details.tryAgainIn``."""
 
     def __init__(self, message: str, try_again_in: int):
-        super().__init__(429, "RATE_LIMITED", message)
-        self.try_again_in = try_again_in
+        super().__init__(
+            429, "RATE_LIMITED", message, extra={"details": {"tryAgainIn": try_again_in}}
+        )
 
 
 # --- config normalization (types.ts + index.ts:68-108) -------------------------------
@@ -594,16 +595,12 @@ class ApiKeyPlugin(Plugin):
                 ctx, key, lookup_opts=lookup_opts, permissions=permissions,
                 expected_config_id=config_id, run_custom_validator=config_id is None,
             )
-        except _RateLimitedError as e:
-            return {
-                "valid": False,
-                "error": {"message": e.message, "code": e.code, "tryAgainIn": e.try_again_in},
-                "key": None,
-            }
         except APIError as e:
+            # verify-api-key.ts:576-584 spreads `...error.body` first so message/code
+            # always win — mirrors ``_on_api_error``'s extra-can't-override-code/message.
             return {
                 "valid": False,
-                "error": {"message": e.message, "code": e.code},
+                "error": {**(e.extra or {}), "message": e.message, "code": e.code},
                 "key": None,
             }
         return {"valid": True, "error": None, "key": _strip_key(row)}

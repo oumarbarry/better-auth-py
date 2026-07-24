@@ -286,9 +286,13 @@ class BetterAuth:
                 logger.exception("onAPIError.on_error hook raised")
         if cfg.throw:
             raise error
-        if status == 500:
-            return AuthResponse(status=500, body={"code": code, "message": message})
-        return AuthResponse(status=status, body={"code": code, "message": message})
+        # extra fields (organization's missingPermissions, api-key's details) merge at
+        # the top level but never override code/message — mirrors TS's APIError.body,
+        # which better-call serializes verbatim (error.mjs: this.body = body).
+        body: dict[str, Any] = dict(getattr(error, "extra", None) or {})
+        body["code"] = code
+        body["message"] = message
+        return AuthResponse(status=status, body=body)
 
     async def _dispatch(self, request: AuthRequest) -> AuthResponse:
         # A trailing slash on a non-root path is significant unless skipTrailingSlashes

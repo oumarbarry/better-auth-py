@@ -2294,6 +2294,9 @@ async def test_create_role_subset_of_own_permissions_enforced():
         assert res.status_code == 403
         assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_CREATE_A_ROLE"
         assert res.json()["message"] == ERROR_CODES["YOU_ARE_NOT_ALLOWED_TO_CREATE_A_ROLE"]
+        # crud-access-control.ts:1172-1204 — missingPermissions is `${resource}:${perm}`
+        # for every requested perm the actor's role lacks, top-level on the error body.
+        assert res.json()["missingPermissions"] == ["sales:delete", "sales:update"]
 
 
 async def test_create_role_forbidden_without_ac_create_permission():

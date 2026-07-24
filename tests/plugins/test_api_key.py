@@ -320,7 +320,9 @@ async def test_verify_rate_limited_returns_wrapped_error():
     second = await _plugin(auth).verify_api_key(ctx, key=raw)
     assert second["valid"] is False
     assert second["error"]["code"] == "RATE_LIMITED"
-    assert second["error"]["tryAgainIn"] >= 1
+    # verify-api-key.ts:579 spreads `...error.body` (details: {tryAgainIn}) into the
+    # wrapped error object — nested under "details", not a top-level "tryAgainIn".
+    assert second["error"]["details"]["tryAgainIn"] >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +483,13 @@ async def test_session_mock_consumes_rate_limit():
         assert first.status_code == 200
         second = await client.get("/api/auth/get-session", headers={"x-api-key": raw})
         assert second.status_code == 429
+        # rate-limit.ts:87 + verify-api-key.ts:293-297 — the thrown 429 carries
+        # `code: "RATE_LIMITED"` and `details: {tryAgainIn}` on the JSON body itself
+        # (better-call serializes APIError.body verbatim), not just inside the
+        # server-only verify wrapper's `error` object.
+        body = second.json()
+        assert body["code"] == "RATE_LIMITED"
+        assert body["details"]["tryAgainIn"] >= 1
 
 
 async def test_session_mock_rejects_org_owned_key():

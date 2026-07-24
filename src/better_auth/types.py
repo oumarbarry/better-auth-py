@@ -13,12 +13,26 @@ if TYPE_CHECKING:
 
 
 class APIError(Exception):
-    """Error surfaced to the client as ``{"message": ..., "code": ...}`` with `status`."""
+    """Error surfaced to the client as ``{"message": ..., "code": ...}`` with `status`.
 
-    def __init__(self, status: int, code: str, message: str | None = None):
+    ``extra`` mirrors TS's APIError, which carries an arbitrary body object
+    (better-call's ``error.body``) serialized verbatim — some endpoints add extra
+    top-level fields (organization's ``missingPermissions``, api-key's
+    ``details: {tryAgainIn}``). Merged into the rendered JSON body by
+    ``BetterAuth._on_api_error``; ``code``/``message`` always win over ``extra``.
+    """
+
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ):
         self.status = status
         self.code = code
         self.message = message or code.replace("_", " ").capitalize()
+        self.extra = extra
         super().__init__(self.message)
 
 

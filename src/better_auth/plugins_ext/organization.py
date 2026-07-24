@@ -167,8 +167,8 @@ async def _maybe_await(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
 
 
-def _err(status: int, code: str) -> APIError:
-    return APIError(status, code, ERROR_CODES[code])
+def _err(status: int, code: str, extra: dict[str, Any] | None = None) -> APIError:
+    return APIError(status, code, ERROR_CODES[code], extra=extra)
 
 
 def _json_dumps(value: Any) -> str:
@@ -2297,9 +2297,9 @@ class OrganizationPlugin(Plugin):
     ) -> None:
         """checkIfMemberHasPermission: the actor can only grant permissions they hold.
 
-        ponytail: TS surfaces the exact ``missingPermissions[]`` on the error body; APIError
-        carries only status/code/message (types.py is out of scope), so we raise the byte-exact
-        code/message on the first missing permission. Add the list if APIError grows `extra`.
+        crud-access-control.ts:1150-1204 — checks every requested resource:perm pair
+        (not just the first miss) and throws once with the full ``missingPermissions``
+        list, formatted ``f"{resource}:{perm}"``, top-level on the error body.
         """
         codes = {
             "create": "YOU_ARE_NOT_ALLOWED_TO_CREATE_A_ROLE",
@@ -2308,6 +2308,7 @@ class OrganizationPlugin(Plugin):
             "read": "YOU_ARE_NOT_ALLOWED_TO_READ_A_ROLE",
             "list": "YOU_ARE_NOT_ALLOWED_TO_LIST_A_ROLE",
         }
+        missing: list[str] = []
         for resource, perms in permission_required.items():
             for perm in perms:
                 if not await has_permission(
@@ -2317,7 +2318,13 @@ class OrganizationPlugin(Plugin):
                     organization_id=organization_id,
                     ctx=ctx,
                 ):
-                    raise _err(403, codes.get(action, "YOU_ARE_NOT_ALLOWED_TO_GET_A_ROLE"))
+                    missing.append(f"{resource}:{perm}")
+        if missing:
+            raise _err(
+                403,
+                codes.get(action, "YOU_ARE_NOT_ALLOWED_TO_GET_A_ROLE"),
+                extra={"missingPermissions": missing},
+            )
 
     async def _filter_dynamic_role_names(
         self, ctx: Ctx, org_id: str, unknown: list[str]

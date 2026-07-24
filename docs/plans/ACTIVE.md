@@ -23,6 +23,24 @@ base_url/advanced.ipAddress group, multi-resource token param, PAR store,
 open-api (ruled OUT, revisitable). Next session: pick from backlog on user
 priority, or release chores (version bump, CHANGELOG).
 
+## Backlog burn-down (started 2026-07-24 on user "continue")
+
+- [x] B1 APIError details wire parity: DONE, validated (Fable pinned TS
+      shapes himself: crud-access-control.ts:1201-1205 fromStatus FORBIDDEN
+      {message, code, missingPermissions} top-level; verify-api-key.ts:
+      293-297 {message, code:"RATE_LIMITED", details:{tryAgainIn}} — port
+      diffs match exactly; gate 1642 green on ignore-set + ruff/ty clean).
+      APIError gains extra= dict merged top-level, code/message always win.
+      Bonus fix: org check now collects ALL missing resource:perm pairs
+      (was first-miss-only). Sweep verdict (sub-agent): admin/two-factor
+      clean; device-auth + oauth-provider TS {error,error_description}
+      already matched by the port's _oauth_error pattern — no action.
+- [ ] B2 SecretConfig + encrypted client secrets: DISPATCHED (Opus xhigh).
+      Owns crypto.py/oauth_provider. Versioned $ba$ envelope mint/decrypt,
+      TS-generated cross-runtime vector, oauth-provider encrypt guard truth
+      table; returns auth.py plumbing diff for Fable merge window (auth.py
+      owned by B1 this volley). Plain-string byte-parity vectors sacred.
+
 ## Phase 0 — Gap analysis (IN PROGRESS)
 
 6 background agents writing specs to `docs/plans/gap/`:
