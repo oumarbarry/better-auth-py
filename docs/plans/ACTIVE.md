@@ -259,10 +259,23 @@ origin check (W1). Straight to plugins.
       NEXT: dispatch W5-C phase A (clients + discovery + JWKS) per the spec.
 - [ ] W5-C: oauth-provider package subset (XL, replaces deprecated
       oidc-provider/mcp per decision log; sub-phase like organization).
+      Phase A (items 1-4,6,7-10: helpers + client schema/CRUD/DCR + discovery)
+      DISPATCHED 2026-07-24 (Opus xhigh, background).
 - [ ] W5-D: open-api — decide at end of wave (needs route-metadata registry;
       deferred since Wave 3).
 
 ## Wave 6 — Ecosystem (USER-CONFIRMED 2026-07-24)
+- [ ] W6-specs: gap specs 08-api-key / 09-passkey / 10-sso-oidc (format of 07)
+      DISPATCHED 2026-07-24 (3 Opus high agents, parallel, docs-only — no code
+      conflict with W5-C-A). 09-passkey DELIVERED+VALIDATED (452 lines; Fable
+      spot-checked vs routes.ts: publicKey=padded base64 :686, credentialID=
+      base64url credential.id :690, transports join(",") :694, challenge=
+      signed cookie + atomic consumeVerificationValue :321-335/578-590 — all
+      confirmed). Key findings for impl dispatch: py_webauthn snake_case
+      credential_device_type MUST map to camelCase (cross-runtime rows);
+      webauthn>=2 dep as [passkey] extra; no freshSessionMiddleware in port
+      (default: inline now-createdAt<=fresh_age); rpName default "Better
+      Auth"; client-side passkeyClient + authenticator-metadata excluded.
 - [ ] api-key, passkey (webauthn lib), sso-OIDC. OUT: scim, stripe, SAML.
 
 ## Security findings (from background commit review)
