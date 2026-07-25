@@ -6,7 +6,7 @@ discovery documents, and jwt-plugin wiring. Ports TS ``packages/oauth-provider/s
 ``signed-query.ts``, ``utils/index.ts``, ``schema.ts``) at v1.6.23.
 
 Two signing modes: the default JWT-enabled path signs id/access tokens with the ``jwt`` plugin's
-EdDSA keys (non-EdDSA algs rejected at init); ``disable_jwt_plugin=True`` installs no jwt plugin
+keys, on whatever alg it is configured with; ``disable_jwt_plugin=True`` installs no jwt plugin
 and instead HS256-signs id tokens with each client's secret, storing client secrets ENCRYPTED at
 rest (recoverable) rather than hashed. The init truth table (oauth.ts:157-178) enforces the
 pairing: jwt-disabled rejects hashed/{hash} secrets, jwt-enabled rejects encrypted/{encrypt}.
@@ -239,13 +239,7 @@ class OAuthProviderPlugin(Plugin):
         # The disabled path signs with the client secret (HS256) and installs no jwt plugin.
         if self.disable_jwt_plugin:
             return
-        jwt_plugin = get_jwt_plugin(auth)
-        alg = (getattr(jwt_plugin, "key_pair_config", None) or {}).get("alg", "EdDSA")
-        if alg != "EdDSA":
-            raise NotImplementedError(
-                f"oauth-provider: only EdDSA jwt keys are supported (got alg={alg!r}). "
-                "The provider signs id/access tokens with the jwt plugin's keys."
-            )
+        get_jwt_plugin(auth)  # TS oauth.ts: the jwt plugin must be installed
 
     @property
     def auth(self) -> BetterAuth:

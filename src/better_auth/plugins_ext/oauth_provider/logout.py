@@ -3,11 +3,11 @@
 Port of TS ``packages/oauth-provider/src/logout.ts`` (v1.6.23). Query ``{id_token_hint (required),
 client_id?, post_logout_redirect_uri?, state?}``. The client is resolved from ``client_id`` or the
 ``id_token_hint`` audience; it must exist, be enabled, and have ``enable_end_session``. The id_token
-is signature-verified against the jwt plugin's EdDSA JWKS — or HS256 with the resolved client's
-decrypted secret when ``disable_jwt_plugin`` — then ``iss`` and ``aud`` are checked manually. The
-session named by the id_token's ``sid`` is deleted, and — only when ``post_logout_redirect_uri``
-exactly matches a
-registered ``postLogoutRedirectUris`` entry — the UA is redirected there with ``state`` appended.
+is signature-verified against the jwt plugin's JWKS (its configured alg) — or HS256 with the
+resolved client's decrypted secret when ``disable_jwt_plugin`` — then ``iss``/``aud`` are checked
+manually. The session named by the id_token's ``sid`` is deleted, and — only when
+``post_logout_redirect_uri`` exactly matches a registered ``postLogoutRedirectUris`` entry — the
+UA is redirected there with ``state`` appended.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ async def _verify_id_token_signature(
     ctx: Ctx, opts: Any, client: dict[str, Any], token: str
 ) -> dict[str, Any]:
     """Signature-only verification (claims are checked manually by the caller — TS
-    ``compactVerify``). EdDSA against the jwt plugin's local keys, or HS256 with the resolved
+    ``compactVerify``). The jwt plugin's alg against its local keys, or HS256 with the resolved
     client's decrypted secret when ``disable_jwt_plugin`` (TS logout.ts:86-107)."""
     if getattr(opts, "disable_jwt_plugin", False):
         client_secret = client.get("clientSecret")
@@ -78,7 +78,7 @@ async def _verify_id_token_signature(
     return pyjwt.decode(
         token,
         public_key,
-        algorithms=["EdDSA"],
+        algorithms=[jwt_plugin._alg()],
         options={"verify_aud": False, "verify_exp": False, "verify_iss": False},
     )
 

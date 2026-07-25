@@ -4,7 +4,7 @@ Port of TS ``packages/oauth-provider/src/token.ts`` (v1.6.23). Form-urlencoded o
 ``authorization_code`` (single-use code redemption + PKCE consistency), ``client_credentials``
 (M2M, OIDC-scope rejection), and ``refresh_token`` (rotation via a ``revoked=null`` CAS +
 RFC 9700 §4.14 family teardown on replay). Access tokens are JWT when a validated ``resource``
-audience is present (signed on the jwt plugin's EdDSA keys), otherwise opaque and stored hashed;
+audience is present (signed on the jwt plugin's keys), otherwise opaque and stored hashed;
 id tokens carry pinned OIDC claims that custom claims can never override.
 
 When ``disable_jwt_plugin`` is set, access tokens are always opaque and id tokens are HS256-signed
@@ -184,7 +184,7 @@ async def _create_jwt_access_token(
     exp: int,
     sid: str | None,
 ) -> str:
-    """Signed EdDSA JWT access token — TS ``createJwtAccessToken``. ``sub`` stays the real
+    """Signed JWT access token — TS ``createJwtAccessToken``. ``sub`` stays the real
     user id (never pairwise); ``azp`` binds the token to its client."""
     custom = getattr(opts, "custom_access_token_claims", None)
     custom_claims = (
@@ -266,7 +266,7 @@ async def _create_id_token(
     """OIDC id_token — TS ``createIdToken``. Custom claims may override ``acr``/``auth_time`` and
     user claims, but the pinned security claims (iss/sub/aud/nonce/iat/exp/sid) always win.
 
-    Signed EdDSA on the jwt plugin's keys, or HS256 with the client's decrypted secret when
+    Signed on the jwt plugin's keys, or HS256 with the client's decrypted secret when
     ``disable_jwt_plugin``. A public client without a secret gets no id_token (it could not be
     verified) — returns ``None``."""
     iat = _now_s()

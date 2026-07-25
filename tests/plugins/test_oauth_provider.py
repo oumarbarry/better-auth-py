@@ -64,14 +64,12 @@ def test_refresh_without_authorization_code_rejected():
         OAuthProviderPlugin(grant_types=["refresh_token"])
 
 
-def test_non_eddsa_jwt_key_rejected_at_init():
-    with pytest.raises(NotImplementedError):
-        make_auth(
-            plugins=[
-                JWTPlugin(key_pair_config={"alg": "ES256"}),
-                OAuthProviderPlugin(),
-            ]
-        )
+def test_non_eddsa_jwt_key_accepted_at_init():
+    # TS has no alg gate — the whole JWKOptions union is usable (jwt/types.ts:176-196).
+    auth = make_auth(
+        plugins=[JWTPlugin(key_pair_config={"alg": "ES256"}), OAuthProviderPlugin()]
+    )
+    assert auth is not None
 
 
 def test_schema_registers_all_four_tables():
@@ -472,6 +470,16 @@ async def test_openid_configuration_served_when_openid_scope():
     assert res.status == 200
     assert res.body["userinfo_endpoint"] == f"{BASE}/oauth2/userinfo"
     assert res.body["id_token_signing_alg_values_supported"] == ["EdDSA"]
+
+
+async def test_openid_configuration_advertises_configured_key_pair_alg():
+    # TS metadata.ts:99-104 — [keyPairConfig.alg] when configured.
+    auth = make_auth(
+        base_url="http://localhost:3000",
+        plugins=[JWTPlugin(key_pair_config={"alg": "ES256"}), OAuthProviderPlugin()],
+    )
+    res = await auth.handle(AuthRequest(method="GET", path="/.well-known/openid-configuration"))
+    assert res.body["id_token_signing_alg_values_supported"] == ["ES256"]
 
 
 async def test_no_openid_configuration_without_openid_scope():

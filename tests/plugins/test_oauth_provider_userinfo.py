@@ -404,6 +404,27 @@ async def test_end_session_deletes_sid_session_and_redirects_with_state():
         assert await auth.adapter.find_one("session", [Where("id", sid)]) is None
 
 
+async def test_end_session_verifies_id_token_hint_with_configured_alg():
+    # logout.ts:86-107 verifies the hint on the jwt plugin's keys — whatever alg they use.
+    auth = make_auth(
+        base_url=ORIGIN,
+        plugins=[
+            JWTPlugin(key_pair_config={"alg": "ES256"}),
+            OAuthProviderPlugin(login_page=LOGIN, consent_page=CONSENT),
+        ],
+    )
+    await seed(auth, scopes=["openid"], enableEndSession=True, postLogoutRedirectUris=[LOGOUT_URI])
+    async with make_client(auth) as c:
+        await sign_up(c)
+        id_token = (await _access(c, scope="openid"))["id_token"]
+        sid = unverified(id_token)["sid"]
+        res = await end_session(
+            c, id_token_hint=id_token, client_id="client-1", post_logout_redirect_uri=LOGOUT_URI
+        )
+        assert res.status_code == 302, res.text
+        assert await auth.adapter.find_one("session", [Where("id", sid)]) is None
+
+
 async def test_end_session_requires_enable_end_session():
     auth = provider_auth()
     await seed(auth, scopes=["openid"])  # enableEndSession unset

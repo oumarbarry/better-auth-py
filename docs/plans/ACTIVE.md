@@ -91,18 +91,40 @@ priority, or release chores (version bump, CHANGELOG).
       root-cause-fixed revoke.py (sibling caller, unenumerated — correct).
       Spec 07 OQ1 annotated RESOLVED. Remaining deferral: non-EdDSA JWKS
       algs only.
-- [ ] B8 non-EdDSA JWKS algs: NOT STARTED (agent was dispatched then killed
-      mid-research at session end — ZERO code written, jwt.py untouched).
-      Scope for a fresh dispatch (Opus xhigh, owns plugins_ext/jwt.py +
-      plugins_ext/oauth_provider/ + their tests): ES256/384/512 + RS/PS*
-      key-gen + JWK codec + sign/verify (PyJWT signs natively, cryptography
-      for EC/RSA JWK per RFC 7518), then lift the oauth-provider non-EdDSA
-      keyPairConfig init reject and make discovery advertise the configured
-      alg. TS anchors: jwt/utils.ts:31-46 generateExportedKeyPair (jose
-      generateKeyPair(alg, cfg) — EC crv from alg, RSA modulusLength),
-      utils.ts:70-76 createJwk spreads crv only when present, oauth-provider
-      metadata.ts:99-104 alg advertising. EdDSA path + existing vectors are
-      sacred (byte-identical). Last deferral of spec-07 OQ1.
+- [x] B8 non-EdDSA JWKS algs: DONE, validated (10 new tests; full gate re-run
+      by Fable: 1975 pass — incl. B10's 87 —, ruff/ty clean at CLI). Scope
+      CORRECTED by Fable vs TS source: JWKOptions union (jwt/types.ts:176-196)
+      is EXACTLY EdDSA/ES256/ES512/PS256/RS256 — NO ES384/RS-PS-384/512 (the
+      earlier "ES256/384/512 + RS/PS*" note was wrong). Landed: EC/RSA keygen
+      via cryptography (ES256→P-256, ES512→P-521, RSA modulusLength or 2048 /
+      e=65537), _export_jwk = pyjwt to_jwk minus key_ops, key_from_jwk decode
+      seam (OKP kept on the original byte path — EdDSA sacred, one removed
+      test line was only the lifted ceiling's match="EdDSA"), oauth-provider
+      init reject lifted, verify sites de-hardcoded to jwt_plugin._alg()
+      (utils.py, logout.py; _load_verify_keys now delegates to key_from_jwk),
+      metadata.py needed NO change (already matched metadata.ts:99-104 —
+      pinned by a new test). Fable live-verified JWK member sets == jose
+      exportJWK exactly (EC: kty/crv/x/y[+d]; RSA: kty/n/e[+d,p,q,dp,dq,qi])
+      + ES256 sign/verify roundtrip; agent additionally proved interop against
+      Node 22 WebCrypto both directions + RFC 7515 A.3 / 7517 A.2 vectors.
+      Spec-07 OQ1 deferrals now ALL resolved.
+- [ ] B10 dynamic base_url ({allowedHosts}): DISPATCHED 2026-07-25 (Opus,
+      parallel with B8, files DISJOINT: owns auth.py/origin.py/config.py/
+      types.py/integrations/ + new base_url.py + test_dynamic_base_url.py;
+      plugins_ext/oauth/endpoints.py forbidden). Fable pinned all TS anchors:
+      init-options.ts:55-95 DynamicBaseURLConfig{allowedHosts,fallback,
+      protocol default auto}, create-context.ts:134-141 empty-list init
+      reject, utils/url.ts getHostFromSource:273 / validateProxyHeader:91
+      (security boundary — full suspicious-pattern + hostname/IP regex port)
+      / getProtocolFromSource:307 (loopback→http) / matchesHostPattern:361
+      (wildcard-match default sep: * crosses dots — REUSE origin.py:47
+      _wildcard_to_regex) / resolveDynamicBaseURL:398, helpers.ts:196-200
+      trustedProxyHeaders default TRUE, :108-133 trusted-origins expansion
+      (https/http per protocol + loopback + fallback origin), to-auth-
+      endpoints.ts:44-51 direct-call-no-source semantics. Adopted design:
+      contextvars per-request resolved base_url + BetterAuth.base_url
+      property — zero changes at the 40+ read sites (TS per-request
+      context-clone analog, async-task safe).
 - [x] B9 named social-provider config: DONE, validated (5 tests, full gate
       1878/clean/clean re-run by Fable). social_providers now accepts
       {"github": {client_id, ...}} resolved via PROVIDER_REGISTRY, instances

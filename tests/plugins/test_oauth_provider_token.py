@@ -13,6 +13,7 @@ import asyncio
 
 import jwt as pyjwt
 from httpx import ASGITransport, AsyncClient
+from jwt import PyJWKSet
 
 from better_auth.adapters.base import Where
 from better_auth.crypto import default_key_hasher
@@ -170,6 +171,50 @@ async def test_offline_access_plus_resource_yields_jwt_access():
         # openid adds the userinfo URL, so aud is a multi-element array (TS keeps it a list)
         assert RESOURCE in claims["aud"]
         assert f"{ISSUER}/oauth2/userinfo" in claims["aud"]
+
+
+async def test_es256_jwt_plugin_mints_and_verifies_id_token_and_jwt_access():
+    # The provider signs/verifies on whatever the jwt plugin is configured with
+    # (jwt/types.ts:176-196 union); nothing here is EdDSA-specific.
+    auth = make_auth(
+        base_url=ORIGIN,
+        plugins=[
+            JWTPlugin(key_pair_config={"alg": "ES256"}),
+            OAuthProviderPlugin(
+                login_page=LOGIN, consent_page=CONSENT, valid_audiences=[RESOURCE]
+            ),
+        ],
+    )
+    await seed(auth, scopes=["openid", "offline_access"])
+    async with make_client(auth) as c:
+        await sign_up(c)
+        code = await get_code(c, scope="openid offline_access", verifier=VERIFIER)
+        body = (
+            await token(
+                c,
+                grant_type="authorization_code",
+                client_id="client-1",
+                client_secret=SECRET,
+                code=code,
+                redirect_uri=CB,
+                resource=RESOURCE,
+                code_verifier=VERIFIER,
+            )
+        ).json()
+        jwks = (await c.get("/api/auth/jwks")).json()
+        assert jwks["keys"][0]["alg"] == "ES256"
+        key_set = PyJWKSet.from_dict(jwks)
+        for tok in (body["id_token"], body["access_token"]):
+            key = key_set[pyjwt.get_unverified_header(tok)["kid"]]
+            claims = pyjwt.decode(tok, key.key, algorithms=["ES256"], options={"verify_aud": False})
+            assert claims["iss"] == ISSUER
+        # provider-side verification (verify_jws_access_token) accepts the ES256 access token
+        introspected = (
+            await introspect(
+                c, client_id="client-1", client_secret=SECRET, token=body["access_token"]
+            )
+        ).json()
+        assert introspected["active"] is True
 
 
 # --- custom fields / claims override rules -------------------------------------------

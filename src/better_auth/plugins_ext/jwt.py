@@ -11,10 +11,10 @@ by a TS app sharing the DB and vice-versa. The columns are exactly TS ``schema.t
 reconstructed on read from ``key_pair_config`` and the public JWK, exactly like TS
 ``getJwks`` (``keySet.alg ?? config.alg ?? "EdDSA"`` and the ``...publicKey`` spread).
 
-ponytail: the port signs only the DEFAULT EdDSA/Ed25519 (jose supports ES256/ES512/
-PS256/RS256 too). A non-EdDSA ``key_pair_config`` constructs fine but raises
-NotImplementedError at local key generation — broaden with cryptography EC/RSA JWK
-codecs if a caller needs another alg.
+The whole TS ``JWKOptions`` union is supported (``types.ts:176-196``): EdDSA/Ed25519 (the
+default), ES256 (P-256), ES512 (P-521), PS256 and RS256 (``modulusLength`` default 2048).
+Exported JWKs carry exactly jose's ``exportJWK`` member sets so a row minted here imports
+with jose and vice-versa.
 """
 
 from __future__ import annotations
@@ -28,10 +28,12 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import jwt as pyjwt
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 
 from ..crypto import (
     b64url_decode_nopad,
@@ -47,7 +49,9 @@ from ..types import APIError, AuthResponse, Ctx, dump_json
 if TYPE_CHECKING:
     from ..auth import BetterAuth
 
-_DEFAULT_KEY_PAIR_CONFIG = {"alg": "EdDSA", "crv": "Ed25519"}
+_DEFAULT_KEY_PAIR_CONFIG: dict[str, Any] = {"alg": "EdDSA", "crv": "Ed25519"}
+#: TS ``JWKOptions`` types the curve into the alg — no ``crv`` config (types.ts:181-188).
+_EC_CURVES: dict[str, type[ec.EllipticCurve]] = {"ES256": ec.SECP256R1, "ES512": ec.SECP521R1}
 _DEFAULT_GRACE_PERIOD = 60 * 60 * 24 * 30  # 30 days (TS DEFAULT_GRACE_PERIOD)
 
 #: TS ``schema.ts`` — the jwks table (``date`` -> port ``datetime``). ``alg``/``crv`` are
@@ -118,20 +122,49 @@ def to_exp_jwt(expiration_time: int | float | datetime | str, iat: int) -> int |
     return iat + _sec(expiration_time)
 
 
+def _export_jwk(algorithm: Any, key: Any) -> dict[str, str]:
+    """pyjwt's JWK export minus ``key_ops``, which jose's ``exportJWK`` does not emit."""
+    jwk: dict[str, str] = algorithm.to_jwk(key, as_dict=True)
+    jwk.pop("key_ops", None)
+    return jwk
+
+
 def generate_exported_key_pair(
     key_pair_config: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str], dict[str, str], str]:
-    """TS ``generateExportedKeyPair`` — a fresh key pair as ``(public_jwk, private_jwk,
-    alg)``. Only the default EdDSA/Ed25519 is implemented (see module docstring)."""
+    """TS ``generateExportedKeyPair`` — a fresh key pair as ``(public_jwk, private_jwk, alg)``,
+    with jose's ``generateKeyPair`` semantics per alg (ES256 -> P-256, ES512 -> P-521, RSA
+    ``modulusLength`` default 2048 / public exponent 65537)."""
     cfg = key_pair_config or _DEFAULT_KEY_PAIR_CONFIG
     alg = cfg.get("alg", "EdDSA")
-    if alg != "EdDSA":
-        raise NotImplementedError(
-            f"jwt plugin: the Python port signs only EdDSA/Ed25519 keys (got alg={alg!r}). "
-            "Broaden with cryptography EC/RSA JWK codecs if another alg is needed."
+    if alg == "EdDSA":
+        public_jwk, private_jwk = generate_ed25519_jwk_pair()
+        return public_jwk, private_jwk, alg
+    if alg in _EC_CURVES:
+        ec_key = ec.generate_private_key(_EC_CURVES[alg]())
+        return _export_jwk(ECAlgorithm, ec_key.public_key()), _export_jwk(ECAlgorithm, ec_key), alg
+    if alg in ("PS256", "RS256"):
+        rsa_key = rsa.generate_private_key(65537, cfg.get("modulusLength") or 2048)
+        return (
+            _export_jwk(RSAAlgorithm, rsa_key.public_key()),
+            _export_jwk(RSAAlgorithm, rsa_key),
+            alg,
         )
-    public_jwk, private_jwk = generate_ed25519_jwk_pair()
-    return public_jwk, private_jwk, alg
+    raise NotImplementedError(f"jwt plugin: unsupported keyPairConfig.alg {alg!r}")
+
+
+def key_from_jwk(jwk: dict[str, Any]) -> Any:
+    """Decode a JWK (public or private) to the key object pyjwt signs/verifies with."""
+    kty = jwk.get("kty")
+    if kty == "OKP":  # Ed25519 — kept on the original, cross-runtime-verified byte path
+        if "d" in jwk:
+            return Ed25519PrivateKey.from_private_bytes(b64url_decode_nopad(jwk["d"]))
+        return Ed25519PublicKey.from_public_bytes(b64url_decode_nopad(jwk["x"]))
+    if kty == "EC":
+        return ECAlgorithm.from_jwk(jwk)
+    if kty == "RSA":
+        return RSAAlgorithm.from_jwk(jwk)
+    raise ValueError(f"unsupported JWK kty: {kty!r}")
 
 
 class JWTPlugin(Plugin):
@@ -299,8 +332,7 @@ class JWTPlugin(Plugin):
             return await _maybe_await(sign_fn(full))
 
         key = await self._get_latest_or_new_key()
-        private_jwk = self._decode_private(key)
-        priv = Ed25519PrivateKey.from_private_bytes(b64url_decode_nopad(private_jwk["d"]))
+        priv = key_from_jwk(self._decode_private(key))
 
         # jose sets exp/iss/aud unconditionally; iat/sub/nbf/jti stay as provided in payload.
         claims = dict(payload)
@@ -417,8 +449,7 @@ class JWTPlugin(Plugin):
         key = next((k for k in await self._get_all_keys() if k["id"] == kid), None)
         if key is None:
             return None
-        public_jwk = json.loads(key["publicKey"])
-        pub = Ed25519PublicKey.from_public_bytes(b64url_decode_nopad(public_jwk["x"]))
+        pub = key_from_jwk(json.loads(key["publicKey"]))
         base_origin = self.auth.base_url
         want_iss = issuer if issuer is not None else (self.issuer or base_origin)
         want_aud = self.audience if self.audience is not None else base_origin

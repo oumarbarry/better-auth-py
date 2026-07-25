@@ -17,12 +17,10 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote_plus, urlencode, urlsplit
 
 import jwt as pyjwt
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ...crypto import (
     _constant_time_equal,
     _signature,
-    b64url_decode_nopad,
     default_key_hasher,
     generate_random_string,
     symmetric_decrypt,
@@ -30,6 +28,7 @@ from ...crypto import (
 )
 from ...session import utcnow
 from ...types import AuthResponse, Ctx
+from ..jwt import key_from_jwk
 from .signed_query import (
     POST_LOGIN_CLEARED_PARAM,
     SIGNED_QUERY_ISSUED_AT_PARAM,
@@ -552,7 +551,7 @@ class JwsAccessTokenClaimInvalid(Exception):
     """Signature verified but issuer/audience mismatch — inactive (TS ``JWTInvalid``)."""
 
 
-#: Instance-keyed cache of verify keys ({kid: Ed25519PublicKey}) so repeated introspections
+#: Instance-keyed cache of verify keys ({kid: public key}) so repeated introspections
 #: read the signing keys once per jwt-plugin instance (TS ``jwksCacheKey: jwtPlugin``).
 _verify_key_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
@@ -562,10 +561,7 @@ async def _load_verify_keys(jwt_plugin: Any, *, refresh: bool = False) -> dict[s
     if cache is None:
         cache = {}
         for key in await jwt_plugin._get_all_keys():
-            public_jwk = json.loads(key["publicKey"])
-            cache[key["id"]] = Ed25519PublicKey.from_public_bytes(
-                b64url_decode_nopad(public_jwk["x"])
-            )
+            cache[key["id"]] = key_from_jwk(json.loads(key["publicKey"]))
         _verify_key_cache[jwt_plugin] = cache
     return cache
 
@@ -600,7 +596,9 @@ async def verify_jws_access_token(
 
     auds = list(audience) if isinstance(audience, (list, tuple)) else [audience]
     try:
-        return pyjwt.decode(token, public_key, algorithms=["EdDSA"], audience=auds, issuer=issuer)
+        return pyjwt.decode(
+            token, public_key, algorithms=[jwt_plugin._alg()], audience=auds, issuer=issuer
+        )
     except pyjwt.ExpiredSignatureError as exc:
         raise JwsAccessTokenExpired() from exc
     except (pyjwt.InvalidAudienceError, pyjwt.InvalidIssuerError) as exc:
