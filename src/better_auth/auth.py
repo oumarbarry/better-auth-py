@@ -25,7 +25,7 @@ from .config import (
 from .crypto import hash_password, resolve_secret_config
 from .endpoints import ROUTES
 from .internal_adapter import InternalAdapter, VerificationOptions
-from .oauth import OAuthProvider
+from .oauth import PROVIDER_REGISTRY, OAuthProvider
 from .origin import check_origin, matches_origin_pattern
 from .plugins import Plugin
 from .rate_limit import RateLimiter
@@ -70,7 +70,7 @@ class BetterAuth:
         base_path: str = "/api/auth",
         email_and_password: EmailAndPassword | None = None,
         email_verification: EmailVerification | None = None,
-        social_providers: Mapping[str, OAuthProvider] | None = None,
+        social_providers: Mapping[str, OAuthProvider | Mapping[str, Any]] | None = None,
         session: SessionOptions | None = None,
         user: UserOptions | None = None,
         account: AccountOptions | None = None,
@@ -138,7 +138,21 @@ class BetterAuth:
         )
         self.skip_state_cookie_check = skip_state_cookie_check
 
-        self.social_providers = dict(social_providers or {})
+        # Ergonomic name-keyed form: social_providers={"github": {"client_id": ...}}
+        # resolves through PROVIDER_REGISTRY into an instance; already-constructed
+        # instances pass through unchanged (mixed dict is fine either way).
+        self.social_providers: dict[str, OAuthProvider] = {}
+        for provider_id, provider in (social_providers or {}).items():
+            if isinstance(provider, OAuthProvider):
+                self.social_providers[provider_id] = provider
+            else:
+                provider_cls = PROVIDER_REGISTRY.get(provider_id)
+                if provider_cls is None:
+                    raise ValueError(
+                        f"Unknown social provider {provider_id!r}. Valid names: "
+                        f"{', '.join(sorted(PROVIDER_REGISTRY))}"
+                    )
+                self.social_providers[provider_id] = provider_cls(**provider)
         for provider_id, provider in self.social_providers.items():
             if not provider.provider_id:
                 provider.provider_id = provider_id

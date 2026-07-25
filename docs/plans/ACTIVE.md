@@ -91,6 +91,24 @@ priority, or release chores (version bump, CHANGELOG).
       root-cause-fixed revoke.py (sibling caller, unenumerated — correct).
       Spec 07 OQ1 annotated RESOLVED. Remaining deferral: non-EdDSA JWKS
       algs only.
+- [ ] B8 non-EdDSA JWKS algs: NOT STARTED (agent was dispatched then killed
+      mid-research at session end — ZERO code written, jwt.py untouched).
+      Scope for a fresh dispatch (Opus xhigh, owns plugins_ext/jwt.py +
+      plugins_ext/oauth_provider/ + their tests): ES256/384/512 + RS/PS*
+      key-gen + JWK codec + sign/verify (PyJWT signs natively, cryptography
+      for EC/RSA JWK per RFC 7518), then lift the oauth-provider non-EdDSA
+      keyPairConfig init reject and make discovery advertise the configured
+      alg. TS anchors: jwt/utils.ts:31-46 generateExportedKeyPair (jose
+      generateKeyPair(alg, cfg) — EC crv from alg, RSA modulusLength),
+      utils.ts:70-76 createJwk spreads crv only when present, oauth-provider
+      metadata.ts:99-104 alg advertising. EdDSA path + existing vectors are
+      sacred (byte-identical). Last deferral of spec-07 OQ1.
+- [x] B9 named social-provider config: DONE, validated (5 tests, full gate
+      1878/clean/clean re-run by Fable). social_providers now accepts
+      {"github": {client_id, ...}} resolved via PROVIDER_REGISTRY, instances
+      still pass through, mixed dict fine, unknown name → ValueError listing
+      valid keys. Note: only client_id is dataclass-required (client_secret
+      defaults ""), so the malformed-config test targets client_id.
 - [x] B7 plugin IP call-site audit: DONE, validated (156 tests green incl.
       6 new; Fable re-ran gate + confirmed routing in code). All 3 sites
       were getIp consumers in TS (admin via internal-adapter.ts:349,
