@@ -193,6 +193,24 @@ class IPAddressOptions:
 
 
 @dataclass
+class DynamicBaseURL:
+    """``baseURL`` as a multi-domain config (init-options.ts:55-95) — pass instead of a
+    string to derive the origin per request (Vercel previews, wildcard subdomains).
+    Resolution lives in ``base_url.py``.
+    """
+
+    #: exact hosts or wildcard patterns (``"*.vercel.app"``, ``"preview-*.myapp.com"``),
+    #: matched with the same wildcard semantics as ``trusted_origins``
+    allowed_hosts: list[str] = field(default_factory=list)
+    #: used when the request host is missing or unlisted; without it, resolution raises
+    fallback: str | None = None
+    #: ``"http"``/``"https"`` force the scheme; ``"auto"`` derives it from
+    #: ``x-forwarded-proto``. ``None`` is TS's *unset* — same as ``"auto"`` when resolving,
+    #: but only ``https://`` origins are added to ``trusted_origins``.
+    protocol: str | None = None
+
+
+@dataclass
 class RateLimit:
     """Rolling-window rate limiting, keyed by client IP + path (mirrors better-auth).
 

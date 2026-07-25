@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -11,9 +12,11 @@ import httpx
 
 from .adapters.base import BaseAdapter
 from .adapters.memory import MemoryAdapter
+from .base_url import _CURRENT_BASE_URL, bind_base_url, expand_trusted_origins
 from .config import (
     AccountOptions,
     CrossSubDomainCookies,
+    DynamicBaseURL,
     EmailAndPassword,
     EmailVerification,
     IPAddressOptions,
@@ -66,8 +69,9 @@ class BetterAuth:
         secret: str,
         secrets: list[tuple[int, str]] | None = None,
         adapter: BaseAdapter | None = None,
-        base_url: str = "http://localhost:8000",
+        base_url: str | DynamicBaseURL = "http://localhost:8000",
         base_path: str = "/api/auth",
+        trusted_proxy_headers: bool = True,
         email_and_password: EmailAndPassword | None = None,
         email_verification: EmailVerification | None = None,
         social_providers: Mapping[str, OAuthProvider | Mapping[str, Any]] | None = None,
@@ -103,7 +107,25 @@ class BetterAuth:
         #: else the plain string. Consumers still read ``.secret``; threading
         #: ``.secret_config`` into encrypt call sites lands with the HS256 follow-up.
         self.secret_config = resolve_secret_config(secret, secrets)
-        self.base_url = base_url.rstrip("/")
+        # create-context.ts:134-141 — a dynamic config with no allowed host can never
+        # resolve, so it fails at construction rather than on the first request.
+        if isinstance(base_url, DynamicBaseURL):
+            if not base_url.allowed_hosts:
+                raise ValueError(
+                    "baseURL.allowedHosts cannot be empty. Provide at least one allowed"
+                    ' host pattern (e.g., ["myapp.com", "*.vercel.app"]).'
+                )
+            self._dynamic_base_url: DynamicBaseURL | None = base_url
+            self._base_url: str | None = None
+            #: allowed hosts as origins, so the CSRF check accepts every one of them
+            self._dynamic_origins: list[str] = expand_trusted_origins(base_url)
+        else:
+            self._dynamic_base_url = None
+            self._base_url = base_url.rstrip("/")
+            self._dynamic_origins = []
+        #: trust ``x-forwarded-host``/``x-forwarded-proto`` when deriving a dynamic
+        #: base URL (helpers.ts:196-200 — on by default, for reverse-proxy deployments)
+        self.trusted_proxy_headers = trusted_proxy_headers
         stripped = base_path.strip("/")
         self.base_path = f"/{stripped}" if stripped else ""
         self.email_and_password = email_and_password or EmailAndPassword()
@@ -131,11 +153,24 @@ class BetterAuth:
         #: request middleware — ``{"before": fn(ctx), "after": fn(ctx)}`` (TS ``options.hooks``).
         self.hooks: Mapping[str, RequestHook] = dict(hooks or {})
         self.cookie_prefix = cookie_prefix
-        self.use_secure_cookies = (
-            use_secure_cookies
-            if use_secure_cookies is not None
-            else self.base_url.startswith("https://")
-        )
+        # cookies/index.ts:48-69 — explicit override wins, then an explicit dynamic
+        # protocol; a dynamic "auto"/unset protocol is unknowable at init so it falls
+        # back to isProduction (cookies stay host-independent unless crossSubDomainCookies
+        # is on, which reads the per-request base_url through `cookie_domain`).
+        if use_secure_cookies is not None:
+            self.use_secure_cookies = use_secure_cookies
+        elif self._dynamic_base_url is not None:
+            protocol = self._dynamic_base_url.protocol
+            self.use_secure_cookies = (
+                True
+                if protocol == "https"
+                else False
+                if protocol == "http"
+                else (os.environ.get("BETTER_AUTH_ENV") or os.environ.get("NODE_ENV"))
+                == "production"
+            )
+        else:
+            self.use_secure_cookies = str(self._base_url).startswith("https://")
         self.skip_state_cookie_check = skip_state_cookie_check
 
         # Ergonomic name-keyed form: social_providers={"github": {"client_id": ...}}
@@ -220,6 +255,34 @@ class BetterAuth:
     # --- helpers ----------------------------------------------------------------------
 
     @property
+    def base_url(self) -> str:
+        """The origin (no trailing slash, no ``base_path``) for the in-flight request.
+
+        Static config returns it unchanged. A dynamic config returns the host resolved by
+        ``bind_base_url`` at request entry, else the configured ``fallback``; with neither
+        it raises, mirroring to-auth-endpoints.ts:44-51.
+        """
+        bound = _CURRENT_BASE_URL.get()
+        if bound is not None:
+            return bound
+        if self._base_url is not None:
+            return self._base_url
+        fallback = self._dynamic_base_url.fallback if self._dynamic_base_url else None
+        if fallback:
+            return fallback.rstrip("/")
+        raise APIError(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "Dynamic baseURL could not be resolved for this direct auth call. Pass the"
+            " request through `handle`/`load_session`, or add `fallback` to your"
+            " baseURL config.",
+        )
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        self._base_url = value.rstrip("/")
+
+    @property
     def http(self) -> httpx.AsyncClient:
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=10)
@@ -255,10 +318,11 @@ class BetterAuth:
     def _sync_trusted_origins(self) -> list[str]:
         """Base origin + static configured origins (callable form is resolved async in
         the router middleware; the sync redirect-guard uses the static list only)."""
-        origins: list[str] = []
-        parts = urlsplit(self.base_url)
-        if parts.scheme and parts.netloc:
-            origins.append(f"{parts.scheme}://{parts.netloc}")
+        origins: list[str] = list(self._dynamic_origins)
+        if self._dynamic_base_url is None:
+            parts = urlsplit(self.base_url)
+            if parts.scheme and parts.netloc:
+                origins.append(f"{parts.scheme}://{parts.netloc}")
         if not callable(self._trusted_origins):
             origins.extend(self._trusted_origins)
         return origins
@@ -276,7 +340,8 @@ class BetterAuth:
 
     async def load_session(self, request: AuthRequest) -> dict[str, Any] | None:
         """``{"session": ..., "user": ...}`` for the request, or None. Used by integrations."""
-        result, _cookies = await _get_session(self, request)
+        with self._bind_base_url(request):
+            result, _cookies = await _get_session(self, request)
         return result
 
     async def hash_password_checked(self, password: str, path: str) -> str:
@@ -290,9 +355,14 @@ class BetterAuth:
 
     # --- dispatch ---------------------------------------------------------------------
 
+    def _bind_base_url(self, request: AuthRequest):
+        """Bind the per-request origin (no-op unless ``base_url`` is dynamic)."""
+        return bind_base_url(self._dynamic_base_url, request.headers, self.trusted_proxy_headers)
+
     async def handle(self, request: AuthRequest) -> AuthResponse:
         try:
-            return await self._dispatch(request)
+            with self._bind_base_url(request):
+                return await self._dispatch(request)
         except APIError as error:
             return await self._on_api_error(request, error, error.status, error.code, error.message)
         except Exception as exc:

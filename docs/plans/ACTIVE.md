@@ -108,23 +108,28 @@ priority, or release chores (version bump, CHANGELOG).
       + ES256 sign/verify roundtrip; agent additionally proved interop against
       Node 22 WebCrypto both directions + RFC 7515 A.3 / 7517 A.2 vectors.
       Spec-07 OQ1 deferrals now ALL resolved.
-- [ ] B10 dynamic base_url ({allowedHosts}): DISPATCHED 2026-07-25 (Opus,
-      parallel with B8, files DISJOINT: owns auth.py/origin.py/config.py/
-      types.py/integrations/ + new base_url.py + test_dynamic_base_url.py;
-      plugins_ext/oauth/endpoints.py forbidden). Fable pinned all TS anchors:
-      init-options.ts:55-95 DynamicBaseURLConfig{allowedHosts,fallback,
-      protocol default auto}, create-context.ts:134-141 empty-list init
-      reject, utils/url.ts getHostFromSource:273 / validateProxyHeader:91
-      (security boundary — full suspicious-pattern + hostname/IP regex port)
-      / getProtocolFromSource:307 (loopback→http) / matchesHostPattern:361
-      (wildcard-match default sep: * crosses dots — REUSE origin.py:47
-      _wildcard_to_regex) / resolveDynamicBaseURL:398, helpers.ts:196-200
-      trustedProxyHeaders default TRUE, :108-133 trusted-origins expansion
-      (https/http per protocol + loopback + fallback origin), to-auth-
-      endpoints.ts:44-51 direct-call-no-source semantics. Adopted design:
-      contextvars per-request resolved base_url + BetterAuth.base_url
-      property — zero changes at the 40+ read sites (TS per-request
-      context-clone analog, async-task safe).
+- [x] B10 dynamic base_url ({allowedHosts}): DONE, validated (87 new tests;
+      full gate 1975/clean/clean re-run by Fable; security review line-by-line:
+      validate_proxy_header denylist+shape regexes == url.ts:91-140,
+      _wildcard_to_regex is ^..$-anchored so wildcard hosts can't suffix-match,
+      trusted-origins expansion == helpers.ts:108-133). Design as planned:
+      contextvars bind in handle()/load_session() + BetterAuth.base_url
+      property/setter — zero changes at the 40+ read sites, endpoints.py/
+      plugins_ext/oauth untouched. DynamicBaseURL{allowed_hosts,fallback,
+      protocol=None} in config.py; trusted_proxy_headers option default True;
+      empty allowed_hosts raises at init; direct call w/o request → fallback
+      or APIError 500 (to-auth-endpoints.ts:44-51). Accepted deviations
+      (ponytail-noted): base_url stays an ORIGIN (base_path composed at call
+      sites, TS withPath not replicated); no request-URL host/scheme fallback
+      (AuthRequest has no absolute URL); protocol=None ≠ "auto" only for
+      origin expansion (faithful to TS runtime undefined); resolution errors
+      = ValueError→500; BETTER_AUTH_TRUSTED_ORIGINS env skipped (port is
+      explicit-config — separate backlog item if wanted); use_secure_cookies
+      for auto/unset dynamic falls back to BETTER_AUTH_ENV/NODE_ENV==
+      production (rate_limit.py precedent). Known minor edge (accepted):
+      on_api_error/on_error hook runs OUTSIDE the contextvar bind — a hook
+      reading auth.base_url on a no-fallback dynamic config degrades to the
+      logged-exception path.
 - [x] B9 named social-provider config: DONE, validated (5 tests, full gate
       1878/clean/clean re-run by Fable). social_providers now accepts
       {"github": {client_id, ...}} resolved via PROVIDER_REGISTRY, instances

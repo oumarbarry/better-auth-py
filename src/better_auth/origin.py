@@ -85,10 +85,14 @@ def matches_origin_pattern(url: str, pattern: str, allow_relative: bool = False)
 
 async def resolve_trusted_origins(auth: BetterAuth, request) -> list[str]:
     """Base-URL origin + configured origins (+ callable form, which may be async)."""
-    origins: list[str] = []
-    base = _get_origin(auth.base_url)
-    if base:
-        origins.append(base)
+    # helpers.ts:108-133 — a dynamic baseURL contributes every allowed host (wildcards
+    # included, matched by matches_origin_pattern) plus the fallback origin, in place of
+    # the single resolved origin.
+    origins: list[str] = list(auth._dynamic_origins)
+    if not origins:
+        base = _get_origin(auth.base_url)
+        if base:
+            origins.append(base)
     configured = auth._trusted_origins
     if callable(configured):
         result = configured(request)
