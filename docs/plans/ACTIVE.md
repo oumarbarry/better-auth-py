@@ -136,6 +136,27 @@ priority, or release chores (version bump, CHANGELOG).
       still pass through, mixed dict fine, unknown name → ValueError listing
       valid keys. Note: only client_id is dataclass-required (client_secret
       defaults ""), so the malformed-config test targets client_id.
+- [x] B11 remaining minor items: CLOSED BY FABLE RULING 2026-07-25, no code
+      (each verified against TS source):
+      (a) multi-resource token param — ALREADY AT PARITY: TS wire schema is
+          resource: z.string() single (oauth.ts:753, form-urlencoded only);
+          checkResource's string[] branch is defensive typing and the port's
+          _check_resource (token.py:396-412) already handles str AND list
+          incl. the 1-element→scalar return. Phase C's "single resource
+          param only" ponytail note was already stale.
+      (b) PAR built-in store — DOES NOT EXIST in TS v1.6.23: no /par
+          endpoint, no pushed_authorization_request_endpoint metadata; only
+          the requestUriResolver seam (types/index.ts:715-728), which the
+          port implements verbatim (authorize.py:217-235, RFC 9126 §4
+          client_id carry included). A built-in store would EXCEED parity —
+          OUT, revisit if upstream adds one.
+      (c) telemetry group — OUT (same rationale as open-api): anonymous
+          usage phone-home, zero wire/storage contract, default false.
+      (d) logger group — OUT: the port logs via stdlib logging
+          ("better_auth" logger); level/sink/format config is the stdlib's
+          job, porting TS's Logger{disabled,level,log,colors} shape would
+          duplicate it as an anti-idiom. Revisitable on user demand.
+      BACKLOG NOW EMPTY except release chores.
 - [x] B7 plugin IP call-site audit: DONE, validated (156 tests green incl.
       6 new; Fable re-ran gate + confirmed routing in code). All 3 sites
       were getIp consumers in TS (admin via internal-adapter.ts:349,
@@ -588,6 +609,12 @@ origin check (W1). Straight to plugins.
 - 2026-07-24: open-api plugin ruled OUT of parity scope (dev tooling, no
   wire/storage contract, needs cross-cutting route-metadata registry).
   Revisitable on user demand. This closed Wave 5.
+
+- 2026-07-25 (Fable rulings, revisitable — evidence in B11): telemetry group
+  OUT (open-api rationale); logger group OUT (stdlib logging is the Python
+  surface); PAR built-in store OUT (absent from TS v1.6.23, resolver seam
+  already ported); multi-resource token param closed as already-at-parity.
+  This EMPTIED the backlog — remaining work is release chores only.
 
 - 2026-07-23 (Wave 3 kickoff, spec-04 open questions resolved by defaults):
   Q1 → (b) path-aware overridable password-hash seam (no full ctx.password
