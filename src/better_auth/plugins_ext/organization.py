@@ -618,25 +618,21 @@ class OrganizationPlugin(Plugin):
         )
 
     async def _users_by_ids(self, ctx: Ctx, user_ids: list[str]) -> dict[str, dict[str, Any]]:
-        # ponytail: per-id ``eq`` lookups instead of TS's single ``in`` query (adapter.ts:222).
-        # Unbounded by construction, so the ``default_find_many_limit`` cap that TS bae71988a
-        # had to work around with ``limit: members.length`` cannot bite here. Ceiling: N round
-        # trips per listMembers (bounded by membershipLimit) — swap to one
-        # ``find_many(..., "in", limit=len(user_ids))`` if that ever shows up in a profile.
-        result: dict[str, dict[str, Any]] = {}
-        for uid in user_ids:
-            if uid in result:
-                continue
-            user = await ctx.adapter.find_one("user", [Where("id", uid)])
-            if user is not None:
-                result[uid] = user
-        return result
+        # One ``id IN (...)`` query like TS (adapter.ts:222-234); ``limit`` is passed
+        # explicitly so the join is never clipped by ``default_find_many_limit`` — the cap
+        # TS bae71988a works around with ``limit: members.length``.
+        if not user_ids:
+            return {}
+        users = await ctx.adapter.find_many(
+            "user", [Where("id", user_ids, "in")], limit=len(user_ids)
+        )
+        return {user["id"]: user for user in users}
 
     async def _list_orgs(self, ctx: Ctx, user_id: str) -> list[dict[str, Any]]:
         members = await ctx.adapter.find_many("member", [Where("userId", user_id)])
         orgs: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for member in members:  # per-id lookup (see _users_by_ids) — no `in` operator
+        for member in members:  # ponytail: per-id org lookup; one `in` query if this profiles hot
             org_id = member["organizationId"]
             if org_id in seen:
                 continue
@@ -731,8 +727,8 @@ class OrganizationPlugin(Plugin):
     ) -> None:
         await ctx.adapter.delete("member", [Where("id", member_id)])
         # teams: drop the departing user's team memberships across this org's teams
-        # (adapter.ts:387-405). Per-team delete_many avoids MemoryAdapter's `in` operator,
-        # which lowercases mixed-case ids and never matches (see _users_by_ids).
+        # (adapter.ts:387-405). ponytail: per-team delete_many rather than one `in` delete —
+        # an org's team count is small; switch if a real profile says otherwise.
         if self._teams_enabled and org_id and user_id:
             for team in await self._list_teams(ctx, org_id):
                 await self._remove_team_member_row(ctx, team["id"], user_id)
@@ -1871,7 +1867,7 @@ class OrganizationPlugin(Plugin):
         tms = await ctx.adapter.find_many("teamMember", [Where("userId", user_id)])
         teams: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for tm in tms:  # per-id lookup — MemoryAdapter `in` lowercases ids (see _users_by_ids)
+        for tm in tms:  # ponytail: per-id team lookup; one `in` query if this profiles hot
             tid = tm["teamId"]
             if tid in seen:
                 continue
@@ -2352,8 +2348,8 @@ class OrganizationPlugin(Plugin):
         unknown names stay invalid."""
         if not self._dac_enabled:
             return unknown
-        # ponytail: fetch-all + filter instead of a `role IN (...)` query — dodges the
-        # MemoryAdapter `in` case quirk (see _users_by_ids); the found-name set is identical.
+        # ponytail: fetch-all + filter instead of a `role IN (...)` query — an org's role
+        # count is small and the found-name set is identical.
         rows = await ctx.adapter.find_many("organizationRole", [Where("organizationId", org_id)])
         found = {r["role"] for r in rows}
         return [r for r in unknown if r not in found]

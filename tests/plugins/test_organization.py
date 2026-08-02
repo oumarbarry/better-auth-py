@@ -557,10 +557,9 @@ async def test_list_members_above_adapter_default_limit_returns_every_user():
     """membershipLimit above the adapter's default find_many cap still joins every user.
 
     TS bae71988a (adapter.ts:222-234) bounds the user fetch by ``members.length``; the port
-    resolves users with per-id ``find_one`` (``_users_by_ids``), which is unbounded by
-    construction. Regression guard: the join must not be capped at
-    ``default_find_many_limit`` (100). Mirrors crud-members.test.ts "listMembers with >100
-    members".
+    does the same in ``_users_by_ids`` (``limit=len(user_ids)``). Regression guard: the join
+    must not be capped at ``default_find_many_limit`` (100). Mirrors crud-members.test.ts
+    "listMembers with >100 members".
     """
     auth = org_auth(membership_limit=500)
     async with make_client(auth) as client:
@@ -582,6 +581,44 @@ async def test_list_members_above_adapter_default_limit_returns_every_user():
             isinstance(m["user"]["id"], str) and isinstance(m["user"]["email"], str)
             for m in body["members"]
         )
+
+
+async def test_list_members_resolves_users_in_one_query():
+    """The member→user join is a single ``id IN (...)`` query (TS adapter.ts:222-234),
+    not one ``find_one`` per member."""
+    auth = org_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        for i in range(5):
+            u = await auth.adapter.create("user", {"email": f"spy{i}@test.com", "name": f"spy{i}"})
+            await _seed_member(auth, org["id"], u["id"], "member")
+
+        calls = {"find_one": 0, "find_many": 0}
+        adapter = auth.adapter
+        find_one, find_many = adapter.find_one, adapter.find_many
+
+        async def spy_find_one(model, where=None, **kwargs):
+            calls["find_one"] += model == "user"
+            return await find_one(model, where, **kwargs)
+
+        async def spy_find_many(model, where=None, **kwargs):
+            calls["find_many"] += model == "user"
+            return await find_many(model, where, **kwargs)
+
+        adapter.find_one, adapter.find_many = spy_find_one, spy_find_many
+        try:
+            res = await client.get(
+                "/api/auth/organization/list-members", params={"organizationId": org["id"]}
+            )
+        finally:
+            adapter.find_one, adapter.find_many = find_one, find_many
+
+        assert len(res.json()["members"]) == 6
+        assert calls["find_many"] == 1
+        # the only per-user reads left are the session's user and the caller's own
+        # member→user attach — never one per listed member (that was 2 + 6 before)
+        assert calls["find_one"] == 2
 
 
 # --- remove-member ----------------------------------------------------------------

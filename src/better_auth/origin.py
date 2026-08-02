@@ -179,6 +179,11 @@ async def _validate_form_csrf(auth: BetterAuth, ctx: Ctx) -> None:
         return await _validate_origin(auth, ctx, force=True)
 
 
+#: Public seam for endpoints that force form-CSRF validation themselves (TS
+#: ``formCsrfMiddleware``, origin-check.ts:296) — e.g. plugins_ext/email_otp.py.
+validate_form_csrf = _validate_form_csrf
+
+
 def _should_skip_origin_check(auth: BetterAuth, path: str) -> bool:
     skip = auth.disable_origin_check
     if skip is True:

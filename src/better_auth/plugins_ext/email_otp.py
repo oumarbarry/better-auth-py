@@ -24,7 +24,7 @@ from ..adapters.base import Where
 from ..cookie_cache import set_cookie_cache
 from ..crypto import default_key_hasher, generate_otp, symmetric_decrypt, symmetric_encrypt
 from ..endpoints import require_fields, validate_email, validate_password
-from ..origin import _validate_form_csrf
+from ..origin import validate_form_csrf
 from ..plugins import HookSet, Plugin, PluginHook, RateLimitRule
 from ..session import cookie_name, create_session, get_session, refresh_session_cookie, utcnow
 from ..types import APIError, AuthResponse, Ctx
@@ -344,7 +344,7 @@ class EmailOTPPlugin(Plugin):
         # cross-origin POST mail an OTP to an arbitrary address. Force-validate like
         # /sign-in/email and /sign-up/email do. Runs before body parsing, as the TS
         # middleware does.
-        await _validate_form_csrf(ctx.auth, ctx)
+        await validate_form_csrf(ctx.auth, ctx)
         body = ctx.body()
         require_fields(body, "email", "type")
         email = validate_email(body["email"])  # INVALID_EMAIL

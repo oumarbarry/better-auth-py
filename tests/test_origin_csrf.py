@@ -166,3 +166,13 @@ async def test_form_encoded_callback_url_is_still_validated():
         body=b"callbackURL=https://evil.example.com/",
     )
     assert r.status == 403 and r.body["code"] == "INVALID_CALLBACK_URL"
+
+
+def test_validate_form_csrf_is_a_public_seam():
+    """Plugins force per-endpoint form-CSRF validation through the public name
+    (TS ``formCsrfMiddleware``), not through the module-private helper."""
+    from better_auth import origin
+    from better_auth.plugins_ext import email_otp
+
+    assert origin.validate_form_csrf is origin._validate_form_csrf
+    assert email_otp.validate_form_csrf is origin.validate_form_csrf
