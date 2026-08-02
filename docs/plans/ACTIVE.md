@@ -182,6 +182,27 @@ User deploys the site on Vercel (root=docs-site) après merge.
       surfaced the missing defer_session_refresh option; extension
       dispatched (config.py + session.py granted to QW).
       Next in user order: Flask, then Django.
+- [x] FLASK: DONE, validated (Fable re-ran FULL gate at CLI: 2046 pass
+      = 2031 + 15 new, ruff/format/ty clean — live-IDE ty errors were a
+      stale daemon, known precedent). integrations/flask.py 121 lines.
+      DESIGN RULING (Fable, pre-dispatch, evidence-based): WSGI→async
+      bridge = ONE dedicated event loop in a daemon thread owned by
+      BetterAuthFlask, run_coroutine_threadsafe per call. asyncio.run-
+      per-request AND asgiref/async_to_sync (what flask[async] uses)
+      REJECTED: core caches httpx.AsyncClient (auth.py:286-288) and
+      SQLAlchemyAdapter holds a loop-bound AsyncEngine pool — fresh loop
+      per call breaks request 2. [flask] extra = flask>=3.0 only, zero
+      new deps (stdlib bridge). Agent corrected the dispatch premise:
+      aiosqlite is loop-agnostic so the prescribed e2e regression alone
+      would NOT catch a bad bridge — test_loop_persists_across_requests
+      adds loop-identity asserts, proven failing under asyncio.run.
+      Accepted deviations (documented in code/tests): require_session
+      401 = Werkzeug HTML page carrying "Not authenticated" (not JSON
+      detail); redirect 302 carries Flask default text/html (Litestar-
+      class deviation); session helpers are sync reading flask.request
+      (no DI in Flask); bare mount path /api/auth/ → framework 404
+      (<path:rest> won't match empty; siblings untested there too).
+      Ponytail: no close() seam — daemon thread lives with the process.
 - [ ] Queued: docs iteration 2 (per-plugin/provider pages), and
       better-auth-client (PyPI name free — needs its own brainstorm:
       API surface + repo question before any code).

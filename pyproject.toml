@@ -43,6 +43,7 @@ sqlalchemy = ["sqlalchemy[asyncio]>=2.0"]
 passkey = ["webauthn>=2.7"]
 sso = ["dnspython>=2.7"]
 litestar = ["litestar>=2.24"]
+flask = ["flask>=3.0"]
 
 [dependency-groups]
 dev = [
@@ -58,6 +59,7 @@ dev = [
     "webauthn>=2.7",
     "dnspython>=2.7",
     "litestar>=2.24",
+    "flask>=3.0",
 ]
 
 [build-system]
