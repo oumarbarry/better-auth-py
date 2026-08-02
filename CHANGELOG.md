@@ -7,6 +7,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-02
+
+### Added
+
+- **Django integration**: `BetterAuthDjango` completes the framework
+  matrix — `.urls` to splat into `urlpatterns`, sync `session()`/
+  `require_session(request)` helpers, repeated `Set-Cookie` preserved
+  through `response.cookies` under both WSGI and ASGI. Same
+  dedicated-event-loop bridge as the Flask layer (stdlib only). The
+  auth view is `csrf_exempt`; the core's Origin check is the CSRF
+  protection, as on every framework. New `[django]` extra (Django ≥ 5.0).
+
 ## [0.4.0] - 2026-08-02
 
 ### Added
@@ -158,7 +170,8 @@ unscoped project).
 - Wire and storage compatibility with better-auth (TypeScript): same routes, JSON shapes, error codes, database schema, scrypt password format and session cookie scheme.
 - Security defaults: CSRF origin checks, open-redirect protection on callback URLs, timing-equalized sign-in, rate limiting with better-auth's per-path rules.
 
-[Unreleased]: https://github.com/oumarbarry/better-auth-py/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/oumarbarry/better-auth-py/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oumarbarry/better-auth-py/compare/v0.2.0...v0.2.1
