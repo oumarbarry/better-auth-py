@@ -4,8 +4,9 @@ Orchestration per `_plato/framework/ORCHESTRATOR.md`: Fable plans/routes/validat
 Opus/Sonnet/Haiku implement. State lives HERE — on resume, read this file first and
 continue from the first unverified task.
 
-**Parity target:** better-auth `v1.6.23` (latest npm stable; local reference repo
-`../better-auth` pinned to tag v1.6.23, commit 9dfceee14).
+**Parity target:** better-auth `v1.6.25` (latest npm stable; local reference repo
+`../better-auth` re-pinned 2026-08-02 to tag v1.6.25, commit 07a646ea1; the
+v0.2.0 campaign below was built against v1.6.23 / 9dfceee14).
 **Prime directive:** wire/storage fidelity — same routes, JSON shapes, error-code
 strings, camelCase DB columns, exact crypto/token encodings (cross-runtime compat).
 **Baseline (2026-07-22):** 84 tests green, ruff clean, ty clean, v0.1.0.
@@ -28,6 +29,51 @@ import stays better_auth; future client = better-auth-client, free today).
 Trusted publishing via release.yml (tag v* → OIDC, no tokens). parity branch
 merged into main at e0a239a, full gate 1975/clean/clean, install-from-PyPI
 smoke-tested.
+
+## Catch-up v1.6.23 → v1.6.25 (opened 2026-08-02, user go; EXHAUSTIVE sweep
+## of all 60 commits — user instruction: no half-measures)
+
+Triage (Fable, per-commit): 60 commits total. OUT with reasons —
+17 docs, 10 chore/deps/release/ci, 3 client pkgs (solid/react lifecycle/
+useSession types), 3 cli (drizzle relName, self-import, dup-idx), electron
+×2, sveltekit stub, mcp (deprecated, never ported), open-api 4e685eef4
+(ruled-out plugin, generator.ts only), cookies d3ce78233 (TS types only),
+54fab0844 AsyncLocalStorage dedup (TS runtime; port has no shared-init
+race — Ctx is per-request), 29a373eaf sqlite BIGINT (TS migration engine).
+VERIFY-ANALOG (agent-checked, not assumed): 750894037 kysely dup unique
+indexes → check SQLAlchemy create_tables for the same dup-unique-index
+pattern; ef4d27360 Request.clone failures → prove N/A (AuthRequest
+dataclass, no clone).
+
+- [ ] C1 organization trio (Opus, owns plugins_ext/organization* + its
+      tests): bae71988a membershipLimit applied to listMembers user fetch;
+      f59a0ee78 invitation ids DB-generated (stop passing explicit id);
+      3bf0e4981 endpoint ctx passed to org delete hooks. DISPATCHED.
+- [ ] C2 plugin fixes trio (Opus, owns plugins_ext/{one_tap,magic_link,
+      email_otp,last_login_method}.py + tests): 5124c3487 one-tap enforces
+      google-provider signup restrictions; 086ca91f5 SECURITY force-
+      validate Origin on cookieless magic-link/email-otp send endpoints;
+      f23ce5012 last-login-method beforeStoreCookie option (GDPR).
+      DISPATCHED.
+- [ ] C3 core + providers (Opus, owns oauth/providers*, session.py,
+      endpoints.py, schema.py, adapters/ + tests): 0ffd1fb28 Apple sends
+      PKCE challenge; c4d1ddaa9 ctx param on verifyIdToken (12 provider
+      files in TS); 46d2bf02c get-session no-cache Cache-Control;
+      03dc5a046 user.modelName collision resolution in references/adapter;
+      + the two VERIFY-ANALOG items above. DISPATCHED.
+- [ ] C4 sso investigation (Sonnet, owns plugins_ext/sso/ + tests):
+      c020a9d6a "idp-initiated SAML redirect in split-origin deployments"
+      touches shared routes/sso.ts (+67), types.ts (+12), utils.ts (+5) —
+      NOT saml-only. Mandate: read the diff, decide per hunk whether any
+      changed behavior lives on OIDC paths the port covers; port those,
+      report SAML-only hunks as out-of-scope. DISPATCHED.
+
+Done-condition per item: TS-anchored tests, scoped gate green, ruff/ty
+clean incl. tests; Fable validates vs the TS commit diff and commits.
+v1.7.0-rc.2 decision: NOT ported now (RC = moving target, decision-log
+precedent); 327 files / +45.8k lines — full campaign when 1.7.0 goes
+stable. Note: 1.7 deletes oidc-provider & mcp (never ported — ruling
+vindicated).
 
 ## Backlog burn-down (started 2026-07-24 on user "continue")
 
