@@ -1,13 +1,13 @@
 # better-auth-server — agent instructions
 
 Server-side Python port of [better-auth](https://github.com/better-auth/better-auth)
-(TypeScript), at full parity with **v1.6.23**. PyPI package: `better-auth-server`;
+(TypeScript), at full parity with **v1.6.25**. PyPI package: `better-auth-server`;
 import name: `better_auth`.
 
 ## Prime directive: wire & storage parity
 
 The TS repo is canonical (local reference: `../better-auth`, pinned to tag
-v1.6.23). Any behavior touching the wire or storage must match it exactly:
+v1.6.25). Any behavior touching the wire or storage must match it exactly:
 same routes, JSON shapes, error-code strings, camelCase DB columns, and
 crypto/token encodings. A TS server and this port must stay interchangeable
 on the same database. When in doubt, read the TS source and anchor your
