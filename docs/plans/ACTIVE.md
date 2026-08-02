@@ -107,8 +107,20 @@ vindicated).
 
 Spec: docs/superpowers/specs/2026-08-02-docs-site-and-skill-design.md.
 Plan: docs/superpowers/plans/2026-08-02-docs-site-and-skill.md.
-- [ ] SITE (Opus, owns docs-site/** + .github/workflows/docs.yml):
-      VitePress space theme, 9 pages, real-API snippets. DISPATCHED.
+- [x] SITE: DONE, validated, committed f097ae7 (Fable re-ran clean
+      npm ci + build: green, anchors OK across 10 routes). VitePress
+      1.6.4, 8 pages (plan's exact list; spec said ~9 — /guide/ index
+      possible later), observatory-plate theme under impeccable
+      discipline (gradient-text ban honored: solid+size hero; OKLCH
+      AA-verified both schemes; card-wall broken into 6 groups),
+      zero external deps (Inter bundled, 0 external requests),
+      canvas reduced-motion-proven, local search OK, custom
+      check-anchors.mjs wired into docs:build. 71 snippets verified
+      (live ASGI for quoted JSON). og:url/sitemap conditional on
+      VERCEL_PROJECT_PRODUCTION_URL/SITE_URL (no invented hostname).
+      Agent found + Fable fixed README's dead hook keys
+      (user_created_before/after → hooks {before,after} +
+      database_hooks, corrected shape executed).
 - [x] SKILL: DONE, validated, committed d561cb2. SKILL.md 199 lines + 4
       references (972 total), 42 blocks / 10 harnesses executed in repo
       AND PyPI-venv, scrypt/HMAC claims proven vs real node crypto.
