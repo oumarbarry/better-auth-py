@@ -109,9 +109,15 @@ Spec: docs/superpowers/specs/2026-08-02-docs-site-and-skill-design.md.
 Plan: docs/superpowers/plans/2026-08-02-docs-site-and-skill.md.
 - [ ] SITE (Opus, owns docs-site/** + .github/workflows/docs.yml):
       VitePress space theme, 9 pages, real-API snippets. DISPATCHED.
-- [ ] SKILL (Opus, owns .agents/skills/better-auth-server/** + its
-      .claude/skills symlink): 1 SKILL.md + 4 references, every snippet
-      executed against 0.2.1. DISPATCHED.
+- [x] SKILL: DONE, validated, committed d561cb2. SKILL.md 199 lines + 4
+      references (972 total), 42 blocks / 10 harnesses executed in repo
+      AND PyPI-venv, scrypt/HMAC claims proven vs real node crypto.
+      BLIND TRIAL PASSED (fresh Sonnet, skill-only docs → working
+      per-user auth e2e); its 3 findings folded in (driver callout,
+      lifespan/TestClient gotcha reproduced both ways, scoping example).
+      Bonus catches committed dbe95ba: __version__ now metadata-derived
+      (was 0.1.0 through two releases — published 0.2.1 wheel still has
+      the old string, fix ships next release), AGENTS.md → v1.6.25.
 - [ ] Validation (Fable): fresh build, snippet spot-checks, fresh-agent
       run-through of the skill on a blank FastAPI project, commits.
 User deploys the site on Vercel (root=docs-site) après merge.
