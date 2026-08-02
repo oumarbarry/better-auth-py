@@ -45,10 +45,16 @@ indexes → check SQLAlchemy create_tables for the same dup-unique-index
 pattern; ef4d27360 Request.clone failures → prove N/A (AuthRequest
 dataclass, no clone).
 
-- [ ] C1 organization trio (Opus, owns plugins_ext/organization* + its
-      tests): bae71988a membershipLimit applied to listMembers user fetch;
-      f59a0ee78 invitation ids DB-generated (stop passing explicit id);
-      3bf0e4981 endpoint ctx passed to org delete hooks. DISPATCHED.
+- [x] C1 organization trio + extension: DONE, validated, committed e7326b2
+      (170 org tests; Fable re-ran gate + checked hunks vs TS adapter.ts).
+      bae71988a = test-only (port's per-id join unbounded by construction;
+      regression test PROVEN vs recreated TS pre-fix shape). f59a0ee78
+      invitation id deferred to adapter (RED uuid test) — EXTENDED on
+      Fable order to member/team/teamMember (same bug class outside the
+      diff; org was already correct — agent self-corrected its earlier
+      4-site claim). 3bf0e4981 delete hooks get ctx via _call_hook arity
+      adapter. Parked follow-up: _users_by_ids N-round-trips perf
+      (ponytail-noted in code, upgrade = find_many "in" + limit).
 - [x] C2 plugin fixes trio: DONE, validated, committed 33e3069 (149 scoped
       tests green re-run by Fable; hunks checked vs TS anchors). SECURITY:
       email-otp send was origin-bypassable cookieless (RED-proven, OTP
@@ -62,12 +68,24 @@ dataclass, no clone).
       placement deviation noted (port writes DB+cookie in one _after).
       Note for later: email_otp imports origin._validate_form_csrf
       (module-private) — public alias in origin.py is a 1-liner if wanted.
-- [ ] C3 core + providers (Opus, owns oauth/providers*, session.py,
-      endpoints.py, schema.py, adapters/ + tests): 0ffd1fb28 Apple sends
-      PKCE challenge; c4d1ddaa9 ctx param on verifyIdToken (12 provider
-      files in TS); 46d2bf02c get-session no-cache Cache-Control;
-      03dc5a046 user.modelName collision resolution in references/adapter;
-      + the two VERIFY-ANALOG items above. DISPATCHED.
+- [x] C3 core + providers: DONE, validated, committed 5dfb60a (full gate
+      2006/clean/clean re-run by Fable; Apple + arity hunks checked vs TS).
+      0ffd1fb28 Apple PKCE ported (use_pkce=True + gated verifier; 3 RED
+      tests incl. exchange round-trip). c4d1ddaa9 ctx on verify_id_token:
+      base + 6 overrides + call_verify_id_token with inspect-arity
+      back-compat (existing port precedent; chosen over try/except
+      TypeError — a provider-internal TypeError would masquerade as old
+      signature). 46d2bf02c ALREADY byte-exact since init (no-store/
+      pragma) — pinned by 3 tests; TS's header-leak half N/A. 03dc5a046
+      N/A: port has NO modelName remap layer (grep-proven). 750894037
+      analog DISPROVEN on emitted DDL (unique+index folds to one Index)
+      + non-vacuous regression test. ef4d27360 N/A (buffered dataclass,
+      zero clone sites). NEW PARITY GAP LOGGED: TS get-session accepts
+      GET+POST, port 405s POST — v1.6.23-era, backlog.
+CATCH-UP v1.6.25 COMPLETE (C1-C4 closed): 2006 tests, ruff/ty clean.
+Port is at parity with better-auth v1.6.25. Remaining: version bump
+(v0.2.1 patch) + CHANGELOG when user wants a release; backlog item:
+get-session POST method.
 - [x] C4 sso investigation: CLOSED, validated — NO PORT NEEDED. Agent
       classified all 17 hunks of c020a9d6a: every one is SAML-only (new
       idpInitiatedCallbackUrl under samlConfig/saml options, ACS/SLO/
