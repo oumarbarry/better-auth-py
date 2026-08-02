@@ -21,5 +21,12 @@ better-auth-demo.db
 .env.*
 !.env.example
 
+# Node / docs site
+node_modules/
+docs-site/.vitepress/dist/
+docs-site/.vitepress/cache/
+npm-debug.log*
+.vercel/
+
 # macOS
 .DS_Store
