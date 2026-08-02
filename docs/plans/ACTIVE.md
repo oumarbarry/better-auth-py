@@ -140,14 +140,28 @@ User deploys the site on Vercel (root=docs-site) après merge.
 - [ ] QW quick-wins → v0.2.2 (Opus, owns endpoints/session/organization/
       origin/email_otp + tests): POST /get-session wire parity,
       _users_by_ids single find_many, public validate_form_csrf alias.
-      Release v0.2.2 after (also ships the __version__ metadata fix).
+      DISPATCHED. Versioning policy (user check, 2026-08-02): QW alone
+      → v0.2.2 PATCH (ships the pending __version__ fix too); Litestar
+      → v0.3.0 MINOR (own release even if same-day — semver, and ~=0.2
+      pins get fixes without new features); Flask/Django each minor.
       DISPATCHED.
 - [ ] SCOUT v1.7.0-rc.2 (Sonnet, worktree, read-only): classify all 81
       commits, work-packages, breaking wire/storage changes, removals.
       Report → docs/plans/gap/11-v1.7.0-scout.md. DISPATCHED.
-- [ ] LITESTAR integration (Opus, owns integrations/litestar.py +
-      test + pyproject/uv.lock [litestar] extra): mirror of the FastAPI
-      surface. Then Flask, then Django (user order). DISPATCHED.
+- [x] LITESTAR: DONE, validated, committed (scoped gate re-run by Fable;
+      13 tests, ruff/format/ty clean on its files; full-suite green at
+      agent time — final full gate rides the v0.3.0 release). 102 lines
+      vs FastAPI's 85. Accepted deviations: Litestar 401 body adds
+      status_code (framework handler, not wire-visible for auth routes);
+      302 carries an ignored content-type; ASGIResponse required for
+      repeated Set-Cookie; floor litestar>=2.24 (non-deprecated DI
+      spellings); 5-line import guard naming the [litestar] extra
+      (no in-repo precedent — new pattern, fine). QW's item-1 premise
+      was WRONG (Fable brief error): TS 405s POST /get-session without
+      deferSessionRefresh — agent ported the exact TS error instead and
+      surfaced the missing defer_session_refresh option; extension
+      dispatched (config.py + session.py granted to QW).
+      Next in user order: Flask, then Django.
 - [ ] Queued: docs iteration 2 (per-plugin/provider pages), and
       better-auth-client (PyPI name free — needs its own brainstorm:
       API surface + repo question before any code).
