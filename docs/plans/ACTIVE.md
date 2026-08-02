@@ -83,9 +83,11 @@ dataclass, no clone).
       zero clone sites). NEW PARITY GAP LOGGED: TS get-session accepts
       GET+POST, port 405s POST — v1.6.23-era, backlog.
 CATCH-UP v1.6.25 COMPLETE (C1-C4 closed): 2006 tests, ruff/ty clean.
-Port is at parity with better-auth v1.6.25. Remaining: version bump
-(v0.2.1 patch) + CHANGELOG when user wants a release; backlog item:
-get-session POST method.
+RELEASED 2026-08-02: v0.2.1 on PyPI (user "GO" — full sequence: bump +
+CHANGELOG + README tagline, gate, tag, trusted-publishing run success,
+GitHub release, install-from-PyPI smoke-tested). Backlog: get-session
+POST method; _users_by_ids N-round-trips perf; origin.py public
+_validate_form_csrf alias. Next big rock: v1.7.0 campaign when stable.
 - [x] C4 sso investigation: CLOSED, validated — NO PORT NEEDED. Agent
       classified all 17 hunks of c020a9d6a: every one is SAML-only (new
       idpInitiatedCallbackUrl under samlConfig/saml options, ACS/SLO/
