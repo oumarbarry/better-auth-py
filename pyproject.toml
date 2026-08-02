@@ -44,6 +44,7 @@ passkey = ["webauthn>=2.7"]
 sso = ["dnspython>=2.7"]
 litestar = ["litestar>=2.24"]
 flask = ["flask>=3.0"]
+django = ["django>=5.0"]
 
 [dependency-groups]
 dev = [
@@ -60,6 +61,7 @@ dev = [
     "dnspython>=2.7",
     "litestar>=2.24",
     "flask>=3.0",
+    "django>=5.0",
 ]
 
 [build-system]

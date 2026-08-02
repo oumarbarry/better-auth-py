@@ -210,18 +210,27 @@ User deploys the site on Vercel (root=docs-site) après merge.
       get-session through the wheel, __version__ reports 0.4.0 — the
       metadata-derived fix now live). README updated (extras list +
       framework-agnostic line now names BetterAuthFlask).
-- [ ] DJANGO (v0.5.0): DISPATCHED 2026-08-02 (1 background agent, owns
-      integrations/django.py + tests/test_django_integration.py +
-      pyproject [django] extra). DESIGN RULING (Fable, pre-dispatch,
-      same evidence base as Flask): SYNC views + the same dedicated-
-      loop bridge — Django async views under WSGI go through asgiref
-      (loop per request, breaks loop-bound core resources); sync view
-      + bridge works identically under WSGI AND ASGI (sync views run
-      in a threadpool there). catch-all is @csrf_exempt (port's own
-      check_origin IS the CSRF layer), [django] extra = django>=5.0.
-      Flagged risk in the prompt: HttpResponse repeated-Set-Cookie
-      emission (dict-like headers) — agent must report the mechanism;
-      the two-Set-Cookie sign-out test is non-negotiable.
+- [x] DJANGO: DONE, validated (Fable re-ran FULL gate at CLI: 2063 pass
+      = 2046 + 17, ruff/format/ty clean — live-IDE ty errors stale-daemon
+      again). integrations/django.py 157 lines, design ruling followed
+      (sync views + dedicated-loop bridge, @csrf_exempt with check_origin
+      documented as the CSRF layer, [django] extra = django>=5.0, lock
+      forks 5.2/6.0 by python version). Set-Cookie repeated-header risk
+      RESOLVED cleanly: HttpResponse.headers overwrites dups, so raw
+      set-cookie headers go through response.cookies.load() (stdlib
+      http.cookies parse — lossless for the core's percent-encoded
+      values); Fable verified BOTH installed handlers emit one line per
+      morsel (wsgi.py:131, asgi.py:331). Accepted deviations (documented
+      in docstrings/tests): require_session RETURNS dict|JsonResponse-401
+      instead of raising (Django maps no exception to 401; body ==
+      FastAPI's {"detail": ...}); helpers take HttpRequest explicitly;
+      .urls list to splat into urlpatterns; Morsel re-sorts cookie
+      attribute order (semantics intact); 405 via require_http_methods;
+      route pattern strips the leading slash (Django refuses it).
+      Agent gotcha finds: Django test client defaults to multipart
+      (sign-out test needs content_type json); Morsel stores max-age
+      as str. Fable cosmetic fix in merge window: pyproject django
+      extra normalized to one line like siblings.
 - [ ] Queued: docs iteration 2 (per-plugin/provider pages), and
       better-auth-client (PyPI name free — needs its own brainstorm:
       API surface + repo question before any code).
