@@ -195,9 +195,7 @@ async def test_revoke_active_session_promotes_next_valid_session():
         )
         assert response.status_code == 200
         set_cookies = response.headers.get_list("set-cookie")
-        main_cookie = next(
-            c for c in set_cookies if c.startswith("better-auth.session_token=")
-        )
+        main_cookie = next(c for c in set_cookies if c.startswith("better-auth.session_token="))
         assert "Max-Age=0" not in main_cookie  # promoted, not cleared
 
         assert (await client.get("/api/auth/get-session")).json()["user"]["email"] == (

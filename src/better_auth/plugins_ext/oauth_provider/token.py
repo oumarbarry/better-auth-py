@@ -443,9 +443,7 @@ async def create_user_tokens(
     if scope_expirations:
         for sc in scopes:
             cand = (
-                to_exp_jwt(scope_expirations[sc], iat)
-                if sc in scope_expirations
-                else default_exp
+                to_exp_jwt(scope_expirations[sc], iat) if sc in scope_expirations else default_exp
             )
             exp = min(exp, cand)
     exp = int(exp)

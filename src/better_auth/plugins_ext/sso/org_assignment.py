@@ -129,9 +129,7 @@ async def assign_organization_by_domain(
     if sso_provider is None:
         many_where = [Where("domainVerified", True)] if plugin.domain_verification_enabled else None
         all_providers = await ctx.adapter.find_many(plugin.model_name, many_where)
-        sso_provider = next(
-            (p for p in all_providers if domain_matches(domain, p["domain"])), None
-        )
+        sso_provider = next((p for p in all_providers if domain_matches(domain, p["domain"])), None)
 
     if not sso_provider or not sso_provider.get("organizationId"):
         return

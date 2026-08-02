@@ -112,15 +112,16 @@ async def test_db_provider_id_beats_organization_id() -> None:
     auth = make_auth(plugins=[SSOPlugin(), OrganizationPlugin()])
     async with make_client(auth) as client:
         await seed_provider(
-            auth, provider_id="by-org", domain="a.com", client_id="org-client",
+            auth,
+            provider_id="by-org",
+            domain="a.com",
+            client_id="org-client",
             organization_id="org-1",
         )
         await seed_provider(auth, provider_id="by-id", domain="b.com", client_id="id-client")
         await auth.adapter.create("organization", {"id": "org-1", "slug": "acme", "name": "Acme"})
         # both providerId and organizationSlug given -> providerId wins
-        res = await signin(
-            client, callbackURL="/dash", providerId="by-id", organizationSlug="acme"
-        )
+        res = await signin(client, callbackURL="/dash", providerId="by-id", organizationSlug="acme")
     assert res.status_code == 200, res.text
     assert authorize_client_id(res.json()["url"]) == "id-client"
 
@@ -129,7 +130,10 @@ async def test_organization_slug_beats_domain() -> None:
     auth = make_auth(plugins=[SSOPlugin(), OrganizationPlugin()])
     async with make_client(auth) as client:
         await seed_provider(
-            auth, provider_id="org-prov", domain="a.com", client_id="org-client",
+            auth,
+            provider_id="org-prov",
+            domain="a.com",
+            client_id="org-client",
             organization_id="org-1",
         )
         await seed_provider(
@@ -229,4 +233,6 @@ async def test_signin_shared_callback_state_carries_provider_id() -> None:
     data = json.loads(row["value"])
     assert data["additionalData"]["ssoProviderId"] == "p"
     # shared redirect_uri is used for the callback target
-    assert parse_qs(urlsplit(url).query)["redirect_uri"] == ["http://testserver/api/auth/sso/callback"]
+    assert parse_qs(urlsplit(url).query)["redirect_uri"] == [
+        "http://testserver/api/auth/sso/callback"
+    ]

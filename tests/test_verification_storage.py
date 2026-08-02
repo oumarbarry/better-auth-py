@@ -23,7 +23,6 @@ def _must(row: dict[str, Any] | None) -> dict[str, Any]:
     return row
 
 
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -190,9 +189,7 @@ async def test_secondary_delete_removes_key():
 
 async def test_secondary_with_hashed_identifier_hashed_at_rest():
     ss = MemorySecondaryStorage()
-    ia = InternalAdapter(
-        _adapter(), secondary_storage=ss, verification_store_identifier="hashed"
-    )
+    ia = InternalAdapter(_adapter(), secondary_storage=ss, verification_store_identifier="hashed")
     await _mk(ia, "otp:h", "v")
     assert await ss.get(f"verification:{default_key_hasher('otp:h')}") is not None
     assert await ss.get("verification:otp:h") is None  # raw key absent
@@ -205,9 +202,7 @@ async def test_secondary_with_hashed_identifier_hashed_at_rest():
 async def test_store_in_database_dual_writes_and_find_prefers_cache():
     adapter = _adapter()
     ss = MemorySecondaryStorage()
-    ia = InternalAdapter(
-        adapter, secondary_storage=ss, verification_store_in_database=True
-    )
+    ia = InternalAdapter(adapter, secondary_storage=ss, verification_store_in_database=True)
     await _mk(ia, "otp:both", "v")
     # both stores got the row
     assert await ss.get("verification:otp:both") is not None

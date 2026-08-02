@@ -13,9 +13,7 @@ from conftest import make_auth
 
 
 def _req(headers=None, client_ip=None):
-    return AuthRequest(
-        method="POST", path="/x", headers=headers or {}, client_ip=client_ip
-    )
+    return AuthRequest(method="POST", path="/x", headers=headers or {}, client_ip=client_ip)
 
 
 # --- normalize_ip / is_valid_ip (normalizeIP parity) --------------------------
@@ -63,9 +61,7 @@ def test_invalid_single_value_returns_none():
 
 def test_trusted_proxies_walk_chain_right_to_left():
     # chain: client, proxy; the trusted proxy hop is skipped, client wins
-    ip = get_ip_from_header(
-        "203.0.113.7, 10.0.0.5", trusted_proxies=["10.0.0.0/8"]
-    )
+    ip = get_ip_from_header("203.0.113.7, 10.0.0.5", trusted_proxies=["10.0.0.0/8"])
     assert ip == "203.0.113.7"
 
 

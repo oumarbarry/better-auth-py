@@ -212,9 +212,7 @@ async def test_adopt_unverified_clears_credential_password():
     )
     async with make_client(auth) as client:
         creds_body = {"email": "pw@test.com", "password": "existing-password"}
-        signup = await client.post(
-            "/api/auth/sign-up/email", json={**creds_body, "name": "U"}
-        )
+        signup = await client.post("/api/auth/sign-up/email", json={**creds_body, "name": "U"})
         users = await auth.adapter.find_many("user", [Where("email", "pw@test.com")])
         user_id = users[0]["id"]
         # gate: unverified credential can't sign in

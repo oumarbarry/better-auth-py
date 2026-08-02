@@ -396,9 +396,7 @@ async def test_callback_provider_error_param_redirects() -> None:
     async with make_client(auth) as client:
         await seed_provider(auth)
         state = await seed_state(auth, error_url="/oops")
-        res = await callback(
-            client, auth, state=state, code="", extra_query="&error=access_denied"
-        )
+        res = await callback(client, auth, state=state, code="", extra_query="&error=access_denied")
     assert res.status_code in (302, 307)
     query = parse_qs(urlsplit(res.headers["location"]).query)
     assert query["error"] == ["access_denied"]

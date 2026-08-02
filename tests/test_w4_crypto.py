@@ -139,9 +139,7 @@ def test_generate_hotp_vectors(counter, digits, expected):
 def test_totp_equals_hotp_at_floor_counter():
     now = 1_700_000_000  # seconds
     assert generate_totp(HOTP_SECRET, now=now) == generate_hotp(HOTP_SECRET, now // 30)
-    assert generate_totp(HOTP_SECRET, now=now, period=60) == generate_hotp(
-        HOTP_SECRET, now // 60
-    )
+    assert generate_totp(HOTP_SECRET, now=now, period=60) == generate_hotp(HOTP_SECRET, now // 60)
 
 
 def test_totp_default_now_uses_wall_clock():
@@ -173,9 +171,7 @@ def test_generate_hotp_digit_bounds_raise(digits):
 
 
 def test_otpauth_url_vector():
-    assert (
-        otpauth_url("test-totp-secret-key", "MyIssuer", "user@example.com") == OTPAUTH_URL
-    )
+    assert otpauth_url("test-totp-secret-key", "MyIssuer", "user@example.com") == OTPAUTH_URL
 
 
 # --- HMAC (cookie-signature cross-compat) ----------------------------------------------

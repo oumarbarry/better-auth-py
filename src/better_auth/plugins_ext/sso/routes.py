@@ -162,9 +162,7 @@ async def register(plugin: SSOPlugin, ctx: Ctx) -> AuthResponse:
     if not limit:
         raise APIError(403, "FORBIDDEN", "SSO provider registration is disabled")
 
-    existing_owned = await ctx.adapter.find_many(
-        plugin.model_name, [Where("userId", user["id"])]
-    )
+    existing_owned = await ctx.adapter.find_many(plugin.model_name, [Where("userId", user["id"])])
     if len(existing_owned) >= limit:
         raise APIError(403, "FORBIDDEN", "You have reached the maximum number of SSO providers")
 
@@ -200,9 +198,7 @@ async def register(plugin: SSOPlugin, ctx: Ctx) -> AuthResponse:
     reserved = set(BUILT_IN_ACCOUNT_PROVIDER_IDS)
     reserved.update(ctx.auth.social_providers.keys())
     reserved.update(getattr(ctx.auth, "trusted_providers", []) or [])
-    reserved.update(
-        str(p["providerId"]) for p in plugin.default_sso if p.get("providerId")
-    )
+    reserved.update(str(p["providerId"]) for p in plugin.default_sso if p.get("providerId"))
     if provider_id in reserved:
         raise APIError(
             422,
@@ -328,9 +324,7 @@ async def sign_in_sso(plugin: SSOPlugin, ctx: Ctx) -> AuthResponse:
     provider_id = body.get("providerId")
     domain = body.get("domain")
 
-    if not plugin.default_sso and not (
-        email or organization_slug or domain or provider_id
-    ):
+    if not plugin.default_sso and not (email or organization_slug or domain or provider_id):
         raise APIError(
             400, "BAD_REQUEST", "email, organizationSlug, domain or providerId is required"
         )
@@ -464,9 +458,7 @@ def _apply_mapping(
 ) -> dict[str, Any]:
     """Map raw claims (userinfo or verified id-token) through ``config.mapping`` with OIDC
     defaults + ``mapping.extraFields`` (sso.ts:1605)."""
-    extra = {
-        key: claims.get(source) for key, source in (mapping.get("extraFields") or {}).items()
-    }
+    extra = {key: claims.get(source) for key, source in (mapping.get("extraFields") or {}).items()}
     return {
         **extra,
         "id": claims.get(mapping.get("id") or "sub"),
@@ -617,9 +609,7 @@ async def handle_oidc_callback(
         user_info["email"], provider["domain"]
     )
 
-    sso_provider = ProviderConfig(
-        client_id=config["clientId"], provider_id=provider["providerId"]
-    )
+    sso_provider = ProviderConfig(client_id=config["clientId"], provider_id=provider["providerId"])
     info = OAuthUserInfo(
         id=str(user_info["id"]),
         email=user_info["email"],
@@ -643,9 +633,7 @@ async def handle_oidc_callback(
             override_user_info=bool(config.get("overrideUserInfo")),
         )
     except OAuthLinkError as error:
-        return _with_state_cleared(
-            ctx, _redirect_error(error_url, error.code.replace(" ", "_"))
-        )
+        return _with_state_cleared(ctx, _redirect_error(error_url, error.code.replace(" ", "_")))
     except APIError as error:
         return _with_state_cleared(ctx, _redirect_error(error_url, error.code, error.message))
 
@@ -675,9 +663,7 @@ async def handle_oidc_callback(
     )
 
     _session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
-    target = (
-        (state_data.get("newUserURL") or callback_url) if is_register else callback_url
-    )
+    target = (state_data.get("newUserURL") or callback_url) if is_register else callback_url
     response = AuthResponse(redirect_to=_absolute_url(ctx, target))
     for cookie in [*cookies, clear_cookie(ctx.auth, STATE_COOKIE)]:
         response.set_cookie(cookie)
@@ -698,9 +684,7 @@ async def _consume_state(ctx: Ctx) -> tuple[dict[str, Any] | None, AuthResponse 
     data = json.loads(row["value"])
     resolved_error_url = data.get("errorURL") or data.get("callbackURL") or default_error_url
     if row["expiresAt"] <= utcnow():
-        return None, _with_state_cleared(
-            ctx, _redirect_error(resolved_error_url, "invalid_state")
-        )
+        return None, _with_state_cleared(ctx, _redirect_error(resolved_error_url, "invalid_state"))
     if not ctx.auth.skip_state_cookie_check:
         raw = ctx.request.cookies().get(cookie_name(ctx.auth, STATE_COOKIE))
         if raw is None or unsign_value(ctx.auth.secret, raw) != state:

@@ -180,9 +180,7 @@ async def test_es256_jwt_plugin_mints_and_verifies_id_token_and_jwt_access():
         base_url=ORIGIN,
         plugins=[
             JWTPlugin(key_pair_config={"alg": "ES256"}),
-            OAuthProviderPlugin(
-                login_page=LOGIN, consent_page=CONSENT, valid_audiences=[RESOURCE]
-            ),
+            OAuthProviderPlugin(login_page=LOGIN, consent_page=CONSENT, valid_audiences=[RESOURCE]),
         ],
     )
     await seed(auth, scopes=["openid", "offline_access"])
@@ -659,15 +657,20 @@ async def test_concurrent_revoke_vs_rotate_one_winner():
 
         async def rotate():
             return await token(
-                c, grant_type="refresh_token", client_id="client-1",
-                client_secret=SECRET, refresh_token=rt,
+                c,
+                grant_type="refresh_token",
+                client_id="client-1",
+                client_secret=SECRET,
+                refresh_token=rt,
             )
 
         async def revoke():
             return await c.post(
                 "/api/auth/oauth2/revoke",
                 data=dict(
-                    client_id="client-1", client_secret=SECRET, token=rt,
+                    client_id="client-1",
+                    client_secret=SECRET,
+                    token=rt,
                     token_type_hint="refresh_token",
                 ),
             )
@@ -680,8 +683,11 @@ async def test_concurrent_revoke_vs_rotate_one_winner():
             assert rotate_res.json()["error"] == "invalid_grant"
         # in both orderings, replaying the parent now fails closed
         replay = await token(
-            c, grant_type="refresh_token", client_id="client-1",
-            client_secret=SECRET, refresh_token=rt,
+            c,
+            grant_type="refresh_token",
+            client_id="client-1",
+            client_secret=SECRET,
+            refresh_token=rt,
         )
         assert replay.status_code == 400
         assert replay.json()["error"] == "invalid_grant"
@@ -758,7 +764,10 @@ async def test_introspect_refresh_active():
         rt = await _issue_refresh(c)
         body = (
             await introspect(
-                c, client_id="client-1", client_secret=SECRET, token=rt,
+                c,
+                client_id="client-1",
+                client_secret=SECRET,
+                token=rt,
                 token_type_hint="refresh_token",
             )
         ).json()

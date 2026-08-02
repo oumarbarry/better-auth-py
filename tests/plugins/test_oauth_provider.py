@@ -66,9 +66,7 @@ def test_refresh_without_authorization_code_rejected():
 
 def test_non_eddsa_jwt_key_accepted_at_init():
     # TS has no alg gate — the whole JWKOptions union is usable (jwt/types.ts:176-196).
-    auth = make_auth(
-        plugins=[JWTPlugin(key_pair_config={"alg": "ES256"}), OAuthProviderPlugin()]
-    )
+    auth = make_auth(plugins=[JWTPlugin(key_pair_config={"alg": "ES256"}), OAuthProviderPlugin()])
     assert auth is not None
 
 
@@ -372,9 +370,7 @@ async def test_rotate_returns_new_prefixed_secret():
 async def test_rotate_refuses_public_clients():
     async with provider_client() as client:
         await sign_up(client)
-        created = (
-            await _create(client, token_endpoint_auth_method="none", type="native")
-        ).json()
+        created = (await _create(client, token_endpoint_auth_method="none", type="native")).json()
         res = await client.post(
             "/api/auth/oauth2/client/rotate-secret", json={"client_id": created["client_id"]}
         )

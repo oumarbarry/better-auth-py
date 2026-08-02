@@ -561,9 +561,7 @@ class InternalAdapter:
         require DB-backed storage) to close the cross-process race.
         """
         option, stored = await self._stored_identifier(identifier)
-        identifiers_to_try = (
-            [stored, identifier] if (option and option != "plain") else [stored]
-        )
+        identifiers_to_try = [stored, identifier] if (option and option != "plain") else [stored]
         consumed: dict[str, Any] | None = None
 
         if self.secondary_storage and not self.verification_store_in_database:

@@ -90,9 +90,7 @@ def plugin_auth(configs: list[GenericOAuthConfig], **overrides: Any) -> BetterAu
     return make_auth(plugins=[GenericOAuthPlugin(config=configs)], **overrides)
 
 
-async def start_signin(
-    client: httpx.AsyncClient, provider_id: str, **body: Any
-) -> httpx.Response:
+async def start_signin(client: httpx.AsyncClient, provider_id: str, **body: Any) -> httpx.Response:
     payload = {"providerId": provider_id, "callbackURL": "http://testserver/dashboard"}
     payload.update(body)
     return await client.post("/api/auth/sign-in/oauth2", json=payload)
@@ -536,9 +534,7 @@ async def test_disable_implicit_sign_up_blocks_new_user():
         ),
     )
     async with make_client(auth) as client:
-        signin = await start_signin(
-            client, "acme", errorCallbackURL="http://testserver/error"
-        )
+        signin = await start_signin(client, "acme", errorCallbackURL="http://testserver/error")
         state = state_of(signin)
         cb = await client.get(
             f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
@@ -634,9 +630,7 @@ async def test_callback_missing_email_redirects_email_is_missing():
         ),
     )
     async with make_client(auth) as client:
-        signin = await start_signin(
-            client, "acme", errorCallbackURL="http://testserver/err"
-        )
+        signin = await start_signin(client, "acme", errorCallbackURL="http://testserver/err")
         state = state_of(signin)
         cb = await client.get(
             f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
@@ -658,9 +652,7 @@ async def test_callback_token_exchange_failure_redirects_verification_failed():
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     async with make_client(auth) as client:
-        signin = await start_signin(
-            client, "acme", errorCallbackURL="http://testserver/err"
-        )
+        signin = await start_signin(client, "acme", errorCallbackURL="http://testserver/err")
         state = state_of(signin)
         cb = await client.get(
             f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
@@ -675,8 +667,11 @@ async def test_callback_token_exchange_failure_redirects_verification_failed():
 async def test_token_exchange_defaults_to_post_client_auth():
     record: list[dict[str, Any]] = []
     auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", client_secret="sec",
-                            discovery_url=DISCOVERY)],
+        [
+            GenericOAuthConfig(
+                provider_id="acme", client_id="cid", client_secret="sec", discovery_url=DISCOVERY
+            )
+        ],
         http_client=oidc_http(
             token={"access_token": "at", "token_type": "bearer"},
             userinfo=VERIFIED_PROFILE,
@@ -694,8 +689,15 @@ async def test_token_exchange_defaults_to_post_client_auth():
 async def test_token_exchange_basic_auth_sends_authorization_header():
     record: list[dict[str, Any]] = []
     auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", client_secret="sec",
-                            discovery_url=DISCOVERY, authentication="basic")],
+        [
+            GenericOAuthConfig(
+                provider_id="acme",
+                client_id="cid",
+                client_secret="sec",
+                discovery_url=DISCOVERY,
+                authentication="basic",
+            )
+        ],
         http_client=oidc_http(
             token={"access_token": "at", "token_type": "bearer"},
             userinfo=VERIFIED_PROFILE,
@@ -713,8 +715,11 @@ async def test_token_exchange_basic_auth_sends_authorization_header():
 async def test_pkce_code_verifier_reaches_token_endpoint():
     record: list[dict[str, Any]] = []
     auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY,
-                            pkce=True)],
+        [
+            GenericOAuthConfig(
+                provider_id="acme", client_id="cid", discovery_url=DISCOVERY, pkce=True
+            )
+        ],
         http_client=oidc_http(
             token={"access_token": "at", "token_type": "bearer"},
             userinfo=VERIFIED_PROFILE,
@@ -787,9 +792,7 @@ async def test_custom_get_user_info_used_and_empty_id_rejected():
         http_client=oidc_http(token={"access_token": "at", "token_type": "bearer"}),
     )
     async with make_client(auth) as client:
-        signin = await start_signin(
-            client, "acme", errorCallbackURL="http://testserver/err"
-        )
+        signin = await start_signin(client, "acme", errorCallbackURL="http://testserver/err")
         state = state_of(signin)
         cb = await client.get(
             f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
@@ -867,9 +870,7 @@ async def test_discovery_fetched_once_per_signin_call():
     )
     async with make_client(auth) as client:
         await start_signin(client, "acme")
-    discovery_hits = [
-        c for c in record if c["path"].endswith("/.well-known/openid-configuration")
-    ]
+    discovery_hits = [c for c in record if c["path"].endswith("/.well-known/openid-configuration")]
     # sign-in needs both authorization + token endpoints but resolves them from ONE fetch
     assert len(discovery_hits) == 1
 
@@ -889,9 +890,7 @@ async def test_discovery_headers_forwarded():
     )
     async with make_client(auth) as client:
         await start_signin(client, "acme")
-    disc = next(
-        c for c in record if c["path"].endswith("/.well-known/openid-configuration")
-    )
+    disc = next(c for c in record if c["path"].endswith("/.well-known/openid-configuration"))
     assert disc["headers"]["x-epic-client-id"] == "epic-123"
 
 
@@ -1015,7 +1014,9 @@ async def test_link_email_mismatch_redirects_error():
 
 
 def test_okta_preset_builds_discovery_url():
-    cfg = okta(client_id="cid", client_secret="sec", issuer="https://dev-12345.okta.com/oauth2/default")
+    cfg = okta(
+        client_id="cid", client_secret="sec", issuer="https://dev-12345.okta.com/oauth2/default"
+    )
     assert cfg.provider_id == "okta"
     assert cfg.discovery_url == (
         "https://dev-12345.okta.com/oauth2/default/.well-known/openid-configuration"
@@ -1024,7 +1025,9 @@ def test_okta_preset_builds_discovery_url():
 
 
 def test_okta_preset_strips_trailing_slash_on_issuer():
-    cfg = okta(client_id="cid", client_secret="sec", issuer="https://dev-12345.okta.com/oauth2/default/")
+    cfg = okta(
+        client_id="cid", client_secret="sec", issuer="https://dev-12345.okta.com/oauth2/default/"
+    )
     assert cfg.discovery_url == (
         "https://dev-12345.okta.com/oauth2/default/.well-known/openid-configuration"
     )

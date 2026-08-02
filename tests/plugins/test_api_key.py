@@ -122,9 +122,7 @@ async def test_create_metadata_disabled_and_type():
     auth = ak_auth()
     async with make_client(auth) as client:
         await sign_up(client)
-        resp = await client.post(
-            "/api/auth/api-key/create", json={"metadata": {"a": 1}}
-        )
+        resp = await client.post("/api/auth/api-key/create", json={"metadata": {"a": 1}})
         assert resp.status_code == 400
         assert resp.json()["code"] == "METADATA_DISABLED"
 
@@ -140,9 +138,7 @@ async def test_create_metadata_round_trip():
     auth = ak_auth({"enable_metadata": True})
     async with make_client(auth) as client:
         await sign_up(client)
-        created = await client.post(
-            "/api/auth/api-key/create", json={"metadata": {"tier": "gold"}}
-        )
+        created = await client.post("/api/auth/api-key/create", json={"metadata": {"tier": "gold"}})
         assert created.json()["metadata"] == {"tier": "gold"}
         key_id = created.json()["id"]
         row = await _row(auth, key_id)
@@ -170,17 +166,13 @@ async def test_create_expires_in_range_and_disabled():
         resp = await client.post("/api/auth/api-key/create", json={"expiresIn": 3600})
         assert resp.json()["code"] == "EXPIRES_IN_IS_TOO_SMALL"
         # maxExpiresIn 365 days
-        resp = await client.post(
-            "/api/auth/api-key/create", json={"expiresIn": 400 * 86400}
-        )
+        resp = await client.post("/api/auth/api-key/create", json={"expiresIn": 400 * 86400})
         assert resp.json()["code"] == "EXPIRES_IN_IS_TOO_LARGE"
 
     auth = ak_auth({"key_expiration": {"disable_custom_expires_time": True}})
     async with make_client(auth) as client:
         await sign_up(client)
-        resp = await client.post(
-            "/api/auth/api-key/create", json={"expiresIn": 10 * 86400}
-        )
+        resp = await client.post("/api/auth/api-key/create", json={"expiresIn": 10 * 86400})
         assert resp.json()["code"] == "KEY_DISABLED_EXPIRATION"
 
 
@@ -188,9 +180,7 @@ async def test_create_prefix_and_name_length_and_required():
     auth = ak_auth({"maximum_prefix_length": 4})
     async with make_client(auth) as client:
         await sign_up(client)
-        resp = await client.post(
-            "/api/auth/api-key/create", json={"prefix": "toolongprefix"}
-        )
+        resp = await client.post("/api/auth/api-key/create", json={"prefix": "toolongprefix"})
         assert resp.json()["code"] == "INVALID_PREFIX_LENGTH"
 
     auth = ak_auth({"maximum_name_length": 3})
@@ -281,15 +271,11 @@ async def test_verify_exhausted_non_refillable_is_deleted():
 
 async def test_verify_permissions_gate():
     auth = ak_auth()
-    raw = await _create_server_key(
-        auth, userId="u1", permissions={"files": ["read", "write"]}
-    )
+    raw = await _create_server_key(auth, userId="u1", permissions={"files": ["read", "write"]})
     ctx = server_ctx(auth)
     ok = await _plugin(auth).verify_api_key(ctx, key=raw, permissions={"files": ["read"]})
     assert ok["valid"] is True
-    bad = await _plugin(auth).verify_api_key(
-        ctx, key=raw, permissions={"files": ["delete"]}
-    )
+    bad = await _plugin(auth).verify_api_key(ctx, key=raw, permissions={"files": ["delete"]})
     assert bad["valid"] is False
     assert bad["error"]["code"] == "KEY_NOT_FOUND"
 
@@ -311,9 +297,7 @@ async def test_verify_config_scoping():
 
 async def test_verify_rate_limited_returns_wrapped_error():
     auth = ak_auth()
-    raw = await _create_server_key(
-        auth, userId="u1", rateLimitMax=1, rateLimitTimeWindow=100000
-    )
+    raw = await _create_server_key(auth, userId="u1", rateLimitMax=1, rateLimitTimeWindow=100000)
     ctx = server_ctx(auth)
     first = await _plugin(auth).verify_api_key(ctx, key=raw)
     assert first["valid"] is True
@@ -370,9 +354,7 @@ async def test_update_client_cannot_set_server_only():
         await sign_up(client)
         created = await client.post("/api/auth/api-key/create", json={"name": "a"})
         key_id = created.json()["id"]
-        resp = await client.post(
-            "/api/auth/api-key/update", json={"keyId": key_id, "remaining": 5}
-        )
+        resp = await client.post("/api/auth/api-key/update", json={"keyId": key_id, "remaining": 5})
         assert resp.status_code == 400
         assert resp.json()["code"] == "SERVER_ONLY_PROPERTY"
 
@@ -392,9 +374,7 @@ async def test_delete_and_banned_gate():
         data = await sign_up(client, email="ban@example.com")
         created = await client.post("/api/auth/api-key/create", json={"name": "b"})
         key_id = created.json()["id"]
-        await auth.adapter.update(
-            "user", [Where("id", data["user"]["id"])], {"banned": True}
-        )
+        await auth.adapter.update("user", [Where("id", data["user"]["id"])], {"banned": True})
         resp = await client.post("/api/auth/api-key/delete", json={"keyId": key_id})
         assert resp.status_code == 401
         assert resp.json()["code"] == "USER_BANNED"
@@ -555,9 +535,7 @@ async def test_session_mock_rejects_org_owned_key():
             "createdAt": utcnow(),
         },
     )
-    raw = await _create_server_key(
-        auth, userId=data["user"]["id"], organizationId=org_id
-    )
+    raw = await _create_server_key(auth, userId=data["user"]["id"], organizationId=org_id)
     async with make_client(auth) as client:
         resp = await client.get("/api/auth/get-session", headers={"x-api-key": raw})
         assert resp.status_code == 401
@@ -582,9 +560,7 @@ async def test_cas_remaining_single_winner():
 
 async def test_cas_rate_limit_single_winner():
     auth = ak_auth()
-    raw = await _create_server_key(
-        auth, userId="u1", rateLimitMax=1, rateLimitTimeWindow=100000
-    )
+    raw = await _create_server_key(auth, userId="u1", rateLimitMax=1, rateLimitTimeWindow=100000)
     plugin = _plugin(auth)
     results = await asyncio.gather(
         *(plugin.verify_api_key(server_ctx(auth), key=raw) for _ in range(8))
@@ -682,9 +658,7 @@ async def test_org_non_member_rejected():
     await _seed_org(auth, "someone-else", role="owner")
     ctx = server_ctx(auth, "/api-key/create")
     with pytest.raises(APIError) as e:
-        await _plugin(auth).create_api_key(
-            ctx, userId=data["user"]["id"], organizationId="org-1"
-        )
+        await _plugin(auth).create_api_key(ctx, userId=data["user"]["id"], organizationId="org-1")
     assert e.value.code == "USER_NOT_MEMBER_OF_ORGANIZATION"
 
 
@@ -695,9 +669,7 @@ async def test_org_insufficient_permission():
     org_id = await _seed_org(auth, data["user"]["id"], role="member")
     ctx = server_ctx(auth, "/api-key/create")
     with pytest.raises(APIError) as e:
-        await _plugin(auth).create_api_key(
-            ctx, userId=data["user"]["id"], organizationId=org_id
-        )
+        await _plugin(auth).create_api_key(ctx, userId=data["user"]["id"], organizationId=org_id)
     assert e.value.code == "INSUFFICIENT_API_KEY_PERMISSIONS"
 
 

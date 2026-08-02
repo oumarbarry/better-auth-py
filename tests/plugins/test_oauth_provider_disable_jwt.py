@@ -156,9 +156,7 @@ async def test_encrypted_secret_at_rest_uses_rotation_envelope():
         base_url=ORIGIN,
         secrets=[(1, "rotation-key-abcdefghijklmnop-01234")],
         plugins=[
-            OAuthProviderPlugin(
-                disable_jwt_plugin=True, login_page=LOGIN, consent_page=CONSENT
-            )
+            OAuthProviderPlugin(disable_jwt_plugin=True, login_page=LOGIN, consent_page=CONSENT)
         ],
     )
     async with make_client(auth) as c:
@@ -203,9 +201,7 @@ async def test_hs256_id_token_verifies_with_client_secret():
         assert decoded["sub"]
         # a wrong key must NOT verify
         with pytest.raises(pyjwt.InvalidSignatureError):
-            pyjwt.decode(
-                id_token, "x" * len(SECRET), algorithms=["HS256"], audience="client-1"
-            )
+            pyjwt.decode(id_token, "x" * len(SECRET), algorithms=["HS256"], audience="client-1")
         # access token is opaque, never a JWT
         assert len(body["access_token"].split(".")) != 3
 
@@ -333,9 +329,7 @@ async def test_end_session_hs256_verify_and_redirect():
 
 async def test_discovery_hs256_and_no_jwks_uri():
     auth = disabled_auth()
-    oidc = await auth.handle(
-        AuthRequest(method="GET", path="/.well-known/openid-configuration")
-    )
+    oidc = await auth.handle(AuthRequest(method="GET", path="/.well-known/openid-configuration"))
     assert oidc.status == 200
     assert oidc.body["id_token_signing_alg_values_supported"] == ["HS256"]
     assert "jwks_uri" not in oidc.body

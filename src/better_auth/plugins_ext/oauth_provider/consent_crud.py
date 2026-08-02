@@ -44,9 +44,7 @@ async def get_consent_endpoint(ctx: Ctx, opts: Any) -> dict[str, Any]:
 
 async def get_consents_endpoint(ctx: Ctx, opts: Any) -> list[dict[str, Any]]:
     session = await _require_session(ctx)
-    return await ctx.adapter.find_many(
-        "oauthConsent", [Where("userId", session["user"]["id"])]
-    )
+    return await ctx.adapter.find_many("oauthConsent", [Where("userId", session["user"]["id"])])
 
 
 async def delete_consent_endpoint(ctx: Ctx, opts: Any) -> None:

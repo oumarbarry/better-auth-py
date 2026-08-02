@@ -42,9 +42,7 @@ async def _default_resolve_txt(name: str) -> list[str]:
     for rdata in answer:
         chunks = getattr(rdata, "strings", None)
         if chunks is not None:
-            records.append(
-                "".join(c.decode() if isinstance(c, bytes) else c for c in chunks)
-            )
+            records.append("".join(c.decode() if isinstance(c, bytes) else c for c in chunks))
         else:
             records.append(str(rdata).strip('"'))
     return records

@@ -67,9 +67,7 @@ def build_signed_oauth_query(search: str) -> str | None:
     if signed_names is None:
         return None
     kept = [
-        (k, v)
-        for k, v in pairs
-        if k == "sig" or k == SIGNED_PARAM_NAME_PARAM or k in signed_names
+        (k, v) for k, v in pairs if k == "sig" or k == SIGNED_PARAM_NAME_PARAM or k in signed_names
     ]
     return urlencode(kept, quote_via=quote_plus)
 

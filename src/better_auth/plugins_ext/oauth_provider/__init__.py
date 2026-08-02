@@ -313,9 +313,7 @@ class OAuthProviderPlugin(Plugin):
             return AuthResponse(status=400, body={"error": "invalid_signature"})
         issued_at = get_signed_query_issued_at(query)
         pairs = parse_query(query)
-        post_login_cleared = next(
-            (v for k, v in pairs if k == POST_LOGIN_CLEARED_PARAM), None
-        )
+        post_login_cleared = next((v for k, v in pairs if k == POST_LOGIN_CLEARED_PARAM), None)
         reserved = {"sig", "exp", SIGNED_QUERY_ISSUED_AT_PARAM, POST_LOGIN_CLEARED_PARAM}
         stripped = [(k, v) for k, v in pairs if k not in reserved]
         stripped_query = urlencode(stripped, quote_via=quote_plus)

@@ -36,9 +36,7 @@ async def _signup(client: Any, **body: Any) -> Any:
 
 
 async def _session(client: Any, token: str) -> dict[str, Any]:
-    r = await client.get(
-        "/api/auth/get-session", headers={"authorization": f"Bearer {token}"}
-    )
+    r = await client.get("/api/auth/get-session", headers={"authorization": f"Bearer {token}"})
     return r.json()
 
 
@@ -68,7 +66,9 @@ async def test_display_username_not_normalized_by_default():
 async def test_preserve_both_username_and_display_on_signup():
     async with make_client(_auth()) as client:
         r = await _signup(
-            client, email="both@b.com", username="custom_user",
+            client,
+            email="both@b.com",
+            username="custom_user",
             **{"displayUsername": "Fancy Display Name"},
         )
         s = await _session(client, r.json()["token"])
@@ -217,9 +217,7 @@ async def test_is_available_too_short_422():
 
 async def test_is_available_too_long_422():
     async with make_client(_auth()) as client:
-        r = await client.post(
-            "/api/auth/is-username-available", json={"username": "a" * 31}
-        )
+        r = await client.post("/api/auth/is-username-available", json={"username": "a" * 31})
         assert r.status_code == 422
         assert r.json()["code"] == "USERNAME_TOO_LONG"
 
@@ -329,7 +327,9 @@ async def test_custom_display_normalization():
     plugin = UsernamePlugin(display_username_normalization=lambda d: d.lower())
     async with make_client(make_auth(plugins=[plugin])) as client:
         r = await _signup(
-            client, email="a@b.com", username="test_username",
+            client,
+            email="a@b.com",
+            username="test_username",
             **{"displayUsername": "Test Username"},
         )
         s = await _session(client, r.json()["token"])
@@ -364,7 +364,9 @@ async def test_display_validator_accepts_and_rejects():
         assert s["user"]["displayUsername"] == "Valid_Display-123"
 
         bad = await _signup(
-            client, email="c@b.com", username="invalid_display",
+            client,
+            email="c@b.com",
+            username="invalid_display",
             **{"displayUsername": "Invalid Display!"},
         )
         assert bad.status_code == 400

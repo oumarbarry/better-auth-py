@@ -21,7 +21,9 @@ HOTP/TOTP) are sacred — never regenerate or "fix" them.
 - Always `cd` into the repo first (the shell cwd can reset to the parent
   directory; symptom: ~300+ pytest collection errors from sibling repos).
 - Full gate, required before claiming anything done:
-  `uv run pytest -q && uv run ruff check . && uv run ty check`
+  `uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run ty check`
+  (CI's lint job runs `ruff format --check` too — omitting it locally is how
+  48 files once drifted and broke CI for several commits.)
 - ruff and ty must pass on **test files too**, not just `src/`.
 - Package management is uv only (`uv add`, `uv run`, `uv lock`). Build:
   `uv build`.

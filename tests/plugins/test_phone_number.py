@@ -497,9 +497,7 @@ async def test_sign_in_require_verification_sends_otp():
 async def test_request_password_reset_is_constant_and_no_enumeration():
     otp: dict[str, Any] = {}
     reset: dict[str, Any] = {}
-    auth = make_auth(
-        plugins=[phone_plugin(otp, send_password_reset_otp=_recorder(reset))]
-    )
+    auth = make_auth(plugins=[phone_plugin(otp, send_password_reset_otp=_recorder(reset))])
     phone = "+251911999888"
     async with make_client(auth) as client:
         # unknown phone → still {status: true}, OTP row written, but nothing sent

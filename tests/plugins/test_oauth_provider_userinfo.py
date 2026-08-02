@@ -319,7 +319,10 @@ async def test_revoke_refresh_cas_and_cascades_access_deletion():
         rt = body["refresh_token"]
         assert await auth.adapter.find_many("oauthAccessToken", [Where("clientId", "client-1")])
         res = await revoke(
-            c, client_id="client-1", client_secret=SECRET, token=rt,
+            c,
+            client_id="client-1",
+            client_secret=SECRET,
+            token=rt,
             token_type_hint="refresh_token",
         )
         assert res.status_code == 200, res.text
@@ -337,13 +340,19 @@ async def test_revoke_already_revoked_tears_down_family():
         await sign_up(c)
         rt = (await _access(c, scope="openid offline_access"))["refresh_token"]
         first = await revoke(
-            c, client_id="client-1", client_secret=SECRET, token=rt,
+            c,
+            client_id="client-1",
+            client_secret=SECRET,
+            token=rt,
             token_type_hint="refresh_token",
         )
         assert first.status_code == 200
         # replay the now-revoked refresh -> family teardown, still 200 (RFC 7009 idempotent)
         second = await revoke(
-            c, client_id="client-1", client_secret=SECRET, token=rt,
+            c,
+            client_id="client-1",
+            client_secret=SECRET,
+            token=rt,
             token_type_hint="refresh_token",
         )
         assert second.status_code == 200
@@ -382,9 +391,7 @@ async def test_revoke_missing_client_id_rejected():
 
 async def test_end_session_deletes_sid_session_and_redirects_with_state():
     auth = provider_auth()
-    await seed(
-        auth, scopes=["openid"], enableEndSession=True, postLogoutRedirectUris=[LOGOUT_URI]
-    )
+    await seed(auth, scopes=["openid"], enableEndSession=True, postLogoutRedirectUris=[LOGOUT_URI])
     async with make_client(auth) as c:
         await sign_up(c)
         id_token = (await _access(c, scope="openid"))["id_token"]
@@ -437,7 +444,9 @@ async def test_end_session_requires_enable_end_session():
 async def test_end_session_bad_audience_rejected():
     auth = provider_auth()
     await seed(auth, scopes=["openid"], enableEndSession=True)
-    await seed(auth, client_id="client-2", enableEndSession=True, redirect="https://c2.example.com/cb")
+    await seed(
+        auth, client_id="client-2", enableEndSession=True, redirect="https://c2.example.com/cb"
+    )
     async with make_client(auth) as c:
         await sign_up(c)
         id_token = (await _access(c, scope="openid"))["id_token"]  # aud = client-1
@@ -462,9 +471,7 @@ async def test_end_session_bad_issuer_rejected():
 
 async def test_end_session_non_registered_redirect_not_followed():
     auth = provider_auth()
-    await seed(
-        auth, scopes=["openid"], enableEndSession=True, postLogoutRedirectUris=[LOGOUT_URI]
-    )
+    await seed(auth, scopes=["openid"], enableEndSession=True, postLogoutRedirectUris=[LOGOUT_URI])
     async with make_client(auth) as c:
         await sign_up(c)
         id_token = (await _access(c, scope="openid"))["id_token"]

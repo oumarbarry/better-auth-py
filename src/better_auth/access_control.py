@@ -80,9 +80,7 @@ class Role:
     def __init__(self, statements: Statements) -> None:
         self.statements = statements
 
-    def authorize(
-        self, request: AuthorizeRequest, connector: Connector = "AND"
-    ) -> AuthorizeResult:
+    def authorize(self, request: AuthorizeRequest, connector: Connector = "AND") -> AuthorizeResult:
         has_authorized_resource = False
         for requested_resource, requested_actions in request.items():
             # NB: membership test, not truthiness — a resource key that *exists* with

@@ -58,9 +58,7 @@ def _accepts_ctx(fn: Callable[..., Any]) -> bool:
         return True
     if any(p.kind == p.VAR_POSITIONAL for p in params):
         return True
-    return sum(
-        1 for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-    ) >= 2
+    return sum(1 for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)) >= 2
 
 
 def _resolve(origin: str, value: str) -> str:
@@ -242,9 +240,7 @@ class MagicLinkPlugin(Plugin):
                 response.set_cookie(cookie)
             return response
 
-        response = AuthResponse(
-            redirect_to=new_user_callback_url if is_new_user else callback_url
-        )
+        response = AuthResponse(redirect_to=new_user_callback_url if is_new_user else callback_url)
         for cookie in cookies:
             response.set_cookie(cookie)
         return response

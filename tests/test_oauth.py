@@ -148,9 +148,7 @@ async def test_verified_email_links_to_existing_user():
     linked = [{"email": SIGNUP["email"], "primary": True, "verified": True}]
     auth = oauth_auth(
         http_client=github_http(emails=linked),
-        account=AccountOptions(
-            account_linking=AccountLinking(require_local_email_verified=False)
-        ),
+        account=AccountOptions(account_linking=AccountLinking(require_local_email_verified=False)),
     )
     async with make_client(auth) as client:
         await sign_up(client)

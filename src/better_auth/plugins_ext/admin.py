@@ -59,8 +59,7 @@ ADMIN_ERROR_CODES: dict[str, str] = {
     "INVALID_ROLE_TYPE": "Invalid role type",
     "YOU_ARE_NOT_ALLOWED_TO_SET_USERS_EMAIL": "You are not allowed to update users email",
     "PASSWORD_CANNOT_BE_UPDATED_VIA_UPDATE_USER": (
-        "Password cannot be updated through update-user. "
-        "Use the set-user-password endpoint instead"
+        "Password cannot be updated through update-user. Use the set-user-password endpoint instead"
     ),
 }
 
@@ -256,9 +255,7 @@ class AdminPlugin(Plugin):
             raise APIError(401, "UNAUTHORIZED", "Not authenticated")
         return result
 
-    def _require(
-        self, session: dict[str, Any], permissions: dict[str, Any], code: str
-    ) -> None:
+    def _require(self, session: dict[str, Any], permissions: dict[str, Any], code: str) -> None:
         user = session["user"]
         if not self.has_permission(
             user_id=user["id"], role=user.get("role"), permissions=permissions
@@ -446,9 +443,7 @@ class AdminPlugin(Plugin):
 
     async def _list_user_sessions(self, ctx: Ctx) -> AuthResponse:
         session = await self._admin_session(ctx)
-        self._require(
-            session, {"session": ["list"]}, "YOU_ARE_NOT_ALLOWED_TO_LIST_USERS_SESSIONS"
-        )
+        self._require(session, {"session": ["list"]}, "YOU_ARE_NOT_ALLOWED_TO_LIST_USERS_SESSIONS")
         sessions = await ctx.internal.list_sessions(str(ctx.body()["userId"]))
         return AuthResponse(body={"sessions": [ctx.auth.parse_session_output(s) for s in sessions]})
 
@@ -538,7 +533,7 @@ class AdminPlugin(Plugin):
             "true" if cookie_name(auth, "dont_remember") in ctx.request.cookies() else ""
         )
         admin_cookie_value = sign_value(
-            auth.secret, f'{session["session"]["token"]}:{dont_remember_flag}'
+            auth.secret, f"{session['session']['token']}:{dont_remember_flag}"
         )
         response = AuthResponse(
             body={

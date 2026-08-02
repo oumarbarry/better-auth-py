@@ -414,9 +414,7 @@ async def test_register_seeds_domain_verification_token() -> None:
 
 
 async def make_member(auth: BetterAuth, uid: str, org_id: str, role: str) -> None:
-    await auth.adapter.create(
-        "member", {"organizationId": org_id, "userId": uid, "role": role}
-    )
+    await auth.adapter.create("member", {"organizationId": org_id, "userId": uid, "role": role})
 
 
 async def test_register_org_requires_membership() -> None:

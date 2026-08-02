@@ -141,9 +141,7 @@ class UsernamePlugin(Plugin):
         """Return ``(status, code, message)`` on failure, else ``None`` — status is the
         HTTP-hook 400; sign-in/is-available re-raise these codes as 422."""
         to_validate = (
-            self._normalize(username)
-            if self._vo("username") == "post-normalization"
-            else username
+            self._normalize(username) if self._vo("username") == "post-normalization" else username
         )
         if len(to_validate) < self.min_username_length:
             return (400, "USERNAME_TOO_SHORT", ERROR_CODES["USERNAME_TOO_SHORT"])

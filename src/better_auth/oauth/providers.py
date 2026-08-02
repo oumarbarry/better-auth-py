@@ -151,9 +151,7 @@ class ProviderConfig:
 
     # --- user info --------------------------------------------------------------------
 
-    async def fetch_user(
-        self, tokens: OAuthTokens, http: httpx.AsyncClient
-    ) -> OAuthUserInfo:
+    async def fetch_user(self, tokens: OAuthTokens, http: httpx.AsyncClient) -> OAuthUserInfo:
         """OIDC-style bearer-token userinfo fetch. Providers with a non-standard profile
         override this (see :class:`GitHub`, :class:`Discord`); most just set
         ``profile_mapper``."""
@@ -243,9 +241,7 @@ class GitHub(ProviderConfig):
     userinfo_endpoint: str = "https://api.github.com/user"
     scopes: list[str] = field(default_factory=lambda: ["read:user", "user:email"])
 
-    async def fetch_user(
-        self, tokens: OAuthTokens, http: httpx.AsyncClient
-    ) -> OAuthUserInfo:
+    async def fetch_user(self, tokens: OAuthTokens, http: httpx.AsyncClient) -> OAuthUserInfo:
         headers = {
             "authorization": f"Bearer {tokens.access_token}",
             "user-agent": "better-auth-py",
@@ -300,9 +296,7 @@ class Discord(ProviderConfig):
     userinfo_endpoint: str = "https://discord.com/api/users/@me"
     scopes: list[str] = field(default_factory=lambda: ["identify", "email"])
 
-    async def fetch_user(
-        self, tokens: OAuthTokens, http: httpx.AsyncClient
-    ) -> OAuthUserInfo:
+    async def fetch_user(self, tokens: OAuthTokens, http: httpx.AsyncClient) -> OAuthUserInfo:
         response = await oauth_fetch(
             http,
             "GET",
@@ -312,9 +306,7 @@ class Discord(ProviderConfig):
         response.raise_for_status()
         profile = response.json()
         if profile.get("avatar"):
-            image = (
-                f"https://cdn.discordapp.com/avatars/{profile['id']}/{profile['avatar']}.png"
-            )
+            image = f"https://cdn.discordapp.com/avatars/{profile['id']}/{profile['avatar']}.png"
         else:
             # default-avatar CDN fallback (spec-noted gap): new users use (id>>22)%6,
             # legacy discriminator users use discriminator%5.

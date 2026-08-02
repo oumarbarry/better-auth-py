@@ -422,8 +422,12 @@ class PhoneNumberPlugin(Plugin):
         account = await self._credential_account(ctx, user["id"])
         if account is None:
             await ctx.internal.create_account(
-                {"userId": user["id"], "providerId": "credential", "accountId": user["id"],
-                 "password": hashed}
+                {
+                    "userId": user["id"],
+                    "providerId": "credential",
+                    "accountId": user["id"],
+                    "password": hashed,
+                }
             )
         else:
             await ctx.internal.update(

@@ -303,8 +303,12 @@ class ApiKeyPlugin(Plugin):
     id = "api-key"
     error_codes = API_KEY_ERROR_CODES
 
-    def __init__(self, config: dict[str, Any] | list[dict[str, Any]] | None = None, *,
-                 schema: Schema | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | list[dict[str, Any]] | None = None,
+        *,
+        schema: Schema | None = None,
+    ) -> None:
         raws: list[dict[str, Any] | None]
         if isinstance(config, list):
             if config and not all(c.get("config_id") for c in config):
@@ -418,7 +422,8 @@ class ApiKeyPlugin(Plugin):
             org_id = body.get("organizationId")
             if not org_id:
                 raise APIError(
-                    400, "ORGANIZATION_ID_REQUIRED",
+                    400,
+                    "ORGANIZATION_ID_REQUIRED",
                     API_KEY_ERROR_CODES["ORGANIZATION_ID_REQUIRED"],
                 )
             user_id = (session_user or {}).get("id") or body.get("userId")
@@ -461,12 +466,14 @@ class ApiKeyPlugin(Plugin):
         refill_interval = body.get("refillInterval")
         if refill_amount and not refill_interval:
             raise APIError(
-                400, "REFILL_AMOUNT_AND_INTERVAL_REQUIRED",
+                400,
+                "REFILL_AMOUNT_AND_INTERVAL_REQUIRED",
                 API_KEY_ERROR_CODES["REFILL_AMOUNT_AND_INTERVAL_REQUIRED"],
             )
         if refill_interval and not refill_amount:
             raise APIError(
-                400, "REFILL_INTERVAL_AND_AMOUNT_REQUIRED",
+                400,
+                "REFILL_INTERVAL_AND_AMOUNT_REQUIRED",
                 API_KEY_ERROR_CODES["REFILL_INTERVAL_AND_AMOUNT_REQUIRED"],
             )
 
@@ -474,18 +481,21 @@ class ApiKeyPlugin(Plugin):
         if expires_in:
             if opts.disable_custom_expires_time is True:
                 raise APIError(
-                    400, "KEY_DISABLED_EXPIRATION",
+                    400,
+                    "KEY_DISABLED_EXPIRATION",
                     API_KEY_ERROR_CODES["KEY_DISABLED_EXPIRATION"],
                 )
             days = expires_in / (60 * 60 * 24)
             if opts.min_expires_in > days:
                 raise APIError(
-                    400, "EXPIRES_IN_IS_TOO_SMALL",
+                    400,
+                    "EXPIRES_IN_IS_TOO_SMALL",
                     API_KEY_ERROR_CODES["EXPIRES_IN_IS_TOO_SMALL"],
                 )
             if opts.max_expires_in < days:
                 raise APIError(
-                    400, "EXPIRES_IN_IS_TOO_LARGE",
+                    400,
+                    "EXPIRES_IN_IS_TOO_LARGE",
                     API_KEY_ERROR_CODES["EXPIRES_IN_IS_TOO_LARGE"],
                 )
 
@@ -548,14 +558,17 @@ class ApiKeyPlugin(Plugin):
             "referenceId": reference_id,
             "lastRefillAt": None,
             "lastRequest": None,
-            "rateLimitMax": body.get("rateLimitMax") if body.get("rateLimitMax") is not None
+            "rateLimitMax": body.get("rateLimitMax")
+            if body.get("rateLimitMax") is not None
             else opts.rate_limit_max,
             "rateLimitTimeWindow": body.get("rateLimitTimeWindow")
-            if body.get("rateLimitTimeWindow") is not None else opts.rate_limit_time_window,
+            if body.get("rateLimitTimeWindow") is not None
+            else opts.rate_limit_time_window,
             "remaining": remaining,
             "refillAmount": refill_amount,
             "refillInterval": refill_interval,
-            "rateLimitEnabled": rate_limit_enabled if rate_limit_enabled is not None
+            "rateLimitEnabled": rate_limit_enabled
+            if rate_limit_enabled is not None
             else opts.rate_limit_enabled,
             "requestCount": 0,
             "permissions": permissions_str,
@@ -573,7 +586,11 @@ class ApiKeyPlugin(Plugin):
     # --- verify (verify-api-key.ts) ------------------------------------------------
 
     async def verify_api_key(
-        self, ctx: Ctx, *, key: str, config_id: str | None = None,
+        self,
+        ctx: Ctx,
+        *,
+        key: str,
+        config_id: str | None = None,
         permissions: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Server-only. Wrapped response: never raises to the caller."""
@@ -586,15 +603,21 @@ class ApiKeyPlugin(Plugin):
             if not valid:
                 return {
                     "valid": False,
-                    "error": {"message": API_KEY_ERROR_CODES["INVALID_API_KEY"],
-                              "code": "KEY_NOT_FOUND"},
+                    "error": {
+                        "message": API_KEY_ERROR_CODES["INVALID_API_KEY"],
+                        "code": "KEY_NOT_FOUND",
+                    },
                     "key": None,
                 }
 
         try:
             row, _opts = await self._validate_api_key(
-                ctx, key, lookup_opts=lookup_opts, permissions=permissions,
-                expected_config_id=config_id, run_custom_validator=config_id is None,
+                ctx,
+                key,
+                lookup_opts=lookup_opts,
+                permissions=permissions,
+                expected_config_id=config_id,
+                run_custom_validator=config_id is None,
             )
         except APIError as e:
             # verify-api-key.ts:576-584 spreads `...error.body` first so message/code
@@ -607,9 +630,14 @@ class ApiKeyPlugin(Plugin):
         return {"valid": True, "error": None, "key": _strip_key(row)}
 
     async def _validate_api_key(
-        self, ctx: Ctx, key: str, *, lookup_opts: _Config,
+        self,
+        ctx: Ctx,
+        key: str,
+        *,
+        lookup_opts: _Config,
         permissions: dict[str, Any] | None = None,
-        expected_config_id: str | None = None, run_custom_validator: bool = False,
+        expected_config_id: str | None = None,
+        run_custom_validator: bool = False,
     ) -> tuple[dict[str, Any], _Config]:
         hashed = key if lookup_opts.disable_key_hashing else default_key_hasher(key)
         api_key = await ctx.adapter.find_one("apikey", [Where("key", hashed)])
@@ -676,8 +704,10 @@ class ApiKeyPlugin(Plugin):
             if (now - last).total_seconds() * 1000 > refill_interval:
                 refilled = await ctx.adapter.increment_one(
                     "apikey",
-                    [Where("id", api_key["id"]),
-                     Where("lastRefillAt", api_key.get("lastRefillAt"))],
+                    [
+                        Where("id", api_key["id"]),
+                        Where("lastRefillAt", api_key.get("lastRefillAt")),
+                    ],
                     set={"remaining": refill_amount - 1, "lastRefillAt": now},
                 )
                 if refilled is not None:
@@ -823,19 +853,22 @@ class ApiKeyPlugin(Plugin):
             expires_in = body["expiresIn"]
             if opts.disable_custom_expires_time is True:
                 raise APIError(
-                    400, "KEY_DISABLED_EXPIRATION",
+                    400,
+                    "KEY_DISABLED_EXPIRATION",
                     API_KEY_ERROR_CODES["KEY_DISABLED_EXPIRATION"],
                 )
             if expires_in is not None:
                 days = expires_in / (60 * 60 * 24)
                 if days < opts.min_expires_in:
                     raise APIError(
-                        400, "EXPIRES_IN_IS_TOO_SMALL",
+                        400,
+                        "EXPIRES_IN_IS_TOO_SMALL",
                         API_KEY_ERROR_CODES["EXPIRES_IN_IS_TOO_SMALL"],
                     )
                 if days > opts.max_expires_in:
                     raise APIError(
-                        400, "EXPIRES_IN_IS_TOO_LARGE",
+                        400,
+                        "EXPIRES_IN_IS_TOO_LARGE",
                         API_KEY_ERROR_CODES["EXPIRES_IN_IS_TOO_LARGE"],
                     )
             new_values["expiresAt"] = (
@@ -852,12 +885,14 @@ class ApiKeyPlugin(Plugin):
         if body.get("refillAmount") is not None or body.get("refillInterval") is not None:
             if body.get("refillAmount") is not None and body.get("refillInterval") is None:
                 raise APIError(
-                    400, "REFILL_AMOUNT_AND_INTERVAL_REQUIRED",
+                    400,
+                    "REFILL_AMOUNT_AND_INTERVAL_REQUIRED",
                     API_KEY_ERROR_CODES["REFILL_AMOUNT_AND_INTERVAL_REQUIRED"],
                 )
             if body.get("refillInterval") is not None and body.get("refillAmount") is None:
                 raise APIError(
-                    400, "REFILL_INTERVAL_AND_AMOUNT_REQUIRED",
+                    400,
+                    "REFILL_INTERVAL_AND_AMOUNT_REQUIRED",
                     API_KEY_ERROR_CODES["REFILL_INTERVAL_AND_AMOUNT_REQUIRED"],
                 )
             new_values["refillAmount"] = body.get("refillAmount")
@@ -906,9 +941,7 @@ class ApiKeyPlugin(Plugin):
         offset = int(query["offset"]) if query.get("offset") else None
 
         if organization_id:
-            await self._check_org_permission(
-                ctx, session["user"]["id"], organization_id, "read"
-            )
+            await self._check_org_permission(ctx, session["user"]["id"], organization_id, "read")
         reference_id = organization_id or session["user"]["id"]
         expected_ref_type = "organization" if organization_id else "user"
 
@@ -962,12 +995,11 @@ class ApiKeyPlugin(Plugin):
     ) -> dict[str, Any]:
         from .organization import OrganizationPlugin, has_permission
 
-        org_plugin = next(
-            (p for p in ctx.auth.plugins if isinstance(p, OrganizationPlugin)), None
-        )
+        org_plugin = next((p for p in ctx.auth.plugins if isinstance(p, OrganizationPlugin)), None)
         if org_plugin is None:
             raise APIError(
-                500, "ORGANIZATION_PLUGIN_REQUIRED",
+                500,
+                "ORGANIZATION_PLUGIN_REQUIRED",
                 API_KEY_ERROR_CODES["ORGANIZATION_PLUGIN_REQUIRED"],
             )
         member = await ctx.adapter.find_one(
@@ -976,7 +1008,8 @@ class ApiKeyPlugin(Plugin):
         )
         if member is None:
             raise APIError(
-                403, "USER_NOT_MEMBER_OF_ORGANIZATION",
+                403,
+                "USER_NOT_MEMBER_OF_ORGANIZATION",
                 API_KEY_ERROR_CODES["USER_NOT_MEMBER_OF_ORGANIZATION"],
             )
 
@@ -993,7 +1026,8 @@ class ApiKeyPlugin(Plugin):
             ok = False
         if not ok:
             raise APIError(
-                403, "INSUFFICIENT_API_KEY_PERMISSIONS",
+                403,
+                "INSUFFICIENT_API_KEY_PERMISSIONS",
                 API_KEY_ERROR_CODES["INSUFFICIENT_API_KEY_PERMISSIONS"],
             )
         return member
@@ -1032,7 +1066,8 @@ class ApiKeyPlugin(Plugin):
 
         if not isinstance(key, str):
             raise APIError(
-                400, "INVALID_API_KEY_GETTER_RETURN_TYPE",
+                400,
+                "INVALID_API_KEY_GETTER_RETURN_TYPE",
                 API_KEY_ERROR_CODES["INVALID_API_KEY_GETTER_RETURN_TYPE"],
             )
         if len(key) < config.default_key_length:
@@ -1045,20 +1080,25 @@ class ApiKeyPlugin(Plugin):
                 raise APIError(403, "INVALID_API_KEY", API_KEY_ERROR_CODES["INVALID_API_KEY"])
 
         api_key, _opts = await self._validate_api_key(
-            ctx, key, lookup_opts=config, expected_config_id=config.config_id,
+            ctx,
+            key,
+            lookup_opts=config,
+            expected_config_id=config.config_id,
             run_custom_validator=False,
         )
         await _delete_all_expired(ctx)
 
         if (config.references or "user") != "user":
             raise APIError(
-                401, "INVALID_REFERENCE_ID_FROM_API_KEY",
+                401,
+                "INVALID_REFERENCE_ID_FROM_API_KEY",
                 API_KEY_ERROR_CODES["INVALID_REFERENCE_ID_FROM_API_KEY"],
             )
         user = await ctx.adapter.find_one("user", [Where("id", api_key["referenceId"])])
         if user is None:
             raise APIError(
-                401, "INVALID_REFERENCE_ID_FROM_API_KEY",
+                401,
+                "INVALID_REFERENCE_ID_FROM_API_KEY",
                 API_KEY_ERROR_CODES["INVALID_REFERENCE_ID_FROM_API_KEY"],
             )
 

@@ -346,9 +346,7 @@ async def test_delete_hooks_receive_endpoint_context():
     async with make_client(org_auth(organization_hooks=hooks)) as client:
         await sign_up(client)
         org = (await _create_org(client, slug="org-for-delete-ctx")).json()
-        res = await client.post(
-            "/api/auth/organization/delete", json={"organizationId": org["id"]}
-        )
+        res = await client.post("/api/auth/organization/delete", json={"organizationId": org["id"]})
         assert res.status_code == 200, res.text
         assert seen["before"] == {"has_ctx": True, "has_request": True}
         assert seen["after"] == {"has_ctx": True, "has_request": True}

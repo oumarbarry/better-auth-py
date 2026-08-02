@@ -287,9 +287,7 @@ async def fetch_discovery_document(
             "discovery_not_found", "Discovery endpoint not found", {"url": url, "status": status}
         )
     if status == 408:
-        raise DiscoveryError(
-            "discovery_timeout", "Discovery request timed out", {"url": url}
-        )
+        raise DiscoveryError("discovery_timeout", "Discovery request timed out", {"url": url})
     if status >= 400:
         raise DiscoveryError(
             "discovery_unexpected_error",
@@ -364,9 +362,7 @@ def normalize_discovery_urls(
     return doc
 
 
-def select_token_endpoint_auth_method(
-    doc: dict[str, Any], existing: str | None = None
-) -> str:
+def select_token_endpoint_auth_method(doc: dict[str, Any], existing: str | None = None) -> str:
     if existing:
         return existing
     supported = doc.get("token_endpoint_auth_methods_supported")

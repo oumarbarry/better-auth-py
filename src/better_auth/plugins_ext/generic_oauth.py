@@ -330,10 +330,7 @@ class GenericOAuthPlugin(Plugin):
         )
 
     def _default_error_url(self, ctx: Ctx) -> str:
-        return (
-            ctx.auth.on_api_error.error_url
-            or f"{ctx.auth.base_url}{ctx.auth.base_path}/error"
-        )
+        return ctx.auth.on_api_error.error_url or f"{ctx.auth.base_url}{ctx.auth.base_path}/error"
 
     async def _create_state(
         self,
@@ -427,9 +424,7 @@ class GenericOAuthPlugin(Plugin):
 
         body_scopes = body.get("scopes")
         scopes = (
-            [*body_scopes, *(config.scopes or [])]
-            if body_scopes
-            else list(config.scopes or [])
+            [*body_scopes, *(config.scopes or [])] if body_scopes else list(config.scopes or [])
         )
         url = build_authorization_url(
             authorization_endpoint=final_auth_url,
@@ -656,7 +651,7 @@ class GenericOAuthPlugin(Plugin):
         )
         map_user = map_user or {}
 
-        email = (map_user.get("email") or raw.get("email") or "")
+        email = map_user.get("email") or raw.get("email") or ""
         email = email.lower() if email else ""
         if not email:
             return _redirect_error(resolved_error_url, "email_is_missing")
@@ -701,9 +696,10 @@ class GenericOAuthPlugin(Plugin):
         """State-carried ``link`` branch (routes.ts): attach the provider account to the
         already signed-in user, updating tokens if already linked. No new session."""
         linking = ctx.auth.account.account_linking
-        if not linking.allow_different_emails and (link.get("email") or "").lower() != (
-            info.email or ""
-        ).lower():
+        if (
+            not linking.allow_different_emails
+            and (link.get("email") or "").lower() != (info.email or "").lower()
+        ):
             return _redirect_error(resolved_error_url, "email_doesn't_match")
 
         now = utcnow()
@@ -716,9 +712,7 @@ class GenericOAuthPlugin(Plugin):
                 return _redirect_error(
                     resolved_error_url, "account_already_linked_to_different_user"
                 )
-            update = {
-                k: v for k, v in _token_fields(ctx, tokens).items() if v is not None
-            }
+            update = {k: v for k, v in _token_fields(ctx, tokens).items() if v is not None}
             await ctx.internal.update(
                 "account", [Where("id", existing["id"])], {**update, "updatedAt": now}, ctx=ctx
             )

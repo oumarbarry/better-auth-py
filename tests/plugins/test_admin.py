@@ -646,8 +646,7 @@ async def test_impersonate_and_stop_round_trip():
 
         # admin_session cookie was set (signed)
         assert cookie_name(auth, "admin_session") in imp.headers.get("set-cookie", "") or any(
-            cookie_name(auth, "admin_session") in c
-            for c in imp.headers.get_list("set-cookie")
+            cookie_name(auth, "admin_session") in c for c in imp.headers.get_list("set-cookie")
         )
 
         # now acting as the target
@@ -670,9 +669,7 @@ async def test_impersonate_ip_disable_tracking_stores_empty():
     # impersonation-duration expiry create_session can't express), so it must call
     # get_request_ip itself to keep that behavior. A raw client_ip read would never
     # honor disable_ip_tracking; get_request_ip does.
-    auth = make_auth(
-        plugins=[AdminPlugin()], ip_address=IPAddressOptions(disable_ip_tracking=True)
-    )
+    auth = make_auth(plugins=[AdminPlugin()], ip_address=IPAddressOptions(disable_ip_tracking=True))
     async with make_client(auth) as client:
         await _become_admin(auth, client)
         target = await _seed_user(auth, email="bob@x.com")
@@ -929,11 +926,18 @@ async def test_list_sessions_hides_impersonated_sessions():
     async with make_client(auth) as client:
         user = await _become_admin(auth, client)
         # a normal session exists (from sign-up); add an impersonated one for the same user
-        await auth.internal.create("session", {
-            "id": "imp", "token": "imp-token", "userId": user["id"],
-            "impersonatedBy": "someone", "expiresAt": utcnow() + timedelta(hours=1),
-            "createdAt": utcnow(), "updatedAt": utcnow(),
-        })
+        await auth.internal.create(
+            "session",
+            {
+                "id": "imp",
+                "token": "imp-token",
+                "userId": user["id"],
+                "impersonatedBy": "someone",
+                "expiresAt": utcnow() + timedelta(hours=1),
+                "createdAt": utcnow(),
+                "updatedAt": utcnow(),
+            },
+        )
         r = await client.get("/api/auth/list-sessions")
         assert r.status_code == 200
         assert all(not s.get("impersonatedBy") for s in r.json())

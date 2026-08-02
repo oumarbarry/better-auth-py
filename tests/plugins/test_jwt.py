@@ -522,7 +522,10 @@ async def test_rfc_example_key_round_trips_through_the_plugin(alg, private_jwk, 
         token = await plugin.sign_jwt(payload={"sub": "rfc"})
         assert pyjwt.get_unverified_header(token)["kid"] == row["id"]
         key = PyJWKSet.from_dict(await fetch_jwks(client))[row["id"]]
-        assert pyjwt.decode(token, key.key, algorithms=[alg], audience=BASE, issuer=BASE)["sub"] == "rfc"  # noqa: E501
+        assert (
+            pyjwt.decode(token, key.key, algorithms=[alg], audience=BASE, issuer=BASE)["sub"]
+            == "rfc"
+        )
         assert (await plugin.verify_jwt(token))["sub"] == "rfc"
 
 

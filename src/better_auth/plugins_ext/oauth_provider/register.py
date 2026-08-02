@@ -330,9 +330,7 @@ def check_oauth_client(client: dict[str, Any], opts: Any, is_register: bool = Fa
                 raise OAuthError(400, "invalid_scope", f"cannot request scope {sc}")
 
     if is_register and client.get("require_pkce") is False:
-        raise OAuthError(
-            400, "invalid_client_metadata", "pkce is required for registered clients."
-        )
+        raise OAuthError(400, "invalid_client_metadata", "pkce is required for registered clients.")
 
 
 # --- unauthenticated DCR override (register.ts:15) -----------------------------------

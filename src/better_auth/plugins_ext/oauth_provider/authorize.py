@@ -312,7 +312,10 @@ async def authorize_endpoint(
         return handle_redirect(
             ctx,
             format_error_url(
-                query["redirect_uri"], "invalid_request", reason, query.get("state"),
+                query["redirect_uri"],
+                "invalid_request",
+                reason,
+                query.get("state"),
                 get_issuer(ctx, opts),
             ),
         )
@@ -367,7 +370,10 @@ async def authorize_endpoint(
     ):
         if prompt_none:
             return _redirect_prompt_none_error(
-                ctx, opts, query, "account_selection_required",
+                ctx,
+                opts,
+                query,
+                "account_selection_required",
                 "End-User account selection is required",
             )
         return _redirect_with_prompt_code(ctx, opts, query, "select_account")
@@ -414,8 +420,14 @@ async def authorize_endpoint(
     # 9. Consent.
     if client.get("skipConsent"):
         return await redirect_with_authorization_code(
-            ctx, opts, query=query, client_id=client["clientId"], user_id=session["user"]["id"],
-            session_id=session["session"]["id"], auth_time=auth_time, reference_id=reference_id,
+            ctx,
+            opts,
+            query=query,
+            client_id=client["clientId"],
+            user_id=session["user"]["id"],
+            session_id=session["session"]["id"],
+            auth_time=auth_time,
+            reference_id=reference_id,
         )
 
     consent = await _find_consent(ctx, client["clientId"], session["user"]["id"], reference_id)
@@ -429,8 +441,14 @@ async def authorize_endpoint(
         )
 
     return await redirect_with_authorization_code(
-        ctx, opts, query=query, client_id=client["clientId"], user_id=session["user"]["id"],
-        session_id=session["session"]["id"], auth_time=auth_time, reference_id=reference_id,
+        ctx,
+        opts,
+        query=query,
+        client_id=client["clientId"],
+        user_id=session["user"]["id"],
+        session_id=session["session"]["id"],
+        auth_time=auth_time,
+        reference_id=reference_id,
     )
 
 

@@ -335,8 +335,12 @@ async def test_update_password_updates_credential_account():
     ia = InternalAdapter(_adapter())
     user = _row(await ia.create_user({"name": "Ada", "email": "ada@x.com"}))
     await ia.create_account(
-        {"userId": user["id"], "accountId": user["id"], "providerId": "credential",
-         "password": "old-hash"}
+        {
+            "userId": user["id"],
+            "accountId": user["id"],
+            "providerId": "credential",
+            "password": "old-hash",
+        }
     )
     await ia.update_password(user["id"], "new-hash")
     account = await ia.adapter.find_one(
@@ -352,8 +356,12 @@ async def test_update_password_only_touches_credential_provider():
         {"userId": user["id"], "accountId": "g1", "providerId": "google", "accessToken": "t"}
     )
     await ia.create_account(
-        {"userId": user["id"], "accountId": user["id"], "providerId": "credential",
-         "password": "old-hash"}
+        {
+            "userId": user["id"],
+            "accountId": user["id"],
+            "providerId": "credential",
+            "password": "old-hash",
+        }
     )
     await ia.update_password(user["id"], "new-hash")
     google = await ia.adapter.find_one(

@@ -126,9 +126,7 @@ class AnonymousPlugin(Plugin):
         ]
 
     def hooks(self) -> HookSet:
-        return HookSet(
-            after=[PluginHook(_matches_link_or_verify_path, self._after_link_or_verify)]
-        )
+        return HookSet(after=[PluginHook(_matches_link_or_verify_path, self._after_link_or_verify)])
 
     # --- helpers ---------------------------------------------------------------------
 

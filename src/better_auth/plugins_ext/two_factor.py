@@ -361,9 +361,7 @@ class TwoFactorPlugin(Plugin):
 
     def rate_limit(self) -> list[RateLimitRule]:
         return [
-            RateLimitRule(
-                window=10, max=3, path_matcher=lambda p: p.startswith("/two-factor/")
-            )
+            RateLimitRule(window=10, max=3, path_matcher=lambda p: p.startswith("/two-factor/"))
         ]
 
     # --- password gate ----------------------------------------------------------------
@@ -973,9 +971,7 @@ class TwoFactorPlugin(Plugin):
 
         self._scrub_session_cookies(ctx.response)
         ctx.response.set_cookie(
-            build_cookie(
-                auth, sign_value(auth.secret, identifier), max_age, TWO_FACTOR_COOKIE_NAME
-            )
+            build_cookie(auth, sign_value(auth.secret, identifier), max_age, TWO_FACTOR_COOKIE_NAME)
         )
 
         methods: list[str] = []

@@ -66,9 +66,7 @@ async def _revoke_jwt_access_token(ctx: Ctx, opts: Any, token: str) -> None:
     return None
 
 
-async def _revoke_opaque_access_token(
-    ctx: Ctx, opts: Any, token: str, client_id: str
-) -> None:
+async def _revoke_opaque_access_token(ctx: Ctx, opts: Any, token: str, client_id: str) -> None:
     """Find and delete the opaque access-token row — TS ``revokeOpaqueAccessToken``."""
     value = token
     prefix = (getattr(opts, "prefix", None) or {}).get("opaqueAccessToken")
@@ -87,9 +85,7 @@ async def _revoke_opaque_access_token(
     if not access.get("clientId") or access["clientId"] != client_id:
         return None
 
-    where = (
-        [Where("id", access["id"])] if access.get("id") else [Where("token", access["token"])]
-    )
+    where = [Where("id", access["id"])] if access.get("id") else [Where("token", access["token"])]
     await ctx.adapter.delete("oauthAccessToken", where)
     return None
 
@@ -176,9 +172,7 @@ async def revoke_endpoint(ctx: Ctx, opts: Any) -> None:
         if token_type_hint in (None, "refresh_token"):
             try:
                 decoded = await decode_refresh_token(opts, token)
-                return await _revoke_refresh_token(
-                    ctx, opts, decoded["token"], client["clientId"]
-                )
+                return await _revoke_refresh_token(ctx, opts, decoded["token"], client["clientId"])
             except OAuthError:
                 if token_type_hint == "refresh_token":
                     raise

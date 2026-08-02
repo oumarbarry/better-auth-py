@@ -8,9 +8,7 @@ from conftest import make_auth
 
 
 def test_dict_form_constructs_provider():
-    auth = make_auth(
-        social_providers={"github": {"client_id": "cid", "client_secret": "csecret"}}
-    )
+    auth = make_auth(social_providers={"github": {"client_id": "cid", "client_secret": "csecret"}})
     provider = auth.social_providers["github"]
     assert isinstance(provider, GitHub)
     assert provider.client_id == "cid"

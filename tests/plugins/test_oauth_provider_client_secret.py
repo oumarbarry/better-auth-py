@@ -38,9 +38,7 @@ def test_encrypted_with_jwt_enabled_rejected():
 def test_custom_encrypt_object_with_jwt_enabled_rejected():
     # !disableJwtPlugin && {encrypt} -> throw
     with pytest.raises(ValueError, match="encryption method not recommended"):
-        OAuthProviderPlugin(
-            store_client_secret={"encrypt": lambda s: s, "decrypt": lambda s: s}
-        )
+        OAuthProviderPlugin(store_client_secret={"encrypt": lambda s: s, "decrypt": lambda s: s})
 
 
 def test_hashed_with_jwt_enabled_allowed():

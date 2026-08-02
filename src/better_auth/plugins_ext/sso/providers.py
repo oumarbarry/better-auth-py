@@ -48,9 +48,7 @@ async def is_org_admin(ctx: Ctx, user_id: str, organization_id: str) -> bool:
     return bool(member) and has_org_admin_role(member["role"])
 
 
-async def batch_check_org_admin(
-    ctx: Ctx, user_id: str, organization_ids: list[str]
-) -> set[str]:
+async def batch_check_org_admin(ctx: Ctx, user_id: str, organization_ids: list[str]) -> set[str]:
     if not organization_ids:
         return set()
     members = await ctx.adapter.find_many(
@@ -105,9 +103,7 @@ def sanitize_provider(provider: dict[str, Any], base_url: str) -> dict[str, Any]
 async def check_provider_access(
     plugin: SSOPlugin, ctx: Ctx, provider_id: str, user_id: str
 ) -> dict[str, Any]:
-    provider = await ctx.adapter.find_one(
-        plugin.model_name, [Where("providerId", provider_id)]
-    )
+    provider = await ctx.adapter.find_one(plugin.model_name, [Where("providerId", provider_id)])
     if provider is None:
         raise APIError(404, "NOT_FOUND", "Provider not found")
 
@@ -136,9 +132,7 @@ def _identity_value_changed(current: Any, updated: Any) -> bool:
     return _stable_stringify(current) != _stable_stringify(updated)
 
 
-def oidc_identity_boundary_changed(
-    current: dict[str, Any], updated: dict[str, Any]
-) -> bool:
+def oidc_identity_boundary_changed(current: dict[str, Any], updated: dict[str, Any]) -> bool:
     if any(
         _identity_value_changed(current.get(f), updated.get(f))
         for f in OIDC_IDENTITY_BOUNDARY_FIELDS

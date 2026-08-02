@@ -85,16 +85,12 @@ def test_skip_endpoints_public_allowed() -> None:
 
 def test_skip_endpoints_private_rejected() -> None:
     with pytest.raises(DiscoveryError) as exc:
-        validate_skip_discovery_endpoints(
-            {"tokenEndpoint": "http://127.0.0.1/token"}, trust_only()
-        )
+        validate_skip_discovery_endpoints({"tokenEndpoint": "http://127.0.0.1/token"}, trust_only())
     assert exc.value.code == "discovery_private_host"
 
 
 def test_skip_endpoints_private_allowlisted_via_trusted_origin() -> None:
-    validate_skip_discovery_endpoints(
-        {"tokenEndpoint": f"{IDP}/token"}, trust_only(IDP)
-    )
+    validate_skip_discovery_endpoints({"tokenEndpoint": f"{IDP}/token"}, trust_only(IDP))
 
 
 def test_skip_endpoints_non_http_scheme_rejected() -> None:
@@ -158,8 +154,7 @@ def test_validate_document_issuer_trailing_slash_normalized() -> None:
 
 def test_select_auth_existing_wins() -> None:
     assert (
-        select_token_endpoint_auth_method(full_doc(), "client_secret_post")
-        == "client_secret_post"
+        select_token_endpoint_auth_method(full_doc(), "client_secret_post") == "client_secret_post"
     )
 
 
@@ -244,9 +239,7 @@ async def test_fetch_empty_invalid_json() -> None:
 
 async def test_discover_full_happy_path() -> None:
     async with mock_http(httpx.Response(200, json=full_doc())) as http:
-        cfg = await discover_oidc_config(
-            issuer=IDP, is_trusted_origin=trust_only(IDP), http=http
-        )
+        cfg = await discover_oidc_config(issuer=IDP, is_trusted_origin=trust_only(IDP), http=http)
     assert cfg.token_endpoint == f"{IDP}/token"
     assert cfg.authorization_endpoint == f"{IDP}/authorize"
     assert cfg.jwks_endpoint == f"{IDP}/jwks"

@@ -201,9 +201,7 @@ async def _id_token_sign_in(
     if not provider.supports_id_token:
         raise APIError(404, "ID_TOKEN_NOT_SUPPORTED", "id_token sign-in not supported")
     token = id_token.get("token") or ""
-    claims = await call_verify_id_token(
-        provider, ctx.auth.http, token, id_token.get("nonce"), ctx
-    )
+    claims = await call_verify_id_token(provider, ctx.auth.http, token, id_token.get("nonce"), ctx)
     if claims is None:
         raise APIError(401, "INVALID_TOKEN", "Invalid id token")
     info = provider.user_info_from_id_token(claims)
@@ -274,9 +272,7 @@ async def handle_oauth_user_info(
     """
     now = utcnow()
     override = (
-        provider.override_user_info_on_sign_in
-        if override_user_info is None
-        else override_user_info
+        provider.override_user_info_on_sign_in if override_user_info is None else override_user_info
     )
     email = (info.email or "").lower()
     token_fields = _token_fields(ctx, tokens)
@@ -366,9 +362,12 @@ async def _maybe_promote_verified(
     ctx: Ctx, user: dict[str, Any] | None, info: OAuthUserInfo, email: str, now: Any
 ) -> dict[str, Any] | None:
     """Self-heal an unverified local row once the IdP proves the same email is verified."""
-    if user and info.email_verified and not user["emailVerified"] and email == (
-        user["email"] or ""
-    ).lower():
+    if (
+        user
+        and info.email_verified
+        and not user["emailVerified"]
+        and email == (user["email"] or "").lower()
+    ):
         await ctx.internal.update(
             "user", [Where("id", user["id"])], {"emailVerified": True, "updatedAt": now}, ctx=ctx
         )
@@ -605,9 +604,7 @@ async def _link_social_id_token(
     if not provider.supports_id_token:
         raise APIError(404, "ID_TOKEN_NOT_SUPPORTED", "id_token linking not supported")
     token = id_token.get("token") or ""
-    claims = await call_verify_id_token(
-        provider, ctx.auth.http, token, id_token.get("nonce"), ctx
-    )
+    claims = await call_verify_id_token(provider, ctx.auth.http, token, id_token.get("nonce"), ctx)
     if claims is None:
         raise APIError(401, "INVALID_TOKEN", "Invalid id token")
     info = provider.user_info_from_id_token(claims)
