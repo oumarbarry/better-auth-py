@@ -46,8 +46,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..access_control import ORG_DEFAULT_ROLES, AccessControl, Role
 from ..adapters.base import Where
 from ..cookie_cache import set_cookie_cache
-from ..crypto import generate_id
 from ..endpoints import validate_email
+from ..internal_adapter import _call_hook
 from ..plugins import Plugin, Route
 from ..schema import Field, Reference, Schema, filter_output_fields
 from ..session import cookie_name, refresh_session_cookie, utcnow
@@ -523,10 +523,20 @@ class OrganizationPlugin(Plugin):
             return result["data"]
         return None
 
-    async def _run_after_hook(self, name: str, payload: dict[str, Any]) -> None:
+    async def _run_after_hook(
+        self, name: str, payload: dict[str, Any], ctx: Ctx | None = None
+    ) -> None:
+        """Run a fire-only hook. When ``ctx`` is given the hook receives it as a second
+        positional argument if its signature accepts one (TS ``(data, ctx)``; the delete-org
+        hooks of 3bf0e4981), matching the databaseHook arity adaptation in
+        :func:`internal_adapter._call_hook`."""
         hook = self._hook(name)
-        if hook is not None:
+        if hook is None:
+            return
+        if ctx is None:
             await _maybe_await(hook(payload))
+        else:
+            await _call_hook(hook, payload, ctx)
 
     # --- plugin-local adapter (mirrors adapter.ts getOrgAdapter) -----------------------
     #
@@ -573,7 +583,9 @@ class OrganizationPlugin(Plugin):
         return result
 
     async def _create_member(self, ctx: Ctx, data: dict[str, Any]) -> dict[str, Any]:
-        row = {"id": generate_id(), **data, "createdAt": utcnow()}
+        # No explicit ``id`` — the adapter applies ``advanced.database.generateId``
+        # (TS adapter.ts:323-338 createMember takes ``Omit<MemberInput, "id">``).
+        row = {**data, "createdAt": utcnow()}
         member = await ctx.adapter.create("member", row)
         return filter_output_fields(member, self.schema["member"])
 
@@ -606,10 +618,11 @@ class OrganizationPlugin(Plugin):
         )
 
     async def _users_by_ids(self, ctx: Ctx, user_ids: list[str]) -> dict[str, dict[str, Any]]:
-        # Per-id ``eq`` lookups instead of one ``in`` query: the MemoryAdapter ``in``
-        # operator lowercases the row value but not the query values, so it never matches
-        # mixed-case generated ids (memory.py:28) — see the BLOCKED note in the report.
-        # ``eq`` is case-correct. Bounded by membershipLimit, so O(n) reads are fine.
+        # ponytail: per-id ``eq`` lookups instead of TS's single ``in`` query (adapter.ts:222).
+        # Unbounded by construction, so the ``default_find_many_limit`` cap that TS bae71988a
+        # had to work around with ``limit: members.length`` cannot bite here. Ceiling: N round
+        # trips per listMembers (bounded by membershipLimit) — swap to one
+        # ``find_many(..., "in", limit=len(user_ids))`` if that ever shows up in a profile.
         result: dict[str, dict[str, Any]] = {}
         for uid in user_ids:
             if uid in result:
@@ -742,10 +755,10 @@ class OrganizationPlugin(Plugin):
     def _require_verified_email_for_invitation(self) -> bool:
         """TS ``shouldRequireVerifiedEmailForInvitationIdAction`` for accept/reject/get.
 
-        When the option is set, honour it. Otherwise the port always mints opaque random
-        invitation ids (:func:`crypto.generate_id`), so TS's built-in-opaque-id branch is
-        always taken → no verification required. Set the option to ``True`` to gate by-id
-        actions when ids may leak (e.g. exposed invitation lists).
+        When the option is set, honour it. Otherwise the port lets the adapter mint the
+        invitation id (``generate_id`` / uuid4), so TS's built-in-opaque-id branch is always
+        taken → no verification required. Set the option to ``True`` to gate by-id actions
+        when ids may leak (e.g. a custom ``generate_id`` returning guessable ids).
         """
         if self.require_email_verification_on_invitation is not None:
             return self.require_email_verification_on_invitation
@@ -796,8 +809,10 @@ class OrganizationPlugin(Plugin):
     async def _create_invitation(
         self, ctx: Ctx, invitation: dict[str, Any], user: dict[str, Any]
     ) -> dict[str, Any]:
+        # No explicit ``id``: the adapter's transform layer applies ``advanced.database.
+        # generateId`` like it does for every other model (TS adapter.ts:1042-1049,
+        # f59a0ee78). A caller-provided id (before_create_invitation) still wins below.
         row = {
-            "id": generate_id(),
             "status": "pending",
             "expiresAt": self._expiry(self.invitation_expires_in),
             "createdAt": utcnow(),
@@ -1040,11 +1055,11 @@ class OrganizationPlugin(Plugin):
         if org is None:
             raise APIError(400, "BAD_REQUEST", "Organization not found")
         await self._run_after_hook(
-            "before_delete_organization", {"organization": org, "user": session["user"]}
+            "before_delete_organization", {"organization": org, "user": session["user"]}, ctx
         )
         await self._delete_org(ctx, org_id)
         await self._run_after_hook(
-            "after_delete_organization", {"organization": org, "user": session["user"]}
+            "after_delete_organization", {"organization": org, "user": session["user"]}, ctx
         )
         return AuthResponse(body=org)
 
@@ -1764,7 +1779,9 @@ class OrganizationPlugin(Plugin):
         return filter_output_fields(tm, self.schema["teamMember"])
 
     async def _create_team(self, ctx: Ctx, data: dict[str, Any]) -> dict[str, Any]:
-        team = await ctx.adapter.create("team", {"id": generate_id(), **data})
+        # adapter-generated id; a hook-supplied ``data["id"]`` still wins, matching TS
+        # ``forceAllowId: true`` (adapter.ts:658-665).
+        team = await ctx.adapter.create("team", dict(data))
         return self._filter_team(team)
 
     async def _find_team_by_id(
@@ -1814,7 +1831,8 @@ class OrganizationPlugin(Plugin):
     async def _create_team_member_row(self, ctx: Ctx, team_id: str, user_id: str) -> dict[str, Any]:
         tm = await ctx.adapter.create(
             "teamMember",
-            {"id": generate_id(), "teamId": team_id, "userId": user_id, "createdAt": utcnow()},
+            # adapter-generated id (TS adapter.ts:917-925 takes ``Omit<TeamMember, "id">``)
+            {"teamId": team_id, "userId": user_id, "createdAt": utcnow()},
         )
         return self._filter_team_member(tm)
 

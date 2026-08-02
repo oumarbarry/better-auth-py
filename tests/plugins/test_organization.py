@@ -7,15 +7,18 @@ error-codes.ts). Invitations, teams, and dynamic access control are later phases
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 from typing import Any
 
+from better_auth import MemoryAdapter
 from better_auth.access_control import (
     ORG_DEFAULT_ROLES,
     ORG_DEFAULT_STATEMENTS,
     create_access_control,
 )
 from better_auth.adapters.base import Where
+from better_auth.config import AdvancedDatabase
 from better_auth.crypto import generate_id
 from better_auth.plugins_ext.organization import ERROR_CODES, OrganizationPlugin
 from better_auth.schema import Field
@@ -323,6 +326,34 @@ async def test_delete_hooks_fire():
         assert calls == ["before", "after"]
 
 
+async def test_delete_hooks_receive_endpoint_context():
+    """TS 3bf0e4981 (crud-org.ts:607-624) passes ``ctx`` as the hooks' second argument."""
+    seen: dict[str, dict[str, bool]] = {}
+
+    def _record(name: str, ctx: Any) -> None:
+        seen[name] = {
+            "has_ctx": ctx is not None,
+            "has_request": getattr(ctx, "request", None) is not None,
+        }
+
+    async def before(data, ctx=None):
+        _record("before", ctx)
+
+    async def after(data, ctx=None):
+        _record("after", ctx)
+
+    hooks = {"before_delete_organization": before, "after_delete_organization": after}
+    async with make_client(org_auth(organization_hooks=hooks)) as client:
+        await sign_up(client)
+        org = (await _create_org(client, slug="org-for-delete-ctx")).json()
+        res = await client.post(
+            "/api/auth/organization/delete", json={"organizationId": org["id"]}
+        )
+        assert res.status_code == 200, res.text
+        assert seen["before"] == {"has_ctx": True, "has_request": True}
+        assert seen["after"] == {"has_ctx": True, "has_request": True}
+
+
 # --- get-full-organization --------------------------------------------------------
 
 
@@ -522,6 +553,37 @@ async def test_list_members_pagination_and_total():
         assert limited.json()["total"] == 5
         offset = await client.get("/api/auth/organization/list-members", params={"offset": 3})
         assert len(offset.json()["members"]) == 2
+
+
+async def test_list_members_above_adapter_default_limit_returns_every_user():
+    """membershipLimit above the adapter's default find_many cap still joins every user.
+
+    TS bae71988a (adapter.ts:222-234) bounds the user fetch by ``members.length``; the port
+    resolves users with per-id ``find_one`` (``_users_by_ids``), which is unbounded by
+    construction. Regression guard: the join must not be capped at
+    ``default_find_many_limit`` (100). Mirrors crud-members.test.ts "listMembers with >100
+    members".
+    """
+    auth = org_auth(membership_limit=500)
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        for i in range(110):  # owner + 110 = 111 > the 100 default find_many limit
+            u = await auth.adapter.create(
+                "user", {"email": f"large-org-{i}@test.com", "name": f"large-org-{i}"}
+            )
+            await _seed_member(auth, org["id"], u["id"], "member")
+        res = await client.get(
+            "/api/auth/organization/list-members", params={"organizationId": org["id"]}
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["total"] == 111
+        assert len(body["members"]) == 111
+        assert all(
+            isinstance(m["user"]["id"], str) and isinstance(m["user"]["email"], str)
+            for m in body["members"]
+        )
 
 
 # --- remove-member ----------------------------------------------------------------
@@ -926,6 +988,84 @@ async def test_invite_member_already_member_rejected():
         res = await _invite(owner_c, "already@x.com")
         assert res.status_code == 400
         assert res.json()["code"] == "USER_IS_ALREADY_A_MEMBER_OF_THIS_ORGANIZATION"
+
+
+async def test_invite_member_id_is_generated_by_the_adapter():
+    """TS f59a0ee78 (adapter.ts:1042-1049) drops the app-generated invitation id.
+
+    With ``generate_id="uuid"`` the invitation row must get a UUID like every other model,
+    instead of the plugin's own opaque id.
+    """
+    auth = make_auth(
+        adapter=MemoryAdapter(AdvancedDatabase(generate_id="uuid")),
+        plugins=[OrganizationPlugin()],
+    )
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        invitation = (await _invite(client, "bob@example.com")).json()
+        assert uuid.UUID(invitation["id"]).version == 4
+
+
+async def test_invite_member_honors_caller_provided_id():
+    """A ``before_create_invitation`` id override still wins (TS changeset)."""
+    hooks = {
+        "before_create_invitation": lambda d: {"data": {"id": "caller-supplied-invitation-id"}}
+    }
+    auth = org_auth(organization_hooks=hooks)
+    async with make_client(auth) as client:
+        await _owner_with_org(auth, client)
+        invitation = (await _invite(client, "bob@example.com")).json()
+        assert invitation["id"] == "caller-supplied-invitation-id"
+
+
+def _uuid4(value: Any) -> bool:
+    try:
+        return uuid.UUID(str(value)).version == 4
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+async def test_create_row_ids_are_generated_by_the_adapter():
+    """Every org model defers ``id`` to the adapter, like TS adapter.ts (f59a0ee78).
+
+    TS passes no explicit id on create for organization (:86-105, ``forceAllowId``),
+    member (:323-338, ``Omit<MemberInput, "id">``), team (:658-665, ``forceAllowId``) or
+    teamMember (:917-925, ``Omit<TeamMember, "id">``). With ``generate_id="uuid"`` every
+    row must therefore carry a UUID.
+    """
+    auth = make_auth(
+        adapter=MemoryAdapter(AdvancedDatabase(generate_id="uuid")),
+        plugins=[OrganizationPlugin(teams={"enabled": True})],
+    )
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()  # also makes the owner member + default team
+        member = (await auth.adapter.find_many("member", [Where("organizationId", org["id"])]))[0]
+        team = (await auth.adapter.find_many("team", [Where("organizationId", org["id"])]))[0]
+        team_member = (await auth.adapter.find_many("teamMember", [Where("teamId", team["id"])]))[0]
+        # one dict so a failure names every offending model at once
+        assert {
+            "organization": _uuid4(org["id"]),
+            "member": _uuid4(member["id"]),
+            "team": _uuid4(team["id"]),
+            "teamMember": _uuid4(team_member["id"]),
+        } == {"organization": True, "member": True, "team": True, "teamMember": True}
+
+
+async def test_create_honors_hook_supplied_organization_and_team_ids():
+    """TS keeps ``forceAllowId: true`` on organization/team create, so a
+    ``before_create_*`` hook id still wins (adapter.ts:104, :663)."""
+    hooks = {
+        "before_create_organization": lambda d: {"data": {"id": "hook-org-id"}},
+        "before_create_team": lambda d: {"data": {"id": "hook-team-id"}},
+    }
+    auth = org_auth(teams={"enabled": True}, organization_hooks=hooks)
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        assert org["id"] == "hook-org-id"
+        team = (await auth.adapter.find_many("team", [Where("organizationId", org["id"])]))[0]
+        assert team["id"] == "hook-team-id"
 
 
 async def test_invite_member_duplicate_pending_rejected():
