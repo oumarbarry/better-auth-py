@@ -134,6 +134,27 @@ Plan: docs/superpowers/plans/2026-08-02-docs-site-and-skill.md.
       run-through of the skill on a blank FastAPI project, commits.
 User deploys the site on Vercel (root=docs-site) après merge.
 
+## Next-steps wave (opened 2026-08-02, user picked: QW bundle + scout +
+## Litestar→Flask→Django; docs-2 + better-auth-client queued after)
+
+- [ ] QW quick-wins → v0.2.2 (Opus, owns endpoints/session/organization/
+      origin/email_otp + tests): POST /get-session wire parity,
+      _users_by_ids single find_many, public validate_form_csrf alias.
+      Release v0.2.2 after (also ships the __version__ metadata fix).
+      DISPATCHED.
+- [ ] SCOUT v1.7.0-rc.2 (Sonnet, worktree, read-only): classify all 81
+      commits, work-packages, breaking wire/storage changes, removals.
+      Report → docs/plans/gap/11-v1.7.0-scout.md. DISPATCHED.
+- [ ] LITESTAR integration (Opus, owns integrations/litestar.py +
+      test + pyproject/uv.lock [litestar] extra): mirror of the FastAPI
+      surface. Then Flask, then Django (user order). DISPATCHED.
+- [ ] Queued: docs iteration 2 (per-plugin/provider pages), and
+      better-auth-client (PyPI name free — needs its own brainstorm:
+      API surface + repo question before any code).
+- Vercel deploy: was serving raw markdown (build not running) — fixed by
+  explicit docs-site/vercel.json ee3c5ea; user re-checks Root Directory.
+- npx skills add oumarbarry/better-auth-py: CONFIRMED working (user).
+
 ## Backlog burn-down (started 2026-07-24 on user "continue")
 
 - [x] B1 APIError details wire parity: DONE, validated (Fable pinned TS
