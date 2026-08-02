@@ -145,9 +145,21 @@ User deploys the site on Vercel (root=docs-site) après merge.
       → v0.3.0 MINOR (own release even if same-day — semver, and ~=0.2
       pins get fixes without new features); Flask/Django each minor.
       DISPATCHED.
-- [ ] SCOUT v1.7.0-rc.2 (Sonnet, worktree, read-only): classify all 81
-      commits, work-packages, breaking wire/storage changes, removals.
-      Report → docs/plans/gap/11-v1.7.0-scout.md. DISPATCHED.
+- [x] SCOUT v1.7.0-rc.2: DONE, report committed as
+      docs/plans/gap/11-v1.7.0-scout.md. TRUE CORPUS = 169 non-merge
+      commits (Fable's 81 was a stale path-filtered count), 968 files,
+      +108k/-39k. ~86 IN across 7 work-packages; WP0 = issuer-scoped
+      accounts (accountId→providerAccountId + required issuer column,
+      the storage migration everything else sits on) MUST go first.
+      Campaign-critical flags: (a) TS 1.7 flips trustedProxyHeaders
+      default to FALSE on dynamic baseURL — conflicts with shipped B10
+      default True, decide flip-vs-documented-deviation at campaign
+      time; (b) cimd plugin needs an IN/OUT ruling; (c) WP4 atomics
+      may be mostly done already (port's guarded increment_one predates
+      TS's hardening) — verify before budgeting XL; (d) granted-scopes
+      feature added then REVERTED within the range — net zero, don't
+      plan against it. oidc-provider removal upstream = ruling
+      vindicated, nothing to delete.
 - [x] LITESTAR: DONE, validated, committed (scoped gate re-run by Fable;
       13 tests, ruff/format/ty clean on its files; full-suite green at
       agent time — final full gate rides the v0.3.0 release). 102 lines
