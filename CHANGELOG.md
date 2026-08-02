@@ -7,6 +7,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-02
+
+### Added
+
+- **Flask integration**: `BetterAuthFlask` mirrors the FastAPI/Litestar
+  surface for WSGI apps — mountable blueprint, sync `session()`/
+  `require_session()` helpers, repeated `Set-Cookie` preserved. The
+  sync→async bridge is a dedicated event loop in a daemon thread
+  (stdlib only), so loop-bound resources (async SQLAlchemy pools, the
+  cached HTTP client) behave exactly as under ASGI. New `[flask]`
+  extra (flask ≥ 3.0).
+
 ## [0.3.0] - 2026-08-02
 
 ### Added
@@ -146,7 +158,8 @@ unscoped project).
 - Wire and storage compatibility with better-auth (TypeScript): same routes, JSON shapes, error codes, database schema, scrypt password format and session cookie scheme.
 - Security defaults: CSRF origin checks, open-redirect protection on callback URLs, timing-equalized sign-in, rate limiting with better-auth's per-path rules.
 
-[Unreleased]: https://github.com/oumarbarry/better-auth-py/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/oumarbarry/better-auth-py/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oumarbarry/better-auth-py/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.1.0...v0.2.0
