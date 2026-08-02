@@ -150,6 +150,7 @@ async def get_session(
     request: AuthRequest,
     disable_cache: bool = False,
     disable_refresh: bool = False,
+    is_post_request: bool = False,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Validate the request's session.
 
@@ -160,6 +161,12 @@ async def get_session(
     When ``session.cookieCache`` is enabled and a valid ``session_data`` cookie is
     present, the cached ``{session, user}`` is returned without a DB read (unless
     ``disable_cache``). On a real DB read the cache is refreshed.
+
+    ``session.deferSessionRefresh`` moves every write to POST /get-session: unless
+    ``is_post_request``, no row is refreshed or deleted and the result carries
+    ``needsRefresh`` (session.ts:385-389, 437-455). Only that POST handler passes
+    ``is_post_request=True`` — TS pins ``method: "GET"`` for every other session read
+    (getSessionFromCtx, session.ts:563).
     """
     if not disable_cache:
         from .cookie_cache import get_cookie_cache
@@ -176,19 +183,25 @@ async def get_session(
         return None, [clear_cookie(auth)]
 
     now = utcnow()
+    options = auth.session_options
+    # writes are deferred to POST /get-session (session.ts:80, 387)
+    defer = options.defer_session_refresh and not is_post_request
     if session["expiresAt"] <= now:
-        await auth.internal.delete_many("session", [Where("token", token)])
+        if not defer:
+            await auth.internal.delete_many("session", [Where("token", token)])
         return None, [clear_cookie(auth), clear_cookie(auth, "dont_remember")]
 
     cookies: list[str] = []
-    options = auth.session_options
     dont_remember = cookie_name(auth, "dont_remember") in request.cookies()
     due_at = (
         session["expiresAt"]
         - timedelta(seconds=options.expires_in)
         + timedelta(seconds=options.update_age)
     )
-    if due_at <= now and not dont_remember and not disable_refresh:
+    # TS folds `session.disableSessionRefresh` into the query flag for this decision only
+    # (session.ts:429-435); the flag then gates both the write and `needsRefresh`.
+    needs_refresh = due_at <= now and not (disable_refresh or options.disable_session_refresh)
+    if needs_refresh and not dont_remember and not defer:
         session = (
             await auth.internal.update(
                 "session",
@@ -210,4 +223,9 @@ async def get_session(
         if cache_cookie is not None:
             cookies.append(cache_cookie)
 
-    return {"session": session, "user": user}, cookies
+    result = {"session": session, "user": user}
+    if defer and not dont_remember and not disable_refresh:
+        # TS returns early — without the flag — when the *request* opted out of refreshing
+        # (session.ts:397-410, query-only), so `needsRefresh` only exists on the deferred read.
+        result["needsRefresh"] = needs_refresh
+    return result, cookies

@@ -75,6 +75,13 @@ class SessionOptions:
     #: a session is "fresh" when its `createdAt` is within this many seconds; gates
     #: fresh-only routes (/list-sessions, /unlink-account, /delete-user). 0 = always fresh.
     fresh_age: int = 1 * DAY
+    #: ``session.disableSessionRefresh`` — never slide `expiresAt` forward, regardless of
+    #: `update_age` (init-options.ts:909-915)
+    disable_session_refresh: bool = False
+    #: ``session.deferSessionRefresh`` — defer every session write to POST /get-session
+    #: (init-options.ts:918-923, for read-replica setups). Reads then carry ``needsRefresh``
+    #: and touch nothing; POST /get-session does the refresh and the expired-row cleanup.
+    defer_session_refresh: bool = False
     #: signed short-TTL {session, user} cookie cache (mirrors better-auth session.cookieCache)
     cookie_cache: CookieCache = field(default_factory=CookieCache)
     #: extra columns merged into the `session` schema and emitted by parse_session_output

@@ -226,18 +226,22 @@ def _query_flag(ctx: Ctx, name: str) -> bool:
     return value is not None and value not in ("false", "0")
 
 
-async def get_session_handler(ctx: Ctx) -> AuthResponse:
+async def get_session_handler(ctx: Ctx, is_post_request: bool = False) -> AuthResponse:
     result, cookies = await get_session(
         ctx.auth,
         ctx.request,
         disable_cache=_query_flag(ctx, "disableCookieCache"),
         disable_refresh=_query_flag(ctx, "disableRefresh"),
+        is_post_request=is_post_request,
     )
     if result is not None:
-        result = {
+        body = {
             "session": ctx.auth.parse_session_output(result["session"]),
             "user": ctx.auth.parse_user_output(result["user"]),
         }
+        if "needsRefresh" in result:  # deferSessionRefresh read (session.ts:446-452)
+            body["needsRefresh"] = result["needsRefresh"]
+        result = body
     response = AuthResponse(
         body=result,
         headers=[("cache-control", "no-store"), ("pragma", "no-cache")],
@@ -248,7 +252,18 @@ async def get_session_handler(ctx: Ctx) -> AuthResponse:
 
 
 async def get_session_post(ctx: Ctx) -> AuthResponse:
-    raise APIError(405, "METHOD_NOT_ALLOWED", "Method not allowed")
+    """``/get-session`` is ``method: ["GET","POST"]`` (session.ts:36), but POST is only a
+    session read when ``session.deferSessionRefresh`` is enabled — otherwise the handler
+    throws (session.ts:82-86) with TS's verbatim code/message (core error/codes.ts:66-67).
+    With the option on, POST is the write half: it performs the refresh and the expired-row
+    cleanup that the deferred GET skipped."""
+    if not ctx.auth.session_options.defer_session_refresh:
+        raise APIError(
+            405,
+            "METHOD_NOT_ALLOWED_DEFER_SESSION_REQUIRED",
+            "POST method requires deferSessionRefresh to be enabled in session config",
+        )
+    return await get_session_handler(ctx, is_post_request=True)
 
 
 async def sign_out(ctx: Ctx) -> AuthResponse:
