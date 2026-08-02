@@ -61,12 +61,13 @@ dataclass, no clone).
       files in TS); 46d2bf02c get-session no-cache Cache-Control;
       03dc5a046 user.modelName collision resolution in references/adapter;
       + the two VERIFY-ANALOG items above. DISPATCHED.
-- [ ] C4 sso investigation (Sonnet, owns plugins_ext/sso/ + tests):
-      c020a9d6a "idp-initiated SAML redirect in split-origin deployments"
-      touches shared routes/sso.ts (+67), types.ts (+12), utils.ts (+5) —
-      NOT saml-only. Mandate: read the diff, decide per hunk whether any
-      changed behavior lives on OIDC paths the port covers; port those,
-      report SAML-only hunks as out-of-scope. DISPATCHED.
+- [x] C4 sso investigation: CLOSED, validated — NO PORT NEEDED. Agent
+      classified all 17 hunks of c020a9d6a: every one is SAML-only (new
+      idpInitiatedCallbackUrl under samlConfig/saml options, ACS/SLO/
+      RelayState redirect pipeline, isSafeSAMLRedirectPath). Fable
+      counter-checked: zero OIDC-path additions in shared files; the
+      touched routes/sso.ts hunks all sit in SAML branches. sso suite
+      170 green on unmodified tree.
 
 Done-condition per item: TS-anchored tests, scoped gate green, ruff/ty
 clean incl. tests; Fable validates vs the TS commit diff and commits.
