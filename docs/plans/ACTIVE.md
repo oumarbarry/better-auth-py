@@ -137,14 +137,22 @@ User deploys the site on Vercel (root=docs-site) après merge.
 ## Next-steps wave (opened 2026-08-02, user picked: QW bundle + scout +
 ## Litestar→Flask→Django; docs-2 + better-auth-client queued after)
 
-- [ ] QW quick-wins → v0.2.2 (Opus, owns endpoints/session/organization/
-      origin/email_otp + tests): POST /get-session wire parity,
-      _users_by_ids single find_many, public validate_form_csrf alias.
-      DISPATCHED. Versioning policy (user check, 2026-08-02): QW alone
-      → v0.2.2 PATCH (ships the pending __version__ fix too); Litestar
-      → v0.3.0 MINOR (own release even if same-day — semver, and ~=0.2
-      pins get fixes without new features); Flask/Django each minor.
-      DISPATCHED.
+- [x] QW: DONE, validated, committed (fix + feat split). Grew beyond
+      quick-wins: agent refuted Fable's POST /get-session premise (TS
+      405s too, sans deferSessionRefresh) → ported the exact 405, then
+      TWO extensions landed defer_session_refresh AND
+      disable_session_refresh end-to-end (session-api.test.ts:1835-2107
+      mirrored in full, red-green discrimination verified both times).
+      _users_by_ids single-query + adapter-spy test; validate_form_csrf
+      public seam. Backlog noted: APIError has no header channel (TS
+      sets no-store before throwing the 405).
+      VERSIONING CORRECTION: the 0.2.2-patch plan died when Litestar
+      merged to main first, and defer/disable options are features
+      anyway → single v0.3.0 MINOR released instead. Lesson recorded:
+      release the patch BEFORE merging the feature.
+      RELEASED 2026-08-02: v0.3.0 on PyPI (gate 2031/clean/clean incl.
+      format, trusted publishing green, GitHub release, install+import
+      smoke-tested with [litestar] extra).
 - [x] SCOUT v1.7.0-rc.2: DONE, report committed as
       docs/plans/gap/11-v1.7.0-scout.md. TRUE CORPUS = 169 non-merge
       commits (Fable's 81 was a stale path-filtered count), 968 files,
