@@ -49,12 +49,19 @@ dataclass, no clone).
       tests): bae71988a membershipLimit applied to listMembers user fetch;
       f59a0ee78 invitation ids DB-generated (stop passing explicit id);
       3bf0e4981 endpoint ctx passed to org delete hooks. DISPATCHED.
-- [ ] C2 plugin fixes trio (Opus, owns plugins_ext/{one_tap,magic_link,
-      email_otp,last_login_method}.py + tests): 5124c3487 one-tap enforces
-      google-provider signup restrictions; 086ca91f5 SECURITY force-
-      validate Origin on cookieless magic-link/email-otp send endpoints;
-      f23ce5012 last-login-method beforeStoreCookie option (GDPR).
-      DISPATCHED.
+- [x] C2 plugin fixes trio: DONE, validated, committed 33e3069 (149 scoped
+      tests green re-run by Fable; hunks checked vs TS anchors). SECURITY:
+      email-otp send was origin-bypassable cookieless (RED-proven, OTP
+      mailed cross-origin) — now _validate_form_csrf first, == TS
+      routes.ts:101 middleware. magic-link needed NO change (port's
+      /sign-in prefix rule already covers it — 3 regression tests prove
+      it on unmodified source). one-tap reads registered google
+      provider's disable_sign_up (index.ts:182; disableImplicitSignUp
+      deliberately NOT consulted — matches TS diff). last-login-method
+      before_store_cookie ported with TS error-log semantics; cookie-gate
+      placement deviation noted (port writes DB+cookie in one _after).
+      Note for later: email_otp imports origin._validate_form_csrf
+      (module-private) — public alias in origin.py is a 1-liner if wanted.
 - [ ] C3 core + providers (Opus, owns oauth/providers*, session.py,
       endpoints.py, schema.py, adapters/ + tests): 0ffd1fb28 Apple sends
       PKCE challenge; c4d1ddaa9 ctx param on verifyIdToken (12 provider
