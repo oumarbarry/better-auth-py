@@ -13,12 +13,26 @@ if TYPE_CHECKING:
 
 
 class APIError(Exception):
-    """Error surfaced to the client as ``{"message": ..., "code": ...}`` with `status`."""
+    """Error surfaced to the client as ``{"message": ..., "code": ...}`` with `status`.
 
-    def __init__(self, status: int, code: str, message: str | None = None):
+    ``extra`` mirrors TS's APIError, which carries an arbitrary body object
+    (better-call's ``error.body``) serialized verbatim — some endpoints add extra
+    top-level fields (organization's ``missingPermissions``, api-key's
+    ``details: {tryAgainIn}``). Merged into the rendered JSON body by
+    ``BetterAuth._on_api_error``; ``code``/``message`` always win over ``extra``.
+    """
+
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ):
         self.status = status
         self.code = code
         self.message = message or code.replace("_", " ").capitalize()
+        self.extra = extra
         super().__init__(self.message)
 
 
@@ -85,6 +99,12 @@ class Ctx:
     auth: BetterAuth
     request: AuthRequest
     params: dict[str, str] = field(default_factory=dict)
+    #: the outgoing response during after-hooks (None before the handler runs)
+    response: Any = None
+    #: ``{"session": ..., "user": ...}`` set when this request created a session (any
+    #: path: email sign-in/up, oauth callback, verify-email auto-sign-in). After-hooks
+    #: read it to react to a fresh login — mirrors TS ``ctx.context.newSession``.
+    new_session: dict[str, Any] | None = None
     _body: dict[str, Any] | None = None
     _session: Any = None
     _session_loaded: bool = False
@@ -92,6 +112,11 @@ class Ctx:
     @property
     def adapter(self):
         return self.auth.adapter
+
+    @property
+    def internal(self):
+        """The InternalAdapter seam — core writes route through it so databaseHooks fire."""
+        return self.auth.internal
 
     def body(self) -> dict[str, Any]:
         if self._body is None:

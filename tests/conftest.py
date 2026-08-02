@@ -38,7 +38,14 @@ def make_app(auth: BetterAuth) -> FastAPI:
 
 
 def make_client(auth: BetterAuth) -> AsyncClient:
-    return AsyncClient(transport=ASGITransport(app=make_app(auth)), base_url="http://testserver")
+    # Real browsers always send an Origin header on cross-state POSTs; the origin/CSRF
+    # check requires it (MISSING_OR_NULL_ORIGIN when cookies are present). Default it to
+    # the base URL so authenticated requests pass; per-request headers still override it.
+    return AsyncClient(
+        transport=ASGITransport(app=make_app(auth)),
+        base_url="http://testserver",
+        headers={"origin": "http://testserver"},
+    )
 
 
 @pytest.fixture

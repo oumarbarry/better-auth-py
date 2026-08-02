@@ -138,8 +138,20 @@ async def test_unverified_email_does_not_link_existing_account():
 
 
 async def test_verified_email_links_to_existing_user():
+    # Spec-driven change (link-account.ts): `requireLocalEmailVerified` defaults True, so a
+    # verified IdP email won't auto-link into a local row whose own email was never verified
+    # (account-preemption guard). The credential user here is unverified, so linking is only
+    # allowed with the option off — see test_require_local_email_verified_blocks_link for the
+    # default-on gate.
+    from better_auth import AccountLinking, AccountOptions
+
     linked = [{"email": SIGNUP["email"], "primary": True, "verified": True}]
-    auth = oauth_auth(http_client=github_http(emails=linked))
+    auth = oauth_auth(
+        http_client=github_http(emails=linked),
+        account=AccountOptions(
+            account_linking=AccountLinking(require_local_email_verified=False)
+        ),
+    )
     async with make_client(auth) as client:
         await sign_up(client)
         client.cookies.clear()

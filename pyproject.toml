@@ -1,6 +1,6 @@
 [project]
 name = "better-auth-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "Framework-agnostic authentication for Python, ported from better-auth, with a FastAPI integration."
 readme = "README.md"
 authors = [
@@ -24,7 +24,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "cryptography>=49.0.0",
     "httpx>=0.27",
+    "pycryptodome>=3.23.0",
+    "pyjwt>=2.13.0",
+    "pynacl>=1.6.2",
 ]
 
 [project.urls]
@@ -36,6 +40,8 @@ Changelog = "https://github.com/oumarbarry/better-auth-py/blob/main/CHANGELOG.md
 [project.optional-dependencies]
 fastapi = ["fastapi>=0.110"]
 sqlalchemy = ["sqlalchemy[asyncio]>=2.0"]
+passkey = ["webauthn>=2.7"]
+sso = ["dnspython>=2.7"]
 
 [dependency-groups]
 dev = [
@@ -48,6 +54,8 @@ dev = [
     "uvicorn>=0.30",
     "ty>=0.0.57",
     "pre-commit>=4.6.0",
+    "webauthn>=2.7",
+    "dnspython>=2.7",
 ]
 
 [build-system]
