@@ -42,6 +42,7 @@ fastapi = ["fastapi>=0.110"]
 sqlalchemy = ["sqlalchemy[asyncio]>=2.0"]
 passkey = ["webauthn>=2.7"]
 sso = ["dnspython>=2.7"]
+litestar = ["litestar>=2.24"]
 
 [dependency-groups]
 dev = [
@@ -56,6 +57,7 @@ dev = [
     "pre-commit>=4.6.0",
     "webauthn>=2.7",
     "dnspython>=2.7",
+    "litestar>=2.24",
 ]
 
 [build-system]
