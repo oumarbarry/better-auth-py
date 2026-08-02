@@ -445,3 +445,34 @@ async def test_relative_callback_url_accepted():
     async with make_client(auth) as client:
         r = await call_one_tap(client, token, callbackURL="/dashboard")
         assert r.status_code == 200, r.text
+
+
+# --- google provider signup restrictions ---------------------------------------------------
+# TS 5124c3487: One Tap must honour `socialProviders.google.disableSignUp`, not just the
+# plugin's own `disableSignup`.
+# @see https://github.com/better-auth/better-auth/issues/10478
+
+
+async def test_google_provider_disable_sign_up_blocks_one_tap_signup():
+    jwks, sign = _rsa_jwks_and_signer()
+    token = sign(default_payload())
+    auth = one_tap_auth(jwks=jwks, google_kwargs={"disable_sign_up": True})
+    async with make_client(auth) as client:
+        r = await call_one_tap(client, token)
+        assert r.status_code == 401
+        assert r.json()["message"] == "signup_disabled"
+        assert len(await auth.adapter.find_many("user")) == 0
+
+
+async def test_plugin_disable_signup_false_does_not_re_enable_provider_signup():
+    jwks, sign = _rsa_jwks_and_signer()
+    token = sign(default_payload())
+    auth = one_tap_auth(
+        jwks=jwks,
+        google_kwargs={"disable_sign_up": True},
+        plugin_kwargs={"disable_signup": False},
+    )
+    async with make_client(auth) as client:
+        r = await call_one_tap(client, token)
+        assert r.status_code == 401
+        assert r.json()["message"] == "signup_disabled"

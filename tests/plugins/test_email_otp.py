@@ -10,6 +10,7 @@ nine rate-limit rules.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from typing import Any
 
@@ -17,6 +18,7 @@ from better_auth import EmailAndPassword, EmailVerification, Field, SessionOptio
 from better_auth.config import CookieCache, UserOptions
 from better_auth.plugins_ext.email_otp import ERROR_CODES, EmailOTPPlugin
 from better_auth.session import utcnow
+from better_auth.types import AuthRequest
 
 # tests/plugins/ has no conftest of its own; pytest imports tests/conftest.py first
 # (putting tests/ on sys.path), so the top-level helpers import cleanly.
@@ -970,3 +972,53 @@ async def test_rate_limit_integration_blocks_after_max():
         for _ in range(5):
             statuses.append((await send_otp(client, "rl@email.com", "sign-in")).status_code)
         assert 429 in statuses  # folded plugin rule enforces window/max
+
+
+# --- send endpoint origin/CSRF protection ------------------------------------------------
+# TS 086ca91f5 put `formCsrfMiddleware` on `/email-otp/send-verification-otp` so a
+# cookieless cross-origin POST can't trigger an outbound OTP email to an arbitrary
+# address (the built-in /sign-in/email and /sign-up/email routes already do this).
+# Requests go through `auth.handle` directly so no default Origin header is injected.
+# @see https://github.com/better-auth/better-auth/issues/10304
+
+
+async def send_otp_raw(auth: Any, headers: dict[str, str], **body: Any) -> Any:
+    payload = {"email": "attacker@evil.com", "type": "sign-in", **body}
+    return await auth.handle(
+        AuthRequest(
+            method="POST",
+            path="/email-otp/send-verification-otp",
+            headers={"content-type": "application/json", **headers},
+            body=json.dumps(payload).encode(),
+        )
+    )
+
+
+async def test_send_blocks_cross_site_navigation_without_cookies():
+    auth, box, _ = otp_auth()
+    r = await send_otp_raw(
+        auth,
+        {
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-dest": "document",
+            "origin": "https://evil.com",
+        },
+    )
+    assert r.status == 403
+    assert box["calls"] == []
+
+
+async def test_send_rejects_cookieless_cross_origin_post():
+    auth, box, _ = otp_auth()
+    r = await send_otp_raw(auth, {"origin": "https://evil.com"})
+    assert r.status == 403
+    assert box["calls"] == []
+
+
+async def test_send_allows_cookieless_request_without_origin():
+    auth, box, _ = otp_auth()
+    await auth.internal.create_user({"email": "s2s@email.com", "name": "U", "emailVerified": False})
+    r = await send_otp_raw(auth, {}, email="s2s@email.com", type="email-verification")
+    assert r.status == 200, r.body
+    assert len(box["calls"]) == 1

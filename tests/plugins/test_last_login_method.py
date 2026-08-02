@@ -7,6 +7,8 @@ Verified against TS `packages/better-auth/src/plugins/last-login-method/index.ts
 
 from __future__ import annotations
 
+import logging
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from better_auth.config import CrossSubDomainCookies
@@ -252,3 +254,105 @@ async def test_user_create_before_hook_sets_field_directly():
     ctx = Ctx(auth=auth, request=AuthRequest(method="POST", path="/sign-up/email"))
     result = await plugin._user_create_before({"email": "a@b.com"}, ctx)
     assert result == {"data": {"email": "a@b.com", "lastLoginMethod": "email"}}
+
+
+# --- before_store_cookie (GDPR consent gate, TS f23ce5012) --------------------------------
+
+
+def _last_method_cookie(response) -> str | None:
+    return next(
+        (c for c in response.headers.get_list("set-cookie") if "last_used_login_method" in c),
+        None,
+    )
+
+
+def _stored_method(response) -> str:
+    """The last-login-method cookie, asserted present."""
+    cookie = _last_method_cookie(response)
+    assert cookie is not None, "no last_used_login_method cookie was set"
+    return cookie
+
+
+async def _sign_in(auth) -> Any:
+    async with make_client(auth) as client:
+        await sign_up(client)
+        return await client.post(
+            "/api/auth/sign-in/email",
+            json={"email": "ada@example.com", "password": "s3cret-password"},
+        )
+
+
+async def test_before_store_cookie_true_stores_cookie():
+    auth, _ = llm_auth(before_store_cookie=lambda ctx, method: True)
+    response = await _sign_in(auth)
+    assert "better-auth.last_used_login_method=email" in _stored_method(response)
+
+
+async def test_before_store_cookie_false_skips_cookie_but_keeps_auth():
+    auth, _ = llm_auth(before_store_cookie=lambda ctx, method: False)
+    response = await _sign_in(auth)
+    assert response.status_code == 200
+    assert _last_method_cookie(response) is None
+    assert any("better-auth.session_token" in c for c in response.headers.get_list("set-cookie"))
+
+
+async def test_before_store_cookie_async_true_stores_cookie():
+    async def allow(ctx, method):
+        return True
+
+    auth, _ = llm_auth(before_store_cookie=allow)
+    response = await _sign_in(auth)
+    assert "better-auth.last_used_login_method=email" in _stored_method(response)
+
+
+async def test_before_store_cookie_async_false_skips_cookie():
+    async def deny(ctx, method):
+        return False
+
+    auth, _ = llm_auth(before_store_cookie=deny)
+    response = await _sign_in(auth)
+    assert _last_method_cookie(response) is None
+
+
+async def test_before_store_cookie_uses_truthiness():
+    falsy, _ = llm_auth(before_store_cookie=lambda ctx, method: 0)
+    assert _last_method_cookie(await _sign_in(falsy)) is None
+    truthy, _ = llm_auth(before_store_cookie=lambda ctx, method: 1)
+    assert "last_used_login_method=email" in _stored_method(await _sign_in(truthy))
+
+
+async def test_before_store_cookie_receives_ctx_and_method():
+    seen: dict[str, Any] = {}
+
+    def hook(ctx, method):
+        seen["path"] = ctx.request.path
+        seen["method"] = method
+        return True
+
+    auth, _ = llm_auth(before_store_cookie=hook)
+    await _sign_in(auth)
+    assert seen == {"path": "/sign-in/email", "method": "email"}
+
+
+async def test_before_store_cookie_error_skips_cookie_without_breaking_auth(caplog):
+    def boom(ctx, method):
+        raise RuntimeError("consent lookup failed")
+
+    auth, _ = llm_auth(before_store_cookie=boom)
+    with caplog.at_level(logging.ERROR, logger="better_auth"):
+        response = await _sign_in(auth)
+    assert response.status_code == 200
+    assert _last_method_cookie(response) is None
+    assert "beforeStoreCookie" in caplog.text
+
+
+async def test_before_store_cookie_false_still_stores_in_database():
+    auth, _ = llm_auth(store_in_database=True, before_store_cookie=lambda ctx, method: False)
+    async with make_client(auth) as client:
+        response = await client.post(
+            "/api/auth/sign-up/email",
+            json={"name": "Ada", "email": "ada@example.com", "password": "s3cret-password"},
+        )
+        assert _last_method_cookie(response) is None
+        session = (await client.get("/api/auth/get-session")).json()
+        assert session["user"]["lastLoginMethod"] == "email"

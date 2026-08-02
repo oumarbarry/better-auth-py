@@ -141,9 +141,15 @@ class OneTapPlugin(Plugin):
             raw=claims,
         )
         tokens = OAuthTokens(id_token=id_token, scope="openid,profile,email")
+        # TS index.ts:182 `disableSignUp: options?.disableSignup || googleProvider?.disableSignUp`
+        # — the registered provider's restriction must hold here too (the fresh `Google`
+        # built above carries none of the registered config, so it is read explicitly).
+        disable_sign_up = self.disable_signup or bool(
+            google_provider and google_provider.disable_sign_up
+        )
         try:
             user_id, _is_new = await handle_oauth_user_info(
-                ctx, google, info, tokens, disable_sign_up=self.disable_signup
+                ctx, google, info, tokens, disable_sign_up=disable_sign_up
             )
         except OAuthLinkError as err:
             raise APIError(401, "OAUTH_LINK_ERROR", err.code) from None

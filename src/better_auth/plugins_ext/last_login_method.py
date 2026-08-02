@@ -6,7 +6,9 @@ Port of TS ``packages/better-auth/src/plugins/last-login-method/index.ts``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import inspect
+import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ..plugins import HookSet, Plugin, PluginHook
@@ -16,6 +18,8 @@ from ..types import AuthResponse, Ctx
 
 if TYPE_CHECKING:
     from ..auth import BetterAuth
+
+logger = logging.getLogger("better_auth")
 
 DEFAULT_COOKIE_NAME = "better-auth.last_used_login_method"
 DEFAULT_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
@@ -50,12 +54,16 @@ class LastLoginMethodPlugin(Plugin):
         max_age: int = DEFAULT_MAX_AGE,
         custom_resolve_method: Callable[[Ctx], str | None] | None = None,
         store_in_database: bool = False,
+        before_store_cookie: Callable[[Ctx, str], bool | Awaitable[bool]] | None = None,
         schema: dict[str, Any] | None = None,
     ) -> None:
         self.cookie_name = cookie_name
         self.max_age = max_age
         self.custom_resolve_method = custom_resolve_method
         self.store_in_database = store_in_database
+        #: TS ``beforeStoreCookie`` — consent gate (GDPR) run before the cookie is stored;
+        #: a falsy return (or a raise) skips the cookie without failing authentication.
+        self.before_store_cookie = before_store_cookie
         if store_in_database:
             field_name = ((schema or {}).get("user") or {}).get("lastLoginMethod") or (
                 "lastLoginMethod"
@@ -118,12 +126,32 @@ class LastLoginMethodPlugin(Plugin):
             parts.append(f"Domain={auth.cookie_domain}")
         return "; ".join(parts)
 
+    async def _may_store_cookie(self, ctx: Ctx, method: str) -> bool:
+        """TS ``beforeStoreCookie`` (index.ts:185-204). Gates the COOKIE only — the DB
+        store lives in a separate database hook upstream and is unaffected, which is what
+        makes ``before_store_cookie=lambda *_: False`` a "database-only" configuration.
+        A raising hook is logged and treated as "not permitted" (auth still succeeds)."""
+        if self.before_store_cookie is None:
+            return True
+        try:
+            result = self.before_store_cookie(ctx, method)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            logger.exception("[LastLoginMethod] Error in beforeStoreCookie hook")
+            return False
+        return bool(result)
+
     async def _after(self, ctx: Ctx) -> None:
         method = self._resolve_method(ctx)
         if not method:
             return None
         response = ctx.response
-        if isinstance(response, AuthResponse) and self._has_session_token(response, ctx.auth):
+        if (
+            isinstance(response, AuthResponse)
+            and self._has_session_token(response, ctx.auth)
+            and await self._may_store_cookie(ctx, method)
+        ):
             response.set_cookie(self._build_cookie(ctx.auth, method))
         if self.store_in_database and ctx.new_session is not None:
             user_id = ctx.new_session["user"]["id"]

@@ -9,6 +9,7 @@ URLs, sign-up vs adopt-unverified flows, and the redirect-with-error shape.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -21,6 +22,7 @@ from better_auth.adapters.base import Where
 from better_auth.config import UserOptions
 from better_auth.crypto import default_key_hasher
 from better_auth.plugins_ext.magic_link import MagicLinkPlugin
+from better_auth.types import AuthRequest
 from conftest import make_auth, make_client
 
 
@@ -341,3 +343,51 @@ async def test_rate_limit():
         assert (await _sign_in(client, "user@test.com")).status_code == 200
         assert (await _sign_in(client, "user@test.com")).status_code == 200
         assert (await _sign_in(client, "user@test.com")).status_code == 429
+
+
+# --- send endpoint origin/CSRF protection ------------------------------------------------
+# TS 086ca91f5 put `formCsrfMiddleware` on `/sign-in/magic-link` so a cookieless
+# cross-origin POST can't mail a magic link to an arbitrary address. This port's router
+# already force-validates the origin for every `/sign-in*` / `/sign-up*` path
+# (origin.check_origin -> _validate_form_csrf), so these are regression tests for that.
+# @see https://github.com/better-auth/better-auth/issues/10304
+
+
+async def _sign_in_raw(auth: Any, headers: dict[str, str], email: str = "attacker@evil.com"):
+    return await auth.handle(
+        AuthRequest(
+            method="POST",
+            path="/sign-in/magic-link",
+            headers={"content-type": "application/json", **headers},
+            body=json.dumps({"email": email}).encode(),
+        )
+    )
+
+
+async def test_send_blocks_cross_site_navigation_without_cookies():
+    holder: dict[str, Any] = {}
+    r = await _sign_in_raw(
+        _auth(holder),
+        {
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-dest": "document",
+            "origin": "https://evil.com",
+        },
+    )
+    assert r.status == 403
+    assert holder == {}
+
+
+async def test_send_rejects_cookieless_cross_origin_post():
+    holder: dict[str, Any] = {}
+    r = await _sign_in_raw(_auth(holder), {"origin": "https://evil.com"})
+    assert r.status == 403
+    assert holder == {}
+
+
+async def test_send_allows_cookieless_request_without_origin():
+    holder: dict[str, Any] = {}
+    r = await _sign_in_raw(_auth(holder), {}, email="s2s@test.com")
+    assert r.status == 200, r.body
+    assert holder["email"] == "s2s@test.com"
