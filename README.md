@@ -1,4 +1,4 @@
-# better-auth-py
+# better-auth-server
 
 [![CI](https://github.com/oumarbarry/better-auth-py/actions/workflows/ci.yml/badge.svg)](https://github.com/oumarbarry/better-auth-py/actions/workflows/ci.yml)
 
@@ -55,8 +55,8 @@ Known divergences in v0.1: email-verification and reset tokens are stored in the
 ## Install
 
 ```bash
-uv add better-auth-py[fastapi,sqlalchemy]
-# or: pip install "better-auth-py[fastapi,sqlalchemy]"
+uv add better-auth-server[fastapi,sqlalchemy]
+# or: pip install "better-auth-server[fastapi,sqlalchemy]"
 ```
 
 The core has a single dependency, `httpx`. The `fastapi` and `sqlalchemy` extras pull in the rest.
