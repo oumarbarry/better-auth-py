@@ -10,6 +10,27 @@ async def test_get_session_null_when_anonymous(client):
     assert response.status_code == 200
     assert response.json() is None
     assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+
+
+async def test_get_session_authenticated_is_not_cacheable(client):
+    """TS 46d2bf02c — ``ctx.setHeader("cache-control","no-store")`` + ``pragma: no-cache``."""
+    await sign_up(client)
+    response = await client.get("/api/auth/get-session")
+    assert response.status_code == 200
+    assert response.json()["user"]["email"] == SIGNUP["email"]
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+
+
+async def test_session_gated_endpoints_do_not_inherit_no_store(client):
+    """The get-session cache headers must not leak onto endpoints that merely
+    resolve a session (TS ``getSessionFromCtx`` skips cache-control/pragma)."""
+    await sign_up(client)
+    response = await client.get("/api/auth/list-sessions")
+    assert response.status_code == 200
+    assert "cache-control" not in response.headers
+    assert "pragma" not in response.headers
 
 
 async def test_get_session_post_not_allowed(client):

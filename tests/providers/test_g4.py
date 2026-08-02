@@ -7,6 +7,8 @@ per-provider quirks that motivated the port.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -108,6 +110,50 @@ def test_apple_authorization_url_requires_client_secret():
     provider = Apple(client_id="service.example.app", client_secret="")
     with pytest.raises(ValueError, match="CLIENT_ID_AND_SECRET_REQUIRED"):
         provider.authorization_url(state="st", redirect_uri="https://app/cb")
+
+
+def test_apple_authorization_url_sends_pkce_challenge():
+    """TS 0ffd1fb28 — apple.ts forwards ``codeVerifier`` to ``createAuthorizationURL``."""
+    provider = Apple(client_id="service.example.app", client_secret="secret")
+    url = provider.authorization_url(
+        state="st", redirect_uri="https://app/cb", code_verifier="apple-code-verifier"
+    )
+    query = parse_qs(urlsplit(url).query)
+    expected = (
+        base64.urlsafe_b64encode(hashlib.sha256(b"apple-code-verifier").digest())
+        .decode()
+        .rstrip("=")
+    )
+    assert query["code_challenge_method"] == ["S256"]
+    assert query["code_challenge"] == [expected]
+    assert "code_verifier" not in query
+
+
+def test_apple_authorization_url_omits_pkce_without_verifier():
+    provider = Apple(client_id="service.example.app", client_secret="secret")
+    url = provider.authorization_url(state="st", redirect_uri="https://app/cb", code_verifier="")
+    query = parse_qs(urlsplit(url).query)
+    assert "code_challenge_method" not in query
+    assert "code_challenge" not in query
+
+
+async def test_apple_token_exchange_sends_code_verifier():
+    """The challenge is only usable if the callback exchange carries the verifier
+    (TS ``apple.validateAuthorizationCode`` forwards ``codeVerifier``)."""
+    seen: dict[str, list[str]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(parse_qs(request.content.decode()))
+        return httpx.Response(200, json={"access_token": "at"})
+
+    provider = Apple(client_id="service.example.app", client_secret="secret")
+    await provider.exchange(
+        _mock_http(handler),
+        code="the-code",
+        redirect_uri="https://app/cb",
+        code_verifier="apple-code-verifier",
+    )
+    assert seen["code_verifier"] == ["apple-code-verifier"]
 
 
 async def test_apple_verify_id_token_raw_nonce():

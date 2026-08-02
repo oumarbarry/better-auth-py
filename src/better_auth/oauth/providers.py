@@ -13,6 +13,7 @@ only genuinely non-standard providers need to override a method.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,8 @@ from .verify import verify_id_token
 
 if TYPE_CHECKING:
     import httpx
+
+    from ..types import Ctx
 
 #: (profile_dict) -> OAuthUserInfo — maps a provider's userinfo/id-token payload.
 ProfileMapper = Callable[[dict[str, Any]], OAuthUserInfo]
@@ -173,8 +176,15 @@ class ProviderConfig:
         return bool(self.jwks_url)
 
     async def verify_id_token(
-        self, http: httpx.AsyncClient, token: str, nonce: str | None = None
+        self,
+        http: httpx.AsyncClient,
+        token: str,
+        nonce: str | None = None,
+        ctx: Ctx | None = None,
     ) -> dict[str, Any] | None:
+        """``ctx`` is the request context (headers, body, auth) so an override can
+        branch on the request — TS ``verifyIdToken(token, nonce, ctx)``. Call this
+        through :func:`call_verify_id_token`, never directly."""
         if not self.jwks_url:
             return None
         return await verify_id_token(
@@ -192,6 +202,37 @@ class ProviderConfig:
 
 #: Back-compat alias for the pre-refactor public name.
 OAuthProvider = ProviderConfig
+
+
+def _accepts_ctx(fn: Callable[..., Any]) -> bool:
+    """Whether a ``verify_id_token`` override takes the ``ctx`` argument.
+
+    Third-party providers written before ``ctx`` existed have the 3-arg
+    ``(http, token, nonce)`` signature; adapt to the callable's arity so both
+    spellings work (same seam as ``plugins_ext/magic_link._accepts_ctx`` and
+    ``internal_adapter._call_hook``).
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (ValueError, TypeError):
+        return True
+    if "ctx" in params:
+        return True
+    return any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params.values())
+
+
+async def call_verify_id_token(
+    provider: ProviderConfig,
+    http: httpx.AsyncClient,
+    token: str,
+    nonce: str | None = None,
+    ctx: Ctx | None = None,
+) -> dict[str, Any] | None:
+    """Invoke ``provider.verify_id_token``, passing ``ctx`` only if it is accepted."""
+    fn = provider.verify_id_token
+    if _accepts_ctx(fn):
+        return await fn(http, token, nonce, ctx)
+    return await fn(http, token, nonce)
 
 
 @dataclass

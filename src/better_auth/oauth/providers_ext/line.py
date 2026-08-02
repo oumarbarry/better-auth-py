@@ -20,6 +20,8 @@ from ..providers import ProviderConfig
 if TYPE_CHECKING:
     import httpx
 
+    from ...types import Ctx
+
 _VERIFY_ENDPOINT = "https://api.line.me/oauth2/v2.1/verify"
 
 
@@ -56,7 +58,11 @@ class Line(ProviderConfig):
         return not self.disable_id_token_sign_in
 
     async def verify_id_token(
-        self, http: httpx.AsyncClient, token: str, nonce: str | None = None
+        self,
+        http: httpx.AsyncClient,
+        token: str,
+        nonce: str | None = None,
+        ctx: Ctx | None = None,
     ) -> dict[str, Any] | None:
         if self.disable_id_token_sign_in:
             return None

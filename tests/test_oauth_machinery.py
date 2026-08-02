@@ -2,6 +2,8 @@
 
 import json
 import time
+from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -13,6 +15,8 @@ from jwt.algorithms import RSAAlgorithm
 from better_auth import AccountLinking, AccountOptions, GitHub, Google
 from better_auth.adapters.base import Where
 from better_auth.oauth.machinery import OAuthFetchError, oauth_fetch
+from better_auth.oauth.providers import ProviderConfig
+from better_auth.types import Ctx
 from conftest import SIGNUP, make_auth, make_client, sign_up
 
 PROFILE = {"id": 4242, "login": "octocat", "name": "Octo Cat", "avatar_url": "http://img/x.png"}
@@ -429,3 +433,84 @@ async def test_link_social_id_token_flow():
         accounts = await auth.adapter.find_many("account", [Where("providerId", "google")])
         assert len(accounts) == 1
         assert accounts[0]["accountId"] == "g-77"
+
+
+# ===================================================================================
+# ctx threaded into verify_id_token — TS c4d1ddaa9 (feat: add `ctx` to `verifyIdToken`)
+# ===================================================================================
+
+
+@dataclass
+class _CtxProvider(ProviderConfig):
+    """Provider written against the new signature — records the ctx it was handed."""
+
+    provider_id: str = "ctxp"
+    jwks_url: str = "https://ctx.test/jwks"  # only gates `supports_id_token`
+    seen: list[Any] = field(default_factory=list)
+
+    async def verify_id_token(self, http, token, nonce=None, ctx=None):
+        self.seen.append(ctx)
+        return {"sub": "cx-1", "email": SIGNUP["email"], "email_verified": True}
+
+
+@dataclass
+class _LegacyProvider(ProviderConfig):
+    """Third-party provider written against the pre-ctx signature — must keep working."""
+
+    provider_id: str = "legacyp"
+    jwks_url: str = "https://legacy.test/jwks"
+    seen: list[Any] = field(default_factory=list)
+
+    # the narrower (pre-ctx) signature is the point of this fixture
+    async def verify_id_token(self, http, token, nonce=None):  # ty: ignore[invalid-method-override]
+        self.seen.append(nonce)
+        return {"sub": "lg-1", "email": SIGNUP["email"], "email_verified": True}
+
+
+async def test_sign_in_id_token_passes_ctx_to_verify_id_token():
+    provider = _CtxProvider(client_id="cid", client_secret="s")
+    auth = make_auth(social_providers={"ctxp": provider})
+    async with make_client(auth) as client:
+        r = await client.post(
+            "/api/auth/sign-in/social",
+            json={"provider": "ctxp", "idToken": {"token": "tok", "nonce": "n"}},
+            headers={"x-platform": "ios"},
+        )
+        assert r.status_code == 200, r.text
+    assert len(provider.seen) == 1
+    ctx = provider.seen[0]
+    assert isinstance(ctx, Ctx)
+    # the docs' motivating use case: branch on a request header
+    assert ctx.request.headers["x-platform"] == "ios"
+    assert ctx.request.path == "/sign-in/social"
+
+
+async def test_link_social_id_token_passes_ctx_to_verify_id_token():
+    provider = _CtxProvider(client_id="cid", client_secret="s")
+    auth = make_auth(social_providers={"ctxp": provider})
+    async with make_client(auth) as client:
+        await sign_up(client)  # ada@example.com, matching the id-token email
+        r = await client.post(
+            "/api/auth/link-social",
+            json={"provider": "ctxp", "idToken": {"token": "tok"}},
+            headers={"x-platform": "ios"},
+        )
+        assert r.status_code == 200, r.text
+    assert isinstance(provider.seen[0], Ctx)
+    assert provider.seen[0].request.path == "/link-social"
+
+
+async def test_verify_id_token_without_ctx_param_still_called():
+    """Back-compat: an override on the old ``(http, token, nonce)`` signature is
+    detected by arity and called without ``ctx`` (same seam as ``_accepts_ctx``
+    for databaseHooks / magic-link callbacks)."""
+    provider = _LegacyProvider(client_id="cid", client_secret="s")
+    auth = make_auth(social_providers={"legacyp": provider})
+    async with make_client(auth) as client:
+        r = await client.post(
+            "/api/auth/sign-in/social",
+            json={"provider": "legacyp", "idToken": {"token": "tok", "nonce": "n"}},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["user"]["email"] == SIGNUP["email"]
+    assert provider.seen == ["n"]

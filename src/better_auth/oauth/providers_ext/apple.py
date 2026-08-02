@@ -3,7 +3,9 @@
 Quirks vs. the generic :class:`ProviderConfig`:
   * ``createAuthorizationURL`` uses ``response_type=code id_token`` +
     ``response_mode=form_post`` (Apple POSTs the callback), and requires
-    ``clientId``/``clientSecret`` up front.
+    ``clientId``/``clientSecret`` up front. It also forwards the PKCE
+    ``code_challenge`` so the callback exchange's ``code_verifier`` matches
+    (TS ``apple.ts`` ``createAuthorizationURL({... codeVerifier })``).
   * ``verifyIdToken`` accepts the nonce either raw **or** as ``sha256hex(nonce)``
     (Apple's native SDKs sometimes hash it client-side), and coerces the
     ``email_verified``/``is_private_email`` claims to real booleans.
@@ -33,6 +35,7 @@ from ..verify import verify_id_token as _verify_id_token
 if TYPE_CHECKING:
     import httpx
 
+    from ...types import Ctx
     from ..models import OAuthTokens
 
 _APPLE_ISSUER = "https://appleid.apple.com"
@@ -86,6 +89,8 @@ class Apple(ProviderConfig):
     #: explicit accepted audience(s); overrides ``app_bundle_identifier``/``client_id``.
     audience: str | list[str] | None = None
     disable_id_token_sign_in: bool = False
+    #: Apple accepts (and the callback exchange requires) an S256 PKCE challenge.
+    use_pkce: bool = True
 
     def authorization_url(
         self,
@@ -111,8 +116,7 @@ class Apple(ProviderConfig):
             scope_joiner=self.scope_joiner,
             response_type="code id_token",
             response_mode="form_post",
-            # Apple never forwards a codeVerifier — no PKCE.
-            code_verifier=None,
+            code_verifier=code_verifier if self.use_pkce else None,
             login_hint=login_hint,
             additional_params=self.authorize_params or None,
         )
@@ -125,7 +129,11 @@ class Apple(ProviderConfig):
         return self.client_id
 
     async def verify_id_token(
-        self, http: httpx.AsyncClient, token: str, nonce: str | None = None
+        self,
+        http: httpx.AsyncClient,
+        token: str,
+        nonce: str | None = None,
+        ctx: Ctx | None = None,
     ) -> dict[str, Any] | None:
         if self.disable_id_token_sign_in:
             return None

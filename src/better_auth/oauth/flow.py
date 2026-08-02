@@ -31,7 +31,7 @@ from ..session import build_cookie, clear_cookie, cookie_name, create_session, u
 from ..types import APIError, AuthResponse, Ctx
 from .machinery import OAuthFetchError
 from .models import OAuthTokens, OAuthUserInfo
-from .providers import ProviderConfig
+from .providers import ProviderConfig, call_verify_id_token
 
 STATE_EXPIRES_IN = 600  # seconds
 STATE_COOKIE = "state"
@@ -201,7 +201,9 @@ async def _id_token_sign_in(
     if not provider.supports_id_token:
         raise APIError(404, "ID_TOKEN_NOT_SUPPORTED", "id_token sign-in not supported")
     token = id_token.get("token") or ""
-    claims = await provider.verify_id_token(ctx.auth.http, token, id_token.get("nonce"))
+    claims = await call_verify_id_token(
+        provider, ctx.auth.http, token, id_token.get("nonce"), ctx
+    )
     if claims is None:
         raise APIError(401, "INVALID_TOKEN", "Invalid id token")
     info = provider.user_info_from_id_token(claims)
@@ -603,7 +605,9 @@ async def _link_social_id_token(
     if not provider.supports_id_token:
         raise APIError(404, "ID_TOKEN_NOT_SUPPORTED", "id_token linking not supported")
     token = id_token.get("token") or ""
-    claims = await provider.verify_id_token(ctx.auth.http, token, id_token.get("nonce"))
+    claims = await call_verify_id_token(
+        provider, ctx.auth.http, token, id_token.get("nonce"), ctx
+    )
     if claims is None:
         raise APIError(401, "INVALID_TOKEN", "Invalid id token")
     info = provider.user_info_from_id_token(claims)

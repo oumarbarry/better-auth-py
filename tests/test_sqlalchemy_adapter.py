@@ -1,11 +1,14 @@
 from datetime import timedelta, timezone
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from better_auth.adapters.base import Where
 from better_auth.adapters.sqlalchemy import SQLAlchemyAdapter
+from better_auth.schema import Field
 from better_auth.session import utcnow
 from conftest import SIGNUP, make_auth, make_client, sign_up
 
@@ -110,3 +113,41 @@ async def test_update_and_delete(sa_auth):
 async def test_create_tables_is_idempotent(sa_auth):
     await sa_auth.adapter.create_tables()
     await sa_auth.adapter.create_tables()
+
+
+async def test_unique_indexed_field_creates_a_single_unique_index():
+    """Analog check for TS 750894037 (kysely emitted a UNIQUE column *and* a unique index).
+
+    SQLAlchemy folds ``Column(unique=True, index=True)`` into one unique index, so the
+    duplicate-index bug class does not exist here — asserted on the real DDL, not by
+    inspection.
+    """
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    adapter = SQLAlchemyAdapter(engine)
+    adapter.init(
+        {
+            "uniqueTable": {
+                "id": Field("string", required=True, unique=True),
+                "slug": Field("string", required=True, unique=True, index=True),
+            }
+        }
+    )
+    await adapter.create_tables()
+    try:
+        async with engine.connect() as conn:
+            indexes = (await conn.execute(text("PRAGMA index_list('uniqueTable')"))).all()
+            on_slug = []
+            for index in indexes:
+                columns = (await conn.execute(text(f"PRAGMA index_info('{index[1]}')"))).all()
+                if [c[2] for c in columns] == ["slug"]:
+                    on_slug.append(index)
+        # exactly one index covers `slug` (an inline UNIQUE constraint would add a
+        # second, `sqlite_autoindex_*` one), and it is unique
+        assert len(on_slug) == 1, indexes
+        assert on_slug[0][2] == 1  # "unique"
+
+        await adapter.create("uniqueTable", {"id": "first", "slug": "shared"})
+        with pytest.raises(IntegrityError):
+            await adapter.create("uniqueTable", {"id": "second", "slug": "shared"})
+    finally:
+        await engine.dispose()

@@ -26,6 +26,7 @@ from ..verify import verify_id_token as _verify_id_token
 if TYPE_CHECKING:
     import httpx
 
+    from ...types import Ctx
     from ..models import OAuthTokens
 
 _LIMITED_JWKS = "https://limited.facebook.com/.well-known/oauth/openid/jwks/"
@@ -100,7 +101,11 @@ class Facebook(ProviderConfig):
         return data.get("user_id")
 
     async def verify_id_token(
-        self, http: httpx.AsyncClient, token: str, nonce: str | None = None
+        self,
+        http: httpx.AsyncClient,
+        token: str,
+        nonce: str | None = None,
+        ctx: Ctx | None = None,
     ) -> dict[str, Any] | None:
         if self.disable_id_token_sign_in:
             return None

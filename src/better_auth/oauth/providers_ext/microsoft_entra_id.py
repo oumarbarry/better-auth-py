@@ -32,6 +32,7 @@ from ..verify import _cache as _jwks_cache
 if TYPE_CHECKING:
     import httpx
 
+    from ...types import Ctx
     from ..models import OAuthTokens
 
 #: Fixed ``tid`` carried by every personal (consumer) Microsoft account token.
@@ -85,7 +86,11 @@ class MicrosoftEntraId(ProviderConfig):
             self.authorize_params = {**self.authorize_params, "prompt": self.prompt}
 
     async def verify_id_token(
-        self, http: httpx.AsyncClient, token: str, nonce: str | None = None
+        self,
+        http: httpx.AsyncClient,
+        token: str,
+        nonce: str | None = None,
+        ctx: Ctx | None = None,
     ) -> dict[str, Any] | None:
         if self.disable_id_token_sign_in:
             return None

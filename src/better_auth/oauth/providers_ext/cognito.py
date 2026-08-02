@@ -24,6 +24,8 @@ from ..verify import verify_id_token as _verify_id_token
 if TYPE_CHECKING:
     import httpx
 
+    from ...types import Ctx
+
 
 def _map(p: dict[str, Any]) -> OAuthUserInfo:
     name = p.get("name") or p.get("given_name") or p.get("username") or ""
@@ -82,7 +84,11 @@ class Cognito(ProviderConfig):
         return urlunsplit(parts._replace(query=query))
 
     async def verify_id_token(
-        self, http: httpx.AsyncClient, token: str, nonce: str | None = None
+        self,
+        http: httpx.AsyncClient,
+        token: str,
+        nonce: str | None = None,
+        ctx: Ctx | None = None,
     ) -> dict[str, Any] | None:
         if self.disable_id_token_sign_in:
             return None
