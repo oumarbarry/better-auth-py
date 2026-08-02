@@ -22,7 +22,12 @@ with verified counts — 26 plugins / 35 providers / 9 adapter methods —,
 stale claims removed, broken OAuthProvider sample fixed to real field
 names; Fable re-ran full gate 1975/clean/clean and cross-checked every
 number). CAMPAIGN COMPLETE — parity with better-auth TS v1.6.23 achieved.
-Git tag v0.2.0 + PyPI publish = user decision, not taken here.
+RELEASED 2026-08-02: v0.1.0 AND v0.2.0 live on PyPI as **better-auth-server**
+(better-auth-py + better-auth + better-auth-python all taken on PyPI — renamed;
+import stays better_auth; future client = better-auth-client, free today).
+Trusted publishing via release.yml (tag v* → OIDC, no tokens). parity branch
+merged into main at e0a239a, full gate 1975/clean/clean, install-from-PyPI
+smoke-tested.
 
 ## Backlog burn-down (started 2026-07-24 on user "continue")
 
