@@ -31,8 +31,7 @@ HOTP/TOTP) are sacred — never regenerate or "fix" them.
 - Plugins live in `src/better_auth/plugins_ext/` (not `plugins/` — that
   name is taken by the plugin *framework* module `plugins.py`).
 - `docs/plans/ACTIVE.md` holds the parity campaign's decision log — check
-  it before re-litigating a design choice. Its historical commit hashes
-  predate a history rewrite and no longer resolve.
+  it before re-litigating a design choice.
 
 ## Conventions
 

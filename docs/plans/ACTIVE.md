@@ -12,7 +12,7 @@ strings, camelCase DB columns, exact crypto/token encodings (cross-runtime compa
 
 ## STATUS 2026-07-25: ALL WAVES COMPLETE, BACKLOG FULLY BURNED (B1–B11)
 
-1975 tests, ruff/ty clean, tree clean at 1eed218. All planned waves (1–6)
+1975 tests, ruff/ty clean, tree clean at 17f6bdd. All planned waves (1–6)
 closed and the entire backlog resolved: B1–B10 implemented+validated, B11
 (resource param / PAR store / telemetry / logger) closed by Fable ruling —
 see the burn-down list and decision log. Spec-07 OQ1 fully resolved (HS256
@@ -93,7 +93,7 @@ smoke-tested.
       (token.ts:176-195), opaque-only access (token.ts:519), introspect/
       revoke skip-to-opaque (introspect.ts:44), end-session HS256
       (logout.ts:86-107), secret_config threaded into create/rotate/
-      validate call sites (7cafaa1 ponytail notes resolved). Agent
+      validate call sites (5e0aeda ponytail notes resolved). Agent
       root-cause-fixed revoke.py (sibling caller, unenumerated — correct).
       Spec 07 OQ1 annotated RESOLVED. Remaining deferral: non-EdDSA JWKS
       algs only.
@@ -198,7 +198,7 @@ Every task: TDD, full test gate (`uv run pytest && uv run ruff check . && uv run
 one atomic Conventional Commit incl. ACTIVE.md checkbox update.
 
 **Track DB** (spec: gap/02-db-layer.md — task = its gap item numbers):
-- [x] W1-A1: DONE, validated, commit 2795c45 (147-test gate green). Accepted
+- [x] W1-A1: DONE, validated, commit b5926a8 (147-test gate green). Accepted
       deviations to carry into A2/E: (a) caller-supplied id kept (strip-unless-
       forceAllowId moves to internal-adapter seam in A2), (b) advanced.database
       passed to adapter ctor, rewire through BetterAuth options in A2/E,
@@ -210,19 +210,19 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
       test suite port (11).
 
 **Track HTTP** (spec: gap/01-core-http.md — task = its gap item numbers):
-- [x] W1-B (Sonnet medium): DONE, validated, commit 1edbaa7. Interim
+- [x] W1-B (Sonnet medium): DONE, validated, commit 1af422f. Interim
       scope-blacklist in /list-accounts to be replaced by parse_account_output
       in W1-E. BODY_MUST_BE_AN_OBJECT unreachable (INVALID_BODY fires earlier
       in types.py) — revisit in W1-E if parity of that code matters.
-- [x] W1-C: DONE, validated, commit 98bcfab. Notes: change-email JWT branch
+- [x] W1-C: DONE, validated, commit 1ba6da2. Notes: change-email JWT branch
       (updateTo) minted but /verify-email's change-email path lands in W1-D;
       "reuse existing session" refinement for autoSignInAfterVerification
       deliberately skipped (revisit W1-F if parity-relevant).
-- [x] W1-A2: DONE, validated, commit 4a3ae2c. Notes: hook signature is
+- [x] W1-A2: DONE, validated, commit f032e99. Notes: hook signature is
       before(data)/after(payload) single-arg (no ctx object yet — W1-E may
       widen); secondary storage wired in seam only; endpoints not yet routed
       through the seam (W1-E).
-- [x] W1-D: DONE, validated, commit 463a919. Fable merge-fix: BetterAuth now
+- [x] W1-D: DONE, validated, commit 67a599c. Fable merge-fix: BetterAuth now
       takes user= (UserOptions) directly; getattr shim removed. Deferred:
       afterEmailVerification hooks + additionalFields allowlist (W1-E/F),
       /account-info data:{} until Wave 2 refresh machinery. Verified against
@@ -240,7 +240,7 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
       parse_session_input allowlist; input:false raises FIELD_NOT_ALLOWED
       (verified vs db/schema.ts:155). databaseHook call site adapts to (data)
       or (data, ctx) arity.
-- [x] W1-F: DONE (2 agents; continuation after stall), commit f6aabd9.
+- [x] W1-F: DONE (2 agents; continuation after stall), commit e0d5e19.
       243 tests. Origin-check truthiness bypass fixed pre-commit (per-path
       skip tests green). WAVE 1 COMPLETE.
       Deferred leftovers (backlog, fold in later): dynamic base_url
@@ -250,18 +250,18 @@ one atomic Conventional Commit incl. ACTIVE.md checkbox update.
 
 ## Wave 2 — Social providers (spec: gap/03-social-oauth.md)
 - [x] W2-A: DONE (2 agents; continuation after connection-drop crash), commit
-      0ba150c, 262 tests. oauth/ package with declarative ProviderConfig.
+      77757ce, 262 tests. oauth/ package with declarative ProviderConfig.
       Deferred (spec-optional): stateless cookie state strategy,
       storeAccountCookie, oauth-signup verification email (flag for parity
       review). Token encryption is AES-GCM $bap$ (not TS-XChaCha20-compatible —
       revisit in Wave 4 crypto task which ports symmetricEncrypt).
-- [x] W2-B: DONE, commit 0d36a03, 406 tests. All 32 providers ported via 6
+- [x] W2-B: DONE, commit ec2e504, 406 tests. All 32 providers ported via 6
       parallel group agents (G1-G3 Sonnet, G4-G6 Opus), ZERO merge conflicts
       (disjoint files by design). PROVIDER_REGISTRY exposes all 35.
       Backlog: name-based provider config (socialProviders:{github:{...}})
       ergonomics — BetterAuth takes instances today.
-      Security: 2 IDOR in refresh/get-access-token fixed pre-merge (21bc8c7);
-      cookie-cache timing side-channel fixed (c541260).
+      Security: 2 IDOR in refresh/get-access-token fixed pre-merge (3fc4d38);
+      cookie-cache timing side-channel fixed (2d09eab).
 
 ## Wave 3 — Simple plugins (spec: gap/04-plugins-simple.md)
 
@@ -379,7 +379,7 @@ the admin agent's ownership (sole consumer, no separate dispatch).
       awaited inline (TS runInBackgroundOrAwait); accept CAS instead of
       transaction+rollback. Seams: teamId/team branches -> phase 3;
       dynamicAccessControl role lookup on invite -> phase 4.
-- [x] Organization phases 3+4: DONE — teams committed 6bec82c (40 tests);
+- [x] Organization phases 3+4: DONE — teams committed 5d2bde0 (40 tests);
       dynamic AC committed (27 tests, org suite 161, full 1371 green).
       organizationRole table (permission singular, JSON-string), 5 role
       endpoints, union-merge precedence (dynamic AUGMENTS same-named static
@@ -396,9 +396,9 @@ system (W1-E), atomic consume (W3-A), crypto incl. PKCE/b64url/charset/
 constant-time (W2/W4-A), JWT machinery + jwt plugin (W4), signed cookies +
 origin check (W1). Straight to plugins.
 
-- [x] W5-A: DONE — one-tap da779b1 (26 tests, GHSA-9502 regressions,
-      maxTokenAge 1h), oauth-popup 5033c71 (15 tests, completion script
-      byte-exact, sha256 CSP pin == TS constant), siwe 17628b2 (61 tests,
+- [x] W5-A: DONE — one-tap 12caec0 (26 tests, GHSA-9502 regressions,
+      maxTokenAge 1h), oauth-popup 3564054 (15 tests, completion script
+      byte-exact, sha256 CSP pin == TS constant), siwe d731087 (61 tests,
       ERC-4361 parser verbatim w/ all TS vectors, EIP-55 via pycryptodome
       real Keccak-256, atomic nonce). plugins_ext exports wired (21 plugins).
       Session-limit outage mid-volley: 3 agents died, all resumed to
@@ -412,7 +412,7 @@ origin check (W1). Straight to plugins.
       base_url mutation (shared-instance concurrency hazard; configure
       provider redirect_uri to production instead — upgrade path = per-
       request redirect_uri seam in oauth/flow.py); DB state strategy only.
-- [x] W5-C spec: docs/plans/gap/07-oauth-provider.md committed 446e59f
+- [x] W5-C spec: docs/plans/gap/07-oauth-provider.md committed ac208da
       (747 lines, 20 items, 4 sub-phases A-D). Decision (defaults adopted):
       EdDSA-first, reject disableJwtPlugin + non-EdDSA algs at init; hashed
       client secrets first (encrypted blocked on secrets-rotation backlog);
@@ -478,7 +478,7 @@ origin check (W1). Straight to plugins.
       WAVE 5 COMPLETE.
 
 ## Wave 6 — Ecosystem (USER-CONFIRMED 2026-07-24) — COMPLETE 2026-07-24
-(api-key 0b2686d, passkey 0cf1b65, sso-OIDC c78ffb3+d6a75bd. All validated.)
+(api-key 8b4d13b, passkey 20b80b2, sso-OIDC 6970244+ef94b71. All validated.)
 - [ ] W6-specs: gap specs 08-api-key / 09-passkey / 10-sso-oidc (format of 07)
       DISPATCHED 2026-07-24 (3 Opus high agents, parallel, docs-only — no code
       conflict with W5-C-A). 08-api-key DELIVERED+VALIDATED (621 lines; Fable
@@ -574,7 +574,7 @@ origin check (W1). Straight to plugins.
 
 ## Security findings (from background commit review)
 
-- 2026-07-22 CONFIRMED: /update-session (commit 463a919) accepted arbitrary
+- 2026-07-22 CONFIRMED: /update-session (commit 67a599c) accepted arbitrary
   non-core session fields — priv-esc vector vs TS's parseSessionInput
   allowlist. Fix folded into W1-E's item-12 scope (message sent to the running
   agent): parse_session_input schema-driven allowlist + tests. Validate before
@@ -585,7 +585,7 @@ origin check (W1). Straight to plugins.
   check globally. Fix folded into W1-F-bis (message sent). Gate before commit:
   per-path skip tests must exist and pass.
 
-- 2026-07-23 FIXED c541260: cookie_cache.py compared HMAC signatures with `!=`
+- 2026-07-23 FIXED 2d09eab: cookie_cache.py compared HMAC signatures with `!=`
   (timing side-channel). Now hmac.compare_digest + type guard. Fixed directly
   by orchestrator (file unowned by any live agent).
 
