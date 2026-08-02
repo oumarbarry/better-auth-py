@@ -1,0 +1,7 @@
+{
+  "framework": "vitepress",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run docs:build",
+  "outputDirectory": ".vitepress/dist",
+  "cleanUrls": true
+}
