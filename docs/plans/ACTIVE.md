@@ -203,6 +203,25 @@ User deploys the site on Vercel (root=docs-site) après merge.
       (no DI in Flask); bare mount path /api/auth/ → framework 404
       (<path:rest> won't match empty; siblings untested there too).
       Ponytail: no close() seam — daemon thread lives with the process.
+      RELEASED 2026-08-02: v0.4.0 on PyPI (feat a052e9b, chore(release)
+      7865c6f, patch-before-feature rule satisfied — nothing pending on
+      main; workflow run green, GitHub release created from CHANGELOG,
+      install [flask]==0.4.0 smoke-tested e2e in a fresh venv: sign-up +
+      get-session through the wheel, __version__ reports 0.4.0 — the
+      metadata-derived fix now live). README updated (extras list +
+      framework-agnostic line now names BetterAuthFlask).
+- [ ] DJANGO (v0.5.0): DISPATCHED 2026-08-02 (1 background agent, owns
+      integrations/django.py + tests/test_django_integration.py +
+      pyproject [django] extra). DESIGN RULING (Fable, pre-dispatch,
+      same evidence base as Flask): SYNC views + the same dedicated-
+      loop bridge — Django async views under WSGI go through asgiref
+      (loop per request, breaks loop-bound core resources); sync view
+      + bridge works identically under WSGI AND ASGI (sync views run
+      in a threadpool there). catch-all is @csrf_exempt (port's own
+      check_origin IS the CSRF layer), [django] extra = django>=5.0.
+      Flagged risk in the prompt: HttpResponse repeated-Set-Cookie
+      emission (dict-like headers) — agent must report the mechanism;
+      the two-Set-Cookie sign-out test is non-negotiable.
 - [ ] Queued: docs iteration 2 (per-plugin/provider pages), and
       better-auth-client (PyPI name free — needs its own brainstorm:
       API surface + repo question before any code).
