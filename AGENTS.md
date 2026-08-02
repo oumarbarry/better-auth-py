@@ -26,17 +26,13 @@ HOTP/TOTP) are sacred — never regenerate or "fix" them.
 - Package management is uv only (`uv add`, `uv run`, `uv lock`). Build:
   `uv build`.
 
-## Layout
+## Non-obvious pointers
 
-- `src/better_auth/` — core (auth.py, endpoints.py, session.py, crypto.py,
-  origin.py, schema.py, internal_adapter.py…)
-- `src/better_auth/oauth/` — OAuth machinery + 35 providers
-- `src/better_auth/plugins_ext/` — the 26 plugins
-- `src/better_auth/adapters/` — memory + SQLAlchemy adapters
-- `src/better_auth/integrations/` — FastAPI layer
-- `tests/` — pytest, asyncio; plugin tests under `tests/plugins/`
-- `docs/plans/ACTIVE.md` — orchestration state and decision log of the
-  parity campaign (historical hashes predate a history rewrite)
+- Plugins live in `src/better_auth/plugins_ext/` (not `plugins/` — that
+  name is taken by the plugin *framework* module `plugins.py`).
+- `docs/plans/ACTIVE.md` holds the parity campaign's decision log — check
+  it before re-litigating a design choice. Its historical commit hashes
+  predate a history rewrite and no longer resolve.
 
 ## Conventions
 
