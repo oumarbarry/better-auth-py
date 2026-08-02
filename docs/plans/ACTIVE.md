@@ -231,6 +231,16 @@ User deploys the site on Vercel (root=docs-site) après merge.
       (sign-out test needs content_type json); Morsel stores max-age
       as str. Fable cosmetic fix in merge window: pyproject django
       extra normalized to one line like siblings.
+      RELEASED 2026-08-02: v0.5.0 on PyPI (feat 41844f2, chore(release)
+      15887c1; patch-before-feature rule satisfied — v0.4.0 was fully
+      out before this merge; workflow green, GitHub release created,
+      install [django]==0.5.0 smoke-tested e2e in a fresh venv under
+      Django 6.0.7 — sign-up + get-session through the wheel; index
+      needed one ~15s propagation retry). README updated (extras +
+      framework line). FRAMEWORK MATRIX COMPLETE: FastAPI, Litestar,
+      Flask, Django. Integration queue empty — next big rocks are the
+      user-choice items below (docs-2, better-auth-client brainstorm,
+      v1.7.0 campaign when stable).
 - [ ] Queued: docs iteration 2 (per-plugin/provider pages), and
       better-auth-client (PyPI name free — needs its own brainstorm:
       API surface + repo question before any code).
