@@ -127,7 +127,8 @@ auth = BetterAuth(
     rate_limit=RateLimit(enabled=True),            # better-auth path rules built in
     trusted_origins=["https://app.example.com"],   # extra origins for CSRF + redirects
     plugins=[...],
-    hooks={"user_created_before": ..., "user_created_after": ...},
+    hooks={"before": ..., "after": ...},           # around every auth request
+    database_hooks={"user": {"create": {"before": ..., "after": ...}}},
 )
 ```
 

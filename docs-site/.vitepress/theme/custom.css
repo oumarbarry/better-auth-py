@@ -1,0 +1,525 @@
+/* =========================================================================
+   better-auth-server docs — theme
+   -------------------------------------------------------------------------
+   Scene: a Python backend developer at 23:00, terminal open on the other half
+   of the screen, deciding whether to trust a port with their auth layer. The
+   surface is dark because that is the room, and the reference is an
+   observatory plate — a near-black indigo field, hard star points with real
+   magnitude variance, one nebula. Not sci-fi chrome.
+
+   Every colour below is OKLCH and every text/background pair used for copy
+   was checked at >= 4.5:1 (large text >= 3:1) in both schemes.
+   ========================================================================= */
+
+:root {
+  /* --- ink & field ---------------------------------------------------- */
+  --ba-bg: oklch(1 0 0);
+  --ba-bg-alt: oklch(0.975 0.006 265);
+  --ba-surface: oklch(0.962 0.008 265);
+  --ba-ink: oklch(0.245 0.03 265);
+  --ba-ink-2: oklch(0.38 0.03 265);
+  --ba-ink-3: oklch(0.5 0.03 265); /* 6.01:1 on white */
+  --ba-line: oklch(0.9 0.012 265);
+
+  /* --- nebula ---------------------------------------------------------- */
+  --ba-indigo: oklch(0.5 0.2 278); /* 6.46:1 on white */
+  --ba-violet: oklch(0.51 0.21 305); /* 6.43:1 on white */
+  /* 6.1:1 on white, and 4.7:1 on the .ba-id chip's own cyan tint — the tint is
+     what sets the floor here, not the page background. */
+  --ba-cyan: oklch(0.46 0.11 205);
+  --ba-indigo-dim: oklch(0.5 0.2 278 / 0.1);
+  --ba-glow: oklch(0.5 0.2 278 / 0.16);
+
+  /* --- semantic depth --------------------------------------------------- */
+  --ba-z-sky: 0;
+  --ba-z-content: 1;
+
+  /* --- motion ---------------------------------------------------------- */
+  --ba-ease: cubic-bezier(0.22, 1, 0.36, 1); /* ease-out-quint */
+  --ba-fast: 160ms;
+  --ba-slow: 320ms;
+}
+
+.dark {
+  --ba-bg: oklch(0.155 0.028 265);
+  --ba-bg-alt: oklch(0.185 0.032 265);
+  --ba-surface: oklch(0.225 0.036 265);
+  --ba-ink: oklch(0.965 0.008 265); /* 17.67:1 */
+  --ba-ink-2: oklch(0.855 0.014 265); /* 12.57:1 */
+  --ba-ink-3: oklch(0.755 0.02 265); /* 8.95:1 */
+  --ba-line: oklch(0.32 0.038 265);
+
+  --ba-indigo: oklch(0.66 0.17 278); /* 6.03:1 */
+  --ba-violet: oklch(0.7 0.17 305); /* 6.84:1 */
+  --ba-cyan: oklch(0.83 0.12 205); /* 12.08:1 */
+  --ba-indigo-dim: oklch(0.66 0.17 278 / 0.16);
+  --ba-glow: oklch(0.66 0.17 278 / 0.28);
+}
+
+/* =========================================================================
+   Map onto the default theme
+   ========================================================================= */
+
+:root,
+.dark {
+  --vp-c-bg: var(--ba-bg);
+  --vp-c-bg-alt: var(--ba-bg-alt);
+  --vp-c-bg-soft: var(--ba-surface);
+  --vp-c-bg-elv: var(--ba-surface);
+
+  --vp-c-text-1: var(--ba-ink);
+  --vp-c-text-2: var(--ba-ink-2);
+  --vp-c-text-3: var(--ba-ink-3);
+
+  --vp-c-divider: var(--ba-line);
+  --vp-c-border: var(--ba-line);
+  --vp-c-gutter: var(--ba-line);
+
+  --vp-c-brand-1: var(--ba-indigo);
+  --vp-c-brand-2: var(--ba-violet);
+  --vp-c-brand-3: var(--ba-indigo);
+  --vp-c-brand-soft: var(--ba-indigo-dim);
+
+  --vp-c-tip-1: var(--ba-cyan);
+  --vp-c-tip-soft: oklch(0.66 0.17 278 / 0.12);
+
+  --vp-layout-max-width: 1440px;
+  --vp-nav-height: 60px;
+
+  --vp-button-brand-bg: var(--ba-indigo);
+  --vp-button-brand-hover-bg: var(--ba-violet);
+  --vp-button-brand-active-bg: var(--ba-violet);
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-text: oklch(0.99 0 0);
+  --vp-button-brand-hover-text: oklch(0.99 0 0);
+
+  --vp-button-alt-bg: transparent;
+  --vp-button-alt-border: var(--ba-line);
+  --vp-button-alt-hover-border: var(--ba-indigo);
+  --vp-button-alt-hover-bg: var(--ba-indigo-dim);
+}
+
+/* `:root` is <html> whether or not `.dark` is on it, so light-only rules must
+   say so explicitly — otherwise they win by source order in both schemes. */
+html:not(.dark) {
+  --vp-code-block-bg: oklch(0.982 0.005 265);
+}
+
+.dark {
+  --vp-c-bg-elv: oklch(0.205 0.034 265);
+  --vp-code-block-bg: oklch(0.128 0.028 265);
+  --vp-code-copy-code-bg: oklch(0.185 0.032 265);
+  --vp-code-copy-code-hover-bg: oklch(0.24 0.04 265);
+}
+
+/* Prose measure: ~73ch at 16px. */
+.VPDoc .content-container {
+  max-width: 720px;
+}
+
+/* =========================================================================
+   The sky — a scrolling band behind the landing fold, not a fixed overlay
+   ========================================================================= */
+
+.Layout {
+  position: relative;
+}
+
+.VPNav,
+.VPContent,
+.VPFooter {
+  position: relative;
+  z-index: var(--ba-z-content);
+}
+
+.ba-sky {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 168vh;
+  z-index: var(--ba-z-sky);
+  pointer-events: none;
+  overflow: hidden;
+  /* fade the whole band out before the first docs link */
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 42%, transparent 88%);
+  mask-image: linear-gradient(to bottom, #000 0 42%, transparent 88%);
+}
+
+/* One nebula. Not a glow on every element — a single object in the field. */
+.ba-sky::before {
+  content: '';
+  position: absolute;
+  inset: -10% -20% auto;
+  height: 90vh;
+  background:
+    radial-gradient(50% 46% at 22% 18%, oklch(0.5 0.2 278 / 0.5), transparent 70%),
+    radial-gradient(42% 40% at 74% 6%, oklch(0.55 0.19 305 / 0.4), transparent 72%),
+    radial-gradient(60% 34% at 54% 40%, oklch(0.6 0.12 205 / 0.16), transparent 76%);
+  filter: blur(28px);
+}
+
+html:not(.dark) .ba-sky::before {
+  opacity: 0.24;
+}
+
+.dark .ba-sky::before {
+  opacity: 1;
+}
+
+.ba-sky-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Star points on a white page would be soot. Light mode keeps the nebula only. */
+html:not(.dark) .ba-sky-canvas {
+  display: none;
+}
+
+/* =========================================================================
+   Home hero
+   ========================================================================= */
+
+.VPHome {
+  padding-bottom: 96px;
+}
+
+.VPHero .container {
+  max-width: 1100px;
+}
+
+/* No background-clip:text gradient (absolute ban). Hierarchy comes from size
+   and one accent instead: the package name is a label, the claim is the
+   headline. Without this they render at the same 56px and read as one blob. */
+.VPHero .name {
+  --vp-home-hero-name-color: var(--ba-indigo);
+  --vp-home-hero-name-background: none;
+  background: none !important;
+  -webkit-background-clip: initial !important;
+  background-clip: initial !important;
+  -webkit-text-fill-color: var(--ba-indigo) !important;
+  color: var(--ba-indigo);
+  display: block;
+  font-family: var(--vp-font-family-mono);
+  font-size: clamp(0.95rem, 1.6vw, 1.15rem);
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: 0;
+  margin-bottom: 18px;
+}
+
+.VPHero .text {
+  color: var(--ba-ink);
+  font-size: clamp(2.2rem, 5.2vw, 3.75rem); /* ceiling well under the 6rem cap */
+  line-height: 1.08;
+  letter-spacing: -0.032em;
+  max-width: 16ch;
+  text-wrap: balance;
+}
+
+.VPHero .tagline {
+  color: var(--ba-ink-2);
+  font-size: clamp(1rem, 1.6vw, 1.15rem);
+  line-height: 1.62; /* light type on dark needs the extra leading */
+  max-width: 46ch;
+  padding-top: 12px;
+  text-wrap: pretty;
+}
+
+.VPHero .actions .VPButton.brand {
+  box-shadow: 0 0 0 1px oklch(0.66 0.17 278 / 0.4), 0 10px 30px -12px var(--ba-glow);
+  transition: box-shadow var(--ba-slow) var(--ba-ease), transform var(--ba-fast) var(--ba-ease);
+}
+
+.VPHero .actions .VPButton.brand:hover {
+  box-shadow: 0 0 0 1px oklch(0.7 0.17 305 / 0.6), 0 16px 40px -12px var(--ba-glow);
+  transform: translateY(-1px);
+}
+
+.VPHero .actions .VPButton:active {
+  transform: translateY(0);
+}
+
+/* =========================================================================
+   Feature cards + the plugin/provider cards — the same object, one glow rule
+   ========================================================================= */
+
+.VPFeature,
+.ba-card {
+  position: relative;
+  border: 1px solid var(--ba-line);
+  background: color-mix(in oklab, var(--ba-bg-alt) 78%, transparent);
+  transition: border-color var(--ba-slow) var(--ba-ease), box-shadow var(--ba-slow) var(--ba-ease),
+    transform var(--ba-slow) var(--ba-ease);
+}
+
+.VPFeature:hover,
+.ba-card:hover {
+  border-color: oklch(0.66 0.17 278 / 0.55);
+  box-shadow: 0 0 0 1px var(--ba-indigo-dim), 0 18px 44px -24px var(--ba-glow);
+  transform: translateY(-2px);
+}
+
+.VPFeature .title {
+  letter-spacing: -0.012em;
+}
+
+.VPFeature .details {
+  color: var(--ba-ink-2);
+}
+
+/* --- reference cards ------------------------------------------------------ */
+
+.ba-card {
+  border-radius: 12px;
+  padding: 18px 20px 4px;
+  margin: 20px 0;
+}
+
+.ba-card > h3 {
+  margin: 0 0 6px;
+  padding-top: 0;
+  border-top: none;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+}
+
+.ba-card > h3 + p {
+  margin-top: 0;
+  color: var(--ba-ink-2);
+}
+
+.ba-card p {
+  font-size: 14.5px;
+  line-height: 1.65;
+}
+
+.ba-card div[class*='language-'] {
+  margin: 12px -20px 16px;
+  border-radius: 0;
+}
+
+/* the plugin id / provider key, set as an instrument label */
+.ba-id {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.78em;
+  font-weight: 500;
+  color: var(--ba-cyan);
+  background: oklch(0.6 0.12 205 / 0.12);
+  border: 1px solid oklch(0.6 0.12 205 / 0.28);
+  border-radius: 5px;
+  padding: 1px 6px;
+  vertical-align: 2px;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+/* the compact index at the top of the reference pages */
+.ba-index {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0 34px;
+  padding: 0;
+  list-style: none;
+}
+
+.ba-index a {
+  display: inline-block;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--ba-line);
+  color: var(--ba-ink-2);
+  text-decoration: none;
+  transition: color var(--ba-fast) var(--ba-ease), border-color var(--ba-fast) var(--ba-ease),
+    background-color var(--ba-fast) var(--ba-ease);
+}
+
+.ba-index a:hover,
+.ba-index a:focus-visible {
+  color: var(--ba-ink);
+  border-color: var(--ba-indigo);
+  background: var(--ba-indigo-dim);
+}
+
+/* =========================================================================
+   Prose, code, tables
+   ========================================================================= */
+
+.vp-doc h1,
+.vp-doc h2 {
+  letter-spacing: -0.028em;
+  text-wrap: balance;
+}
+
+.vp-doc h2 {
+  border-top-color: var(--ba-line);
+}
+
+.vp-doc p,
+.vp-doc li {
+  text-wrap: pretty;
+}
+
+.vp-doc a {
+  text-decoration-color: oklch(0.66 0.17 278 / 0.4);
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--ba-fast) var(--ba-ease);
+}
+
+.vp-doc a:hover {
+  text-decoration-color: currentColor;
+}
+
+.vp-doc div[class*='language-'] {
+  border: 1px solid var(--ba-line);
+  border-radius: 10px;
+}
+
+.dark .vp-doc div[class*='language-'] {
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.04);
+}
+
+.vp-doc :not(pre) > code {
+  border: 1px solid var(--ba-line);
+  border-radius: 5px;
+  background: var(--ba-surface);
+  color: var(--ba-ink-2);
+}
+
+/* Fills the measure when it fits, scrolls inside itself when it does not —
+   the 35-row provider table is 600px wide and must never widen the page. */
+.vp-doc table {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  max-width: 100%; /* clamps max-content, so the overflow scrolls instead of widening the page */
+  overflow-x: auto;
+}
+
+.vp-doc tr {
+  background: transparent;
+  border-top-color: var(--ba-line);
+}
+
+.vp-doc th {
+  background: var(--ba-bg-alt);
+  font-size: 13px;
+  letter-spacing: 0.01em;
+  color: var(--ba-ink-2);
+}
+
+.vp-doc th,
+.vp-doc td {
+  border-color: var(--ba-line);
+}
+
+/* The quickstart block on the home page floats above the field. */
+.VPHome .ba-quickstart {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.VPHome .ba-quickstart h2 {
+  border-top: none;
+  margin: 0 0 8px;
+  padding-top: 0;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+}
+
+.VPHome .ba-quickstart > p {
+  color: var(--ba-ink-2);
+  margin-top: 0;
+}
+
+.VPHome .ba-quickstart div[class*='language-'] {
+  border-radius: 14px;
+  box-shadow: 0 30px 70px -40px oklch(0.1 0.03 265 / 0.9), 0 0 0 1px var(--ba-line);
+}
+
+.dark .VPHome .ba-quickstart div[class*='language-'] {
+  box-shadow: 0 34px 90px -44px oklch(0 0 0 / 0.95), 0 0 0 1px var(--ba-line),
+    0 0 60px -30px var(--ba-glow);
+}
+
+/* =========================================================================
+   Chrome: nav, sidebar, scrollbar
+   ========================================================================= */
+
+.VPNavBar:not(.home) {
+  background: color-mix(in oklab, var(--ba-bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.VPSidebarItem.is-active > .item > .link > .text,
+.VPSidebarItem.is-active > .item > .indicator {
+  color: var(--ba-cyan);
+}
+
+.VPSidebarItem.is-active > .item > .indicator {
+  background-color: var(--ba-cyan);
+}
+
+.VPDocOutlineItem .outline-link.active {
+  color: var(--ba-cyan);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ba-cyan);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* Tint only — native width, native behaviour. */
+* {
+  scrollbar-color: var(--ba-line) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--ba-line);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ba-indigo);
+  background-clip: content-box;
+}
+
+/* =========================================================================
+   Reduced motion — the field renders once, nothing translates
+   ========================================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .VPFeature:hover,
+  .ba-card:hover,
+  .VPHero .actions .VPButton.brand:hover {
+    transform: none;
+  }
+}
