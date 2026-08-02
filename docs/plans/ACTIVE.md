@@ -103,6 +103,19 @@ precedent); 327 files / +45.8k lines — full campaign when 1.7.0 goes
 stable. Note: 1.7 deletes oidc-provider & mcp (never ported — ruling
 vindicated).
 
+## Docs site + skill (opened 2026-08-02, user "GOOOO" on Option A design)
+
+Spec: docs/superpowers/specs/2026-08-02-docs-site-and-skill-design.md.
+Plan: docs/superpowers/plans/2026-08-02-docs-site-and-skill.md.
+- [ ] SITE (Opus, owns docs-site/** + .github/workflows/docs.yml):
+      VitePress space theme, 9 pages, real-API snippets. DISPATCHED.
+- [ ] SKILL (Opus, owns .agents/skills/better-auth-server/** + its
+      .claude/skills symlink): 1 SKILL.md + 4 references, every snippet
+      executed against 0.2.1. DISPATCHED.
+- [ ] Validation (Fable): fresh build, snippet spot-checks, fresh-agent
+      run-through of the skill on a blank FastAPI project, commits.
+User deploys the site on Vercel (root=docs-site) après merge.
+
 ## Backlog burn-down (started 2026-07-24 on user "continue")
 
 - [x] B1 APIError details wire parity: DONE, validated (Fable pinned TS
