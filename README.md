@@ -39,7 +39,7 @@ These twenty lines are a working auth server. Sign-up, sign-in, sessions, sign-o
 - 26 built-in plugins covering two-factor auth, admin, organization (teams + dynamic access control), API keys, passkeys (WebAuthn), JWT, an OAuth 2.1 authorization-server (`oauth-provider`), SSO (OIDC), generic OAuth, device authorization, SIWE (Sign-In with Ethereum), magic link, email OTP, username, anonymous sessions, multi-session and more. Plugins add routes, extend the database schema, and hook before/after every request.
 - Pluggable secondary storage (Redis-shaped protocol), configurable rate limiting with better-auth's per-path rules, trusted-proxy client-IP resolution, and secrets rotation via versioned `SecretConfig`.
 - Secure defaults: scrypt password hashing, CSRF origin checks, open-redirect protection on every `callbackURL`, timing-equalized sign-in, XChaCha20-Poly1305 cross-runtime encryption for stored secrets.
-- The core is framework-agnostic. The FastAPI layer is about 80 lines over plain request/response dataclasses, so Litestar or Django integrations can follow the same pattern.
+- The core is framework-agnostic. The FastAPI layer is about 80 lines over plain request/response dataclasses, and the Litestar layer (`BetterAuthLitestar`) proves the pattern — Django or Flask can follow.
 
 ## Compatibility with better-auth (TypeScript)
 
@@ -62,7 +62,7 @@ uv add better-auth-server[fastapi,sqlalchemy]
 # or: pip install "better-auth-server[fastapi,sqlalchemy]"
 ```
 
-Extras: `fastapi` (the FastAPI integration), `sqlalchemy` (the async SQLAlchemy adapter), `passkey` (WebAuthn via `webauthn`, for the `passkey` plugin), `sso` (DNS TXT lookups via `dnspython`, for the `sso` plugin's domain verification). Requires Python 3.10–3.14.
+Extras: `fastapi` (the FastAPI integration), `litestar` (the Litestar integration), `sqlalchemy` (the async SQLAlchemy adapter), `passkey` (WebAuthn via `webauthn`, for the `passkey` plugin), `sso` (DNS TXT lookups via `dnspython`, for the `sso` plugin's domain verification). Requires Python 3.10–3.14.
 
 ## Quickstart
 

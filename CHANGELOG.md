@@ -7,6 +7,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-02
+
+### Added
+
+- **Litestar integration**: `BetterAuthLitestar` mirrors the FastAPI surface
+  (mountable router, `session`/`require_session` DI helpers, repeated
+  `Set-Cookie` preserved). New `[litestar]` extra (litestar ≥ 2.24).
+- `session.defer_session_refresh` (TS parity): GET `/get-session` becomes
+  read-only and reports `needsRefresh`; POST performs the refresh and
+  expired-session cleanup. Without the option, POST returns the TS-exact
+  405 `METHOD_NOT_ALLOWED_DEFER_SESSION_REQUIRED`.
+- `session.disable_session_refresh` (TS parity): disables sliding-expiry
+  refresh on every session read, regardless of `update_age`.
+- Public `origin.validate_form_csrf` seam (the per-endpoint force-validation
+  used by cookieless send endpoints; TS `formCsrfMiddleware` analog).
+
+### Fixed
+
+- `POST /get-session` previously returned a generic 405; now byte-exact
+  with TypeScript (code and message).
+- Organization `listMembers`/full-org population resolves users in one
+  `in` query instead of N per-member round trips.
+- `better_auth.__version__` is now derived from package metadata (it had
+  been stuck at "0.1.0" through two releases).
+
 ## [0.2.1] - 2026-08-02
 
 Catch-up to better-auth (TypeScript) **v1.6.25** — all 60 upstream commits
@@ -121,7 +146,8 @@ unscoped project).
 - Wire and storage compatibility with better-auth (TypeScript): same routes, JSON shapes, error codes, database schema, scrypt password format and session cookie scheme.
 - Security defaults: CSRF origin checks, open-redirect protection on callback URLs, timing-equalized sign-in, rate limiting with better-auth's per-path rules.
 
-[Unreleased]: https://github.com/oumarbarry/better-auth-py/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/oumarbarry/better-auth-py/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oumarbarry/better-auth-py/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/oumarbarry/better-auth-py/releases/tag/v0.1.0
