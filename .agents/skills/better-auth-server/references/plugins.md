@@ -186,7 +186,7 @@ Short-lived single-use tokens to hand a session across contexts (SSR handoff, de
 callback).
 
 ```python
-OneTimeTokenPlugin(expires_in=3)  # seconds
+OneTimeTokenPlugin(expires_in=3)  # minutes (source does *60)
 ```
 
 ## Federation
