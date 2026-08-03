@@ -1,0 +1,22 @@
+# Publishes better-auth-client to PyPI via trusted publishing when a
+# client-v* tag is pushed. One-time setup: on PyPI, add a "trusted publisher"
+# for project better-auth-client with workflow name `client-release.yml` and
+# environment `pypi` (mirror of release.yml for the server package).
+name: Client Release
+
+on:
+  push:
+    tags: ["client-v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # required for PyPI trusted publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build --package better-auth-client
+      - run: uv publish
