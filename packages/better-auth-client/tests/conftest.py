@@ -42,7 +42,6 @@ from better_auth.plugins_ext import (
     JWTPlugin,
     MagicLinkPlugin,
     MultiSessionPlugin,
-    OAuthPopupPlugin,
     OAuthProviderPlugin,
     OneTapPlugin,
     OneTimeTokenPlugin,
@@ -210,7 +209,6 @@ def auth(outbox: dict[str, Any]) -> BetterAuth:
                     )
                 ]
             ),
-            OAuthPopupPlugin(),
             SSOPlugin(domain_verification={"enabled": True}, dns_resolver=resolve_txt),
             OAuthProviderPlugin(
                 login_page="https://app.example.com/login",

@@ -405,9 +405,6 @@ SIWE_MESSAGE = (
 async def test_siwe_nonce_verify_roundtrip(client: Any, res: Any) -> None:
     nonce = await res(client.siwe.nonce(walletAddress=SIWE_WALLET, chainId=1))
     assert nonce == {"nonce": SIWE_NONCE}
-    # the mounted /siwe/get-nonce alias answers identically
-    assert (await res(client.siwe.get_nonce(walletAddress=SIWE_WALLET, chainId=1))) == nonce
-
     verified = await res(
         client.siwe.verify(
             message=SIWE_MESSAGE,
@@ -471,19 +468,6 @@ async def test_multi_session_list_switch_revoke(client: Any, res: Any) -> None:
     await res(client.multi_session.revoke(sessionToken=second["token"]))
     listed = await res(client.multi_session.list_device_sessions())
     assert [item["user"]["email"] for item in listed] == [SIGNUP["email"]]
-
-
-# --- oauth-popup (302 to the provider, returned unfollowed) ------------------------------
-
-
-async def test_oauth_popup_start_redirects_to_provider(client: Any, res: Any) -> None:
-    response = await res(
-        client.oauth_popup.start(
-            provider="acme", popupOrigin=BASE_URL, popupNonce="n1", callbackURL="/dash"
-        )
-    )
-    assert response.status_code == 302
-    assert response.headers["location"].startswith("https://idp.example.com/authorize?")
 
 
 # --- generic-oauth -----------------------------------------------------------------------

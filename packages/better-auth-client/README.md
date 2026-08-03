@@ -76,15 +76,20 @@ client.set_bearer(token["access_token"])
 - `two_factor`, `organization` (teams and dynamic roles included), `admin`,
   `api_key`, `magic_link`, `email_otp`, `device`
 - `phone_number`, `passkey`, `siwe`, `one_tap`, `one_time_token`,
-  `multi_session`, `oauth_popup`, `sso` (domain verification included)
+  `multi_session`, `sso` (domain verification included)
 - `oauth2` — generic-oauth (`link`) plus the whole oauth-provider surface
   (DCR `register`, client CRUD, `client.rotate_secret`, `authorize`, `token`,
-  `introspect`, `revoke`, `userinfo`, `end_session`, consent + consent CRUD;
-  `/oauth2/continue` is `oauth2.continue_authorization` — `continue` is a Python keyword)
+  `introspect`, `revoke`, `userinfo`, `end_session`, consent + consent CRUD)
 - root-mounted jwt-plugin routes as `token()` / `jwks()`, plus
   `is_username_available()` and `delete_anonymous_user()`
 
 Server plugins without mounted routes need no client namespace: `bearer`
 (automatic `set-auth-token` capture, above), `captcha`, `have-i-been-pwned`,
 `last-login-method`, `custom-session` (shadows `get_session`), `oauth-proxy`
-(browser-redirect callback only).
+(browser-redirect callback only), `oauth-popup` (popup navigation only).
+
+The rule for what is included: an entry exists when the request is genuinely
+emitted by a Python program — headless or relaying for a browser (BFF,
+server-rendered pages, CLIs). Routes only the end user's own browser ever
+requests (`/oauth2/continue`, `/oauth-popup/start`, redirect callbacks) are
+deliberately not part of the client.

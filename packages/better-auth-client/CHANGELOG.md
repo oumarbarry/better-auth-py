@@ -7,6 +7,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Removed
+
+- Three entries whose requests are only ever emitted by the end user's own
+  browser, never by a Python program (headless or relaying): `oauth_popup.start`
+  (popup navigation; the plugin leaves the client), `oauth2.continue_`
+  (post-login browser redirect — backends redirect *to* it, never call it)
+  and the redundant `siwe.get_nonce` wire alias (`siwe.nonce` is the
+  operation). This is now the documented inclusion rule for the catalog.
+
 ## [0.2.0] - 2026-08-03
 
 ### Added
@@ -22,9 +31,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     `oauth_popup.start`, `sso.*` (provider CRUD + domain verification);
   - the oauth-provider surface under `oauth2.*`: DCR `register`, client CRUD
     + `client.rotate_secret`, `authorize`, `token`, `introspect`, `revoke`,
-    `userinfo`, `end_session`, `consent`/`continue_authorization`/consent CRUD
-    (`/oauth2/continue` is exposed as `continue_authorization` — `continue`
-    is a Python keyword);
+    `userinfo`, `end_session`, `consent`/`continue_`/consent CRUD
+    (`/oauth2/continue` was exposed as `continue_` — Python keyword);
   - root-mounted jwt-plugin routes as `token()` and `jwks()`.
 - Namespaces now nest to any depth (`client.oauth2.client.rotate_secret`).
 

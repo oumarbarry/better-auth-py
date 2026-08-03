@@ -13,15 +13,18 @@ A dotted path that is also a route of its own (``device`` for ``GET /device``,
 ``forget_password`` next to ``forget_password.email_otp``) becomes a *callable*
 namespace.
 
-Excluded on purpose (server routes that are not client-callable from Python):
-browser-redirect OAuth callbacks with path params (``/oauth2/callback/{providerId}``,
-``/sso/callback[/{providerId}]``, ``/oauth-proxy-callback``). Plugins without mounted
-routes (``bearer``, ``captcha``, ``have-i-been-pwned``, ``last-login-method``) and
-``custom-session`` (which shadows the core ``/get-session``) add no namespace.
-``/oauth2/continue`` is exposed as ``oauth2.continue_authorization`` — the SDK name
-is free to differ from the wire path (``continue`` is a Python keyword, and a
-trailing-underscore name reads poorly); it resumes an interrupted authorization
-after sign-in.
+Inclusion rule: an entry exists when the request is genuinely emitted by a Python
+program (headless or relaying for a browser — BFF, server-rendered pages, CLIs,
+test harnesses). Routes only ever requested by the end user's own browser are
+excluded on purpose: OAuth callbacks with path params (``/oauth2/callback/
+{providerId}``, ``/sso/callback[/{providerId}]``, ``/oauth-proxy-callback``),
+``/oauth-popup/start`` (popup navigation; its completion talks to ``window.opener``)
+and ``/oauth2/continue`` (post-login browser redirect that resumes authorization —
+backends redirect *to* it, never call it). ``/siwe/get-nonce`` is a mounted wire
+alias of ``/siwe/nonce``; the SDK exposes the operation once. Plugins without
+mounted routes (``bearer``, ``captcha``, ``have-i-been-pwned``,
+``last-login-method``), ``oauth-popup`` (see above) and ``custom-session`` (which
+shadows the core ``/get-session``) add no namespace.
 """
 
 from __future__ import annotations
@@ -159,9 +162,8 @@ CATALOG: tuple[tuple[str, str, str], ...] = (
     # --- anonymous (plugins_ext/anonymous.py) -----------------------------------------
     ("sign_in.anonymous", "POST", "/sign-in/anonymous"),
     ("delete_anonymous_user", "POST", "/delete-anonymous-user"),
-    # --- siwe (plugins_ext/siwe.py; /siwe/get-nonce is a mounted alias of /siwe/nonce)
+    # --- siwe (plugins_ext/siwe.py) ---------------------------------------------------
     ("siwe.nonce", "POST", "/siwe/nonce"),
-    ("siwe.get_nonce", "POST", "/siwe/get-nonce"),
     ("siwe.verify", "POST", "/siwe/verify"),
     # --- one-tap (plugins_ext/one_tap.py) ---------------------------------------------
     ("one_tap.callback", "POST", "/one-tap/callback"),
@@ -176,8 +178,6 @@ CATALOG: tuple[tuple[str, str, str], ...] = (
     ("multi_session.list_device_sessions", "GET", "/multi-session/list-device-sessions"),
     ("multi_session.set_active", "POST", "/multi-session/set-active"),
     ("multi_session.revoke", "POST", "/multi-session/revoke"),
-    # --- oauth-popup (plugins_ext/oauth_popup.py; 302 to the provider, returned) ------
-    ("oauth_popup.start", "GET", "/oauth-popup/start"),
     # --- generic-oauth (plugins_ext/generic_oauth.py; the {providerId} browser
     #     callback is excluded) -------------------------------------------------------
     ("sign_in.oauth2", "POST", "/sign-in/oauth2"),
@@ -210,7 +210,6 @@ CATALOG: tuple[tuple[str, str, str], ...] = (
     ("oauth2.userinfo", "GET", "/oauth2/userinfo"),
     ("oauth2.end_session", "GET", "/oauth2/end-session"),
     ("oauth2.consent", "POST", "/oauth2/consent"),
-    ("oauth2.continue_authorization", "POST", "/oauth2/continue"),
     ("oauth2.get_consent", "GET", "/oauth2/get-consent"),
     ("oauth2.get_consents", "GET", "/oauth2/get-consents"),
     ("oauth2.update_consent", "POST", "/oauth2/update-consent"),
