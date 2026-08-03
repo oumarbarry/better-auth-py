@@ -333,6 +333,29 @@ User deploys the site on Vercel (root=docs-site) après merge.
       3fbf42d, tag v0.5.1, workflow green, GitHub release. Patch
       shipped BEFORE any next feature merge (versioning rule).
       PyPI-wheel smoke of the fix GREEN (0.5.1 wheel imports plugins_ext without extras; PasskeyPlugin error names the extra).
+- [x] CLIENT CATALOG CURATION (client-v0.3.0): DONE, user-driven review
+      round. User challenged the full-coverage value + the continue_
+      naming; Fable review under the agreed criterion ("request
+      genuinely emitted by a Python program, headless OR relaying for
+      a browser — BFF/server-rendered/CLI; end-user-browser-only
+      navigations are out") DROPPED 3 entries: oauth_popup.start
+      (plugin leaves the client), /oauth2/continue (backends redirect
+      TO it, never call it — retired the continue_/continue_
+      authorization naming debate entirely), siwe.get_nonce (wire
+      alias, SDK exposes one op). KEPT with justification: passkey
+      ceremony (python-fido2 hardware-key CLIs), oauth2.authorize/
+      end_session (diagnostics/logout propagation), one_tap.callback
+      (BFF-forward, symmetric with magic_link.verify), device
+      approve/deny + consent + public_client (server-rendered pages).
+      161 → 158 endpoints; inclusion rule documented in catalog
+      docstring + README. Interim rename to continue_authorization
+      (fe70a0c) was superseded by the drop; the 0.2.0 CHANGELOG
+      section it had rewritten was restored to historical truth.
+      RELEASED 2026-08-03: client-v0.3.0 (feat! 3d0561e, chore
+      1f0e062, workflow green, GitHub release, PyPI smoke GREEN: 158
+      entries, e2e, dropped namespaces raise AttributeError). PROCESS LESSON recorded in memory: user questions
+      get answered + options BEFORE any action (the rename had been
+      executed mid-question).
 - [x] DOCS POLISH (user feedback round, 2026-08-03): DONE, committed
       8b36f39, build green anchors-OK 71 pages. Rebrand "Better Auth
       for Python" (hero/nav/meta; better-auth-server only as pip name),
