@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-03
+
+### Fixed
+
+- `better_auth.plugins_ext` now imports without the `[passkey]` extra
+  installed. The package eagerly imported the passkey plugin, whose
+  unguarded `webauthn` import crashed `from better_auth.plugins_ext
+  import <any plugin>` on wheels installed without that extra.
+  `PasskeyPlugin` is imported lazily, and requesting it without the
+  extra raises an error naming `better-auth-server[passkey]`.
+
 ## [0.5.0] - 2026-08-02
 
 ### Added
@@ -170,7 +181,8 @@ unscoped project).
 - Wire and storage compatibility with better-auth (TypeScript): same routes, JSON shapes, error codes, database schema, scrypt password format and session cookie scheme.
 - Security defaults: CSRF origin checks, open-redirect protection on callback URLs, timing-equalized sign-in, rate limiting with better-auth's per-path rules.
 
-[Unreleased]: https://github.com/oumarbarry/better-auth-py/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/oumarbarry/better-auth-py/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/oumarbarry/better-auth-py/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/oumarbarry/better-auth-py/compare/v0.2.1...v0.3.0

@@ -87,7 +87,7 @@ requires-dist = [{ name = "httpx", specifier = ">=0.28" }]
 
 [[package]]
 name = "better-auth-server"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
