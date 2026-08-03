@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-03
+
 ### Added
 
 - Full plugin coverage — 59 new endpoints (161 total), one namespace per
@@ -52,4 +54,5 @@ Initial release.
 Works against any better-auth server — the TypeScript original or
 [better-auth-server](https://pypi.org/project/better-auth-server/) — same wire.
 
+[0.2.0]: https://github.com/oumarbarry/better-auth-py/compare/client-v0.1.0...client-v0.2.0
 [0.1.0]: https://github.com/oumarbarry/better-auth-py/releases/tag/client-v0.1.0
