@@ -12,11 +12,19 @@ Sources of truth in the server package (nothing invented):
 A dotted path that is also a route of its own (``device`` for ``GET /device``,
 ``forget_password`` next to ``forget_password.email_otp``) becomes a *callable*
 namespace.
+
+Excluded on purpose (server routes that are not client-callable from Python):
+browser-redirect OAuth callbacks with path params (``/oauth2/callback/{providerId}``,
+``/sso/callback[/{providerId}]``, ``/oauth-proxy-callback``). Plugins without mounted
+routes (``bearer``, ``captcha``, ``have-i-been-pwned``, ``last-login-method``) and
+``custom-session`` (which shadows the core ``/get-session``) add no namespace.
+``/oauth2/continue`` is exposed as ``oauth2.continue_`` (``continue`` is a Python
+keyword).
 """
 
 from __future__ import annotations
 
-#: (dotted client path, HTTP method, route path) — max two levels deep.
+#: (dotted client path, HTTP method, route path).
 CATALOG: tuple[tuple[str, str, str], ...] = (
     # --- core (endpoints.py ROUTES) ---------------------------------------------------
     ("sign_up.email", "POST", "/sign-up/email"),
@@ -129,4 +137,80 @@ CATALOG: tuple[tuple[str, str, str], ...] = (
     ("device.token", "POST", "/device/token"),
     ("device.approve", "POST", "/device/approve"),
     ("device.deny", "POST", "/device/deny"),
+    # --- username (plugins_ext/username.py) -------------------------------------------
+    ("sign_in.username", "POST", "/sign-in/username"),
+    ("is_username_available", "POST", "/is-username-available"),
+    # --- phone-number (plugins_ext/phone_number.py) -----------------------------------
+    ("sign_in.phone_number", "POST", "/sign-in/phone-number"),
+    ("phone_number.send_otp", "POST", "/phone-number/send-otp"),
+    ("phone_number.verify", "POST", "/phone-number/verify"),
+    ("phone_number.request_password_reset", "POST", "/phone-number/request-password-reset"),
+    ("phone_number.reset_password", "POST", "/phone-number/reset-password"),
+    # --- passkey (plugins_ext/passkey.py) ---------------------------------------------
+    ("passkey.generate_register_options", "GET", "/passkey/generate-register-options"),
+    ("passkey.verify_registration", "POST", "/passkey/verify-registration"),
+    ("passkey.generate_authenticate_options", "GET", "/passkey/generate-authenticate-options"),
+    ("passkey.verify_authentication", "POST", "/passkey/verify-authentication"),
+    ("passkey.list_user_passkeys", "GET", "/passkey/list-user-passkeys"),
+    ("passkey.delete_passkey", "POST", "/passkey/delete-passkey"),
+    ("passkey.update_passkey", "POST", "/passkey/update-passkey"),
+    # --- anonymous (plugins_ext/anonymous.py) -----------------------------------------
+    ("sign_in.anonymous", "POST", "/sign-in/anonymous"),
+    ("delete_anonymous_user", "POST", "/delete-anonymous-user"),
+    # --- siwe (plugins_ext/siwe.py; /siwe/get-nonce is a mounted alias of /siwe/nonce)
+    ("siwe.nonce", "POST", "/siwe/nonce"),
+    ("siwe.get_nonce", "POST", "/siwe/get-nonce"),
+    ("siwe.verify", "POST", "/siwe/verify"),
+    # --- one-tap (plugins_ext/one_tap.py) ---------------------------------------------
+    ("one_tap.callback", "POST", "/one-tap/callback"),
+    # --- jwt (plugins_ext/jwt.py; routes are mounted at the root, so the client
+    #     mirrors them at the root — jwks assumes the default jwks_path) --------------
+    ("jwks", "GET", "/jwks"),
+    ("token", "GET", "/token"),
+    # --- one-time-token (plugins_ext/one_time_token.py) -------------------------------
+    ("one_time_token.generate", "GET", "/one-time-token/generate"),
+    ("one_time_token.verify", "POST", "/one-time-token/verify"),
+    # --- multi-session (plugins_ext/multi_session.py) ---------------------------------
+    ("multi_session.list_device_sessions", "GET", "/multi-session/list-device-sessions"),
+    ("multi_session.set_active", "POST", "/multi-session/set-active"),
+    ("multi_session.revoke", "POST", "/multi-session/revoke"),
+    # --- oauth-popup (plugins_ext/oauth_popup.py; 302 to the provider, returned) ------
+    ("oauth_popup.start", "GET", "/oauth-popup/start"),
+    # --- generic-oauth (plugins_ext/generic_oauth.py; the {providerId} browser
+    #     callback is excluded) -------------------------------------------------------
+    ("sign_in.oauth2", "POST", "/sign-in/oauth2"),
+    ("oauth2.link", "POST", "/oauth2/link"),
+    # --- sso (plugins_ext/sso/; domain-verification routes exist server-side only when
+    #     the option is enabled; browser callbacks excluded) ---------------------------
+    ("sign_in.sso", "POST", "/sign-in/sso"),
+    ("sso.register", "POST", "/sso/register"),
+    ("sso.providers", "GET", "/sso/providers"),
+    ("sso.get_provider", "GET", "/sso/get-provider"),
+    ("sso.update_provider", "POST", "/sso/update-provider"),
+    ("sso.delete_provider", "POST", "/sso/delete-provider"),
+    ("sso.request_domain_verification", "POST", "/sso/request-domain-verification"),
+    ("sso.verify_domain", "POST", "/sso/verify-domain"),
+    # --- oauth-provider (plugins_ext/oauth_provider/; JSON + redirect-based routes.
+    #     /oauth2/userinfo is also mounted as POST — the client uses GET) --------------
+    ("oauth2.register", "POST", "/oauth2/register"),
+    ("oauth2.create_client", "POST", "/oauth2/create-client"),
+    ("oauth2.get_client", "GET", "/oauth2/get-client"),
+    ("oauth2.public_client", "GET", "/oauth2/public-client"),
+    ("oauth2.public_client_prelogin", "POST", "/oauth2/public-client-prelogin"),
+    ("oauth2.get_clients", "GET", "/oauth2/get-clients"),
+    ("oauth2.update_client", "POST", "/oauth2/update-client"),
+    ("oauth2.client.rotate_secret", "POST", "/oauth2/client/rotate-secret"),
+    ("oauth2.delete_client", "POST", "/oauth2/delete-client"),
+    ("oauth2.authorize", "GET", "/oauth2/authorize"),
+    ("oauth2.token", "POST", "/oauth2/token"),
+    ("oauth2.introspect", "POST", "/oauth2/introspect"),
+    ("oauth2.revoke", "POST", "/oauth2/revoke"),
+    ("oauth2.userinfo", "GET", "/oauth2/userinfo"),
+    ("oauth2.end_session", "GET", "/oauth2/end-session"),
+    ("oauth2.consent", "POST", "/oauth2/consent"),
+    ("oauth2.continue_", "POST", "/oauth2/continue"),
+    ("oauth2.get_consent", "GET", "/oauth2/get-consent"),
+    ("oauth2.get_consents", "GET", "/oauth2/get-consents"),
+    ("oauth2.update_consent", "POST", "/oauth2/update-consent"),
+    ("oauth2.delete_consent", "POST", "/oauth2/delete-consent"),
 )

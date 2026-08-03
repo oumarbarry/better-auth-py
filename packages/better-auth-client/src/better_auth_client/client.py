@@ -104,16 +104,26 @@ class _BaseClient:
 
     def _build_namespaces(self) -> None:
         entries = {name: (method, path) for name, method, path in CATALOG}
-        heads = {name.partition(".")[0] for name in entries if "." in name}
-        for head in heads:
-            invoke = self._method(*entries[head]) if head in entries else None
-            setattr(self, head, _Namespace(invoke))
+        parents = {name.rpartition(".")[0] for name in entries if "." in name}
+        nodes: dict[str, Any] = {"": self}
+
+        def ensure(prefix: str) -> Any:
+            """Namespace object at ``prefix``, creating ancestors as needed; callable
+            when the prefix is itself an entry (e.g. ``device`` for ``GET /device``)."""
+            if prefix not in nodes:
+                parent = ensure(prefix.rpartition(".")[0])
+                invoke = self._method(*entries[prefix]) if prefix in entries else None
+                nodes[prefix] = _Namespace(invoke)
+                setattr(parent, prefix.rpartition(".")[2], nodes[prefix])
+            return nodes[prefix]
+
+        for parent in parents:
+            ensure(parent)
         for name, (method, path) in entries.items():
-            head, _, leaf = name.partition(".")
-            if leaf:
-                setattr(getattr(self, head), leaf, self._method(method, path))
-            elif head not in heads:
-                setattr(self, head, self._method(method, path))
+            if name in parents:
+                continue  # already installed as a callable namespace
+            prefix, _, leaf = name.rpartition(".")
+            setattr(nodes[prefix], leaf, self._method(method, path))
 
     def _method(self, method: str, path: str) -> Any:
         def call(**kwargs: Any) -> Any:

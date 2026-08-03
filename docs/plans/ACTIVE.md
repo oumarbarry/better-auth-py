@@ -299,8 +299,24 @@ User deploys the site on Vercel (root=docs-site) après merge.
       better-auth-client 0.1.0 against PyPI better-auth-server[flask]
       0.5.0 via WSGITransport — sign-up/get-session/sign-out e2e AND
       exact wire error (401 INVALID_EMAIL_OR_PASSWORD through APIError).
-      REMAINING (queued): 19 plugin namespaces batch-wise; docs-site
-      client page; both post-launch.
+      REMAINING (queued): docs-site client page (post-launch).
+- [x] CLIENT FULL PLUGIN COVERAGE: DONE, validated (Fable re-ran FULL
+      gate at CLI: 2121 pass = 2091 + 30, ruff/format/ty clean; catalog
+      spot-checked: 161 unique entries, continue_/rotate_secret/root
+      token+jwks mappings correct). All 19 remaining plugins resolved:
+      14 gained namespaces (59 new endpoints — passkey e2e with real
+      ES256 SoftKey, oauth-provider full flow DCR→authorize→consent→
+      token→userinfo→introspect→revoke, sso domain-verification via
+      dns_resolver seam, one-tap with mocked Google JWKS), 5 have no
+      mounted routes by proof (bearer/captcha/have-i-been-pwned/
+      last-login-method hooks-only; custom-session shadows core
+      get-session). Notable decisions: /oauth2/continue → continue_
+      (Python keyword); _build_namespaces generalized to arbitrary
+      depth; browser-only callbacks with path params excluded
+      (oauth-proxy callback, /oauth2/callback/{id}, /sso/callback);
+      server-only admin_create_client not exposed (email-otp
+      precedent). Agent stalled once at gate time (watchdog 600s),
+      resumed via SendMessage, zero rework.
 - [x] DOCS POLISH (user feedback round, 2026-08-03): DONE, committed
       8b36f39, build green anchors-OK 71 pages. Rebrand "Better Auth
       for Python" (hero/nav/meta; better-auth-server only as pip name),
