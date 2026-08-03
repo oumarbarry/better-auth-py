@@ -131,7 +131,7 @@ GitHub(
     client_id="…",
     client_secret="…",
     scopes=["read:user", "user:email"],
-    redirect_uri=None,                       # overrides {base_url}{base_path}/callback/{id}
+    redirect_uri=None,          # overrides {base_url}{base_path}/callback/{id}
     authorize_params={"prompt": "consent"},  # extra authorize-URL params
     disable_default_scope=False,             # drop the baked-in scopes first
     disable_sign_up=False,                   # never create a user via this provider
@@ -169,7 +169,7 @@ expects an OIDC-shaped userinfo payload (`sub`, `email`, `email_verified`,
 Discord sources are the two worked examples in the codebase.
 
 For a provider you would rather configure at runtime than as a class — from a
-database row, say — use the [`generic-oauth` plugin](/plugins/generic-oauth),
+database row, say — use the [Generic OAuth plugin](/plugins/generic-oauth),
 which also supports OIDC discovery URLs.
 
 ## Account linking

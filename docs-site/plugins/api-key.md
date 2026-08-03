@@ -18,7 +18,9 @@ from better_auth.plugins_ext import ApiKeyPlugin
 auth = BetterAuth(
     secret="a-strong-32-character-minimum-secret",
     plugins=[
-        ApiKeyPlugin({"default_prefix": "sk_", "default_key_length": 64, "enable_metadata": True})
+        ApiKeyPlugin(
+            {"default_prefix": "sk_", "default_key_length": 64, "enable_metadata": True}
+        )
     ],
 )
 ```
@@ -44,7 +46,7 @@ carrying a `config_id`), not kwargs — mirroring the TS multi-config shape.
 | GET | `/api-key/list` |
 
 The TS `serverOnly` endpoints are plugin methods, never mounted as HTTP routes
-(the [email-otp](./email-otp) precedent): `verify_api_key(...)` and
+(the [Email OTP](./email-otp) precedent): `verify_api_key(...)` and
 `delete_all_expired_api_keys(ctx)`. The HTTP create/update routes always run
 the TS "client" path (rejecting server-only props and `userId`); the
 `create_api_key` / `update_api_key` methods run the "server" path.

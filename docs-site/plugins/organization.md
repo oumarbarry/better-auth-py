@@ -107,8 +107,8 @@ With teams enabled: `team`, `teamMember` tables, `invitation.teamId` and
 - `metadata` is stored as a JSON string column — identical to TS, so a Python
   and a TS app can share the database.
 - Deleting an organization cascades to members, invitations and teams; the
-  cascade is not wrapped in a transaction here (`ponytail`: the MemoryAdapter
-  has no transactions; TS wraps it in one).
+  cascade is not wrapped in a transaction here (a deliberate simplification:
+  the MemoryAdapter has no transactions; TS wraps it in one).
 - Team creation caps are checked with count-then-create, which races under
   heavy concurrency — the same known FIXME as TS.
-- For instance-wide (non-organization) roles, see [admin](./admin).
+- For instance-wide (non-organization) roles, see [Admin](./admin).

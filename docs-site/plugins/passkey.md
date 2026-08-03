@@ -1,8 +1,8 @@
 ---
-title: Passkey
+title: Passkey (WebAuthn)
 ---
 
-# Passkey
+# Passkey (WebAuthn)
 
 WebAuthn/FIDO2 registration and authentication — Touch ID, Windows Hello,
 hardware keys. Mirrors the TS `@better-auth/passkey` plugin. Requires the
@@ -18,7 +18,9 @@ from better_auth.plugins_ext import PasskeyPlugin
 auth = BetterAuth(
     secret="a-strong-32-character-minimum-secret",
     plugins=[
-        PasskeyPlugin(rp_id="example.com", rp_name="Example", origin="https://example.com")
+        PasskeyPlugin(
+            rp_id="example.com", rp_name="Example", origin="https://example.com"
+        )
     ],
 )
 ```

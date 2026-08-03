@@ -47,4 +47,5 @@ auth = BetterAuth(
 
 - An anonymous user cannot sign in anonymously again
   (`ANONYMOUS_USERS_CANNOT_SIGN_IN_AGAIN_ANONYMOUSLY`).
-- `ponytail`: the TS per-instance `schema` field-name override is not exposed.
+- Deliberate simplification: the TS per-instance `schema` field-name override
+  is not exposed.

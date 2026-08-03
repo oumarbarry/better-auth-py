@@ -61,7 +61,7 @@ check the dataclass for the full field list.
 
 - Configured providers are also registered into `auth.social_providers`, so
   they ride the core social machinery (e.g. `/refresh-token`).
-- `ponytail` deviations (all matching TS behavior): the `id_token` from the
+- Implementation notes (all matching TS behavior): the `id_token` from the
   token exchange is decoded without signature verification (it arrived over
   TLS from the token endpoint); the discovery document is re-fetched per
   endpoint call (no stale cache); `sign-in/oauth2` does not origin-check

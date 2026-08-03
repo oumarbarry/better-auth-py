@@ -1,10 +1,10 @@
 ---
-title: One Tap
+title: Google One Tap
 ---
 
-# One Tap
+# Google One Tap
 
-Google One Tap: the browser posts a Google ID token to `/one-tap/callback` and
+Google One Tap: the browser posts a Google id token to `/one-tap/callback` and
 gets a session back, running the same find/register/link decision tree as the
 redirect OAuth flow. Mirrors the TS `oneTap()` plugin.
 
@@ -35,7 +35,7 @@ auth = BetterAuth(
 
 ## Notes
 
-- The ID token is verified against Google's JWKS (RS256/ES256) with the same
+- The id token is verified against Google's JWKS (RS256/ES256) with the same
   machinery as the core Google provider.
-- Also honours the registered [Google provider](/providers/)'s
+- Also honors the registered [Google provider](/providers/)'s
   `disable_sign_up` and its `authorize_params["hd"]` hosted-domain restriction.

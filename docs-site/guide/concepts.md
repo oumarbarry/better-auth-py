@@ -82,7 +82,7 @@ adapter is also what generates ids, which is why
 
 ## The schema
 
-Four core tables, with better-auth's exact camelCase columns:
+Four core tables, with Better Auth's exact camelCase columns:
 
 | Table | Columns |
 | --- | --- |
@@ -108,8 +108,8 @@ request pipeline; everything it does not override is a no-op.
 from better_auth import AuthResponse, Field, Plugin
 
 class ApiKeys(Plugin):
-    id = "api-keys"                                  # namespace for hooks and conflicts
-    schema = {                                       # extra tables, migrated like core ones
+    id = "api-keys"   # namespace for hooks and conflicts
+    schema = {        # extra tables, migrated like core ones
         "apikey": {
             "key": Field(type="string", required=True, unique=True),
             "userId": Field(type="string", required=True),
@@ -124,7 +124,7 @@ class ApiKeys(Plugin):
         return {"key": "…", "userId": result["user"]["id"]}
 
     async def before(self, ctx) -> AuthResponse | None:
-        return None                                  # or AuthResponse(...) to short-circuit
+        return None   # or AuthResponse(...) to short-circuit
 ```
 
 Register instances on `BetterAuth(plugins=[...])`. Beyond `routes`, `schema`,
@@ -145,7 +145,7 @@ storage matches it exactly, which is a stronger claim than "similar API":
   error-code strings and HTTP statuses (`INVALID_EMAIL_OR_PASSWORD` 401,
   `USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL` 422).
 - **Password hashes.** scrypt with `N=16384, r=16, p=1, dkLen=64`, NFKC
-  normalisation, hex `salt:key`. Hashes cross runtimes in both directions.
+  normalization, hex `salt:key`. Hashes cross runtimes in both directions.
 - **Cookies.** Same name, same `__Secure-` promotion, same HMAC-SHA256 signing
   and URI encoding.
 - **Ids and tokens.** Same alphabets and lengths — 62-character ids,

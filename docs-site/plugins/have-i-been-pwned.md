@@ -39,6 +39,6 @@ before every password hash on the configured paths.
 - Only the first five characters of the SHA-1 hash are sent to the HIBP range
   API; the match is done locally.
 - Plugin-owned paths in the default list only take effect when the matching
-  plugin (e.g. [admin](./admin), [email-otp](./email-otp),
-  [phone-number](./phone-number)) is installed — the check is keyed on the
+  plugin (e.g. [Admin](./admin), [Email OTP](./email-otp),
+  [Phone Number](./phone-number)) is installed — the check is keyed on the
   request path.

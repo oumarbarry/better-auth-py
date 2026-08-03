@@ -30,7 +30,10 @@ ValueError: secret must be at least 32 characters — generate one with `openssl
 ```python
 auth = BetterAuth(
     secret=os.environ["BETTER_AUTH_SECRET"],
-    secrets=[(2, os.environ["BETTER_AUTH_SECRET"]), (1, os.environ["BETTER_AUTH_SECRET_V1"])],
+    secrets=[
+        (2, os.environ["BETTER_AUTH_SECRET"]),
+        (1, os.environ["BETTER_AUTH_SECRET_V1"]),
+    ],
 )
 ```
 
@@ -62,7 +65,9 @@ from better_auth import DynamicBaseURL
 
 auth = BetterAuth(
     secret=...,
-    base_url=DynamicBaseURL(allowed_hosts=["example.com", "*.vercel.app"], protocol="https"),
+    base_url=DynamicBaseURL(
+        allowed_hosts=["example.com", "*.vercel.app"], protocol="https"
+    ),
 )
 ```
 
@@ -77,7 +82,8 @@ the first request.
 from sqlalchemy.ext.asyncio import create_async_engine
 from better_auth.adapters.sqlalchemy import SQLAlchemyAdapter
 
-auth = BetterAuth(secret=..., adapter=SQLAlchemyAdapter(create_async_engine("postgresql+asyncpg://…")))
+engine = create_async_engine("postgresql+asyncpg://…")
+auth = BetterAuth(secret=..., adapter=SQLAlchemyAdapter(engine))
 ```
 
 Omitting `adapter` gives you `MemoryAdapter()` — fine for a quickstart, wrong
@@ -150,7 +156,9 @@ from better_auth.config import ChangeEmailOptions, UserOptions
 
 UserOptions(
     additional_fields={"plan": Field(type="string", required=False, default="free")},
-    change_email=ChangeEmailOptions(enabled=True, send_change_email_confirmation=send_confirm),
+    change_email=ChangeEmailOptions(
+        enabled=True, send_change_email_confirmation=send_confirm
+    ),
 )
 
 AccountOptions(
@@ -186,7 +194,7 @@ auth = BetterAuth(
     secret=...,
     social_providers={
         "github": GitHub(client_id="…", client_secret="…"),
-        "gitlab": {"client_id": "…", "client_secret": "…"},   # name-keyed, resolved by registry
+        "gitlab": {"client_id": "…", "client_secret": "…"},  # name-keyed
     },
 )
 ```
@@ -207,7 +215,7 @@ RateLimit(
 )
 ```
 
-better-auth's per-path rules are built in; `custom_rules` overrides them.
+Better Auth's per-path rules are built in; `custom_rules` overrides them.
 `storage="memory"` counts per process — behind more than one worker, use
 `"database"` or `"secondary-storage"`.
 
@@ -230,7 +238,8 @@ need Redis.
 from better_auth import IPAddressOptions
 
 IPAddressOptions(
-    ip_address_headers=["cf-connecting-ip", "x-forwarded-for"],   # default ["x-forwarded-for"]
+    # default ["x-forwarded-for"]
+    ip_address_headers=["cf-connecting-ip", "x-forwarded-for"],
     trusted_proxies=["10.0.0.0/8"],
     disable_ip_tracking=False,
 )
@@ -283,7 +292,10 @@ triggered it.
 ```python
 from better_auth.plugins_ext import OrganizationPlugin, TwoFactorPlugin
 
-auth = BetterAuth(secret=..., plugins=[TwoFactorPlugin(issuer="Example"), OrganizationPlugin()])
+auth = BetterAuth(
+    secret=...,
+    plugins=[TwoFactorPlugin(issuer="Example"), OrganizationPlugin()],
+)
 ```
 
 See the [plugin reference](/plugins/) for all 26.

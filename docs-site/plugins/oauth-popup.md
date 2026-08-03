@@ -33,10 +33,11 @@ None — the plugin takes no options (same as TS).
 
 ## Notes
 
-- Pair it with [bearer](./bearer) so the opener can use the posted token.
+- Pair it with [Bearer Token](./bearer) so the opener can use the posted token.
 - The completion page's inline script is byte-identical to TS and its sha256
   is pinned in the response CSP.
-- `ponytail`: state is stored as a verification row plus signed CSRF cookie
+- Implementation note: state is stored as a verification row plus a signed
+  CSRF cookie
   (this port's OAuth-state convention), so the normal `/callback` and
   `/oauth2/callback` routes consume it unchanged; `additionalData` is nested
   under its own key with internal state keys stripped.

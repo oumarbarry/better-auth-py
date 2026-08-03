@@ -15,7 +15,9 @@ from better_auth.oauth.providers_ext import MicrosoftEntraId
 auth = BetterAuth(
     secret=...,
     social_providers={
-        "microsoft": MicrosoftEntraId(client_id="…", client_secret="…", tenant_id="common"),
+        "microsoft": MicrosoftEntraId(
+            client_id="…", client_secret="…", tenant_id="common"
+        ),
     },
 )
 ```

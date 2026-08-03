@@ -47,7 +47,7 @@ No extra tables — tokens live in the core `verification` table.
 - Verification consumes the token atomically; expired tokens are rejected
   before any cookie is queued (TS checks expiry after queueing — a TS-side
   quirk this port deliberately does not reproduce).
-- `ponytail`: this port is HTTP-only, so `disable_client_request=True` rejects
+- This port is HTTP-only, so `disable_client_request=True` rejects
   the generate endpoint outright — there is no separate `auth.api` server-call
   surface. TS exports no error codes for this plugin; the error bodies here
   carry the generic `BAD_REQUEST` code with TS's exact message text.

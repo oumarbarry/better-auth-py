@@ -1,7 +1,7 @@
 # Migrating from Node
 
 The short version: point a Python service at the database your TypeScript
-better-auth app already uses, and your users keep their passwords, their linked
+Better Auth app already uses, and your users keep their passwords, their linked
 accounts, and their open sessions. Nobody is signed out. There is no export
 step, no dual-write window, and no password reset email to the whole user base.
 
@@ -14,7 +14,7 @@ same crypto encodings.
 | | |
 | --- | --- |
 | **Tables** | `user`, `session`, `account`, `verification` — same names, same camelCase columns |
-| **Password hashes** | scrypt `N=16384, r=16, p=1, dkLen=64`, NFKC-normalised, hex `salt:key`. A hash written by the TypeScript library verifies in Python and the reverse |
+| **Password hashes** | scrypt `N=16384, r=16, p=1, dkLen=64`, NFKC-normalized, hex `salt:key`. A hash written by the TypeScript library verifies in Python and the reverse |
 | **Session cookies** | `better-auth.session_token`, promoted to `__Secure-` over HTTPS; value is URI-encoded `token.sig`, signed HMAC-SHA256 |
 | **Routes and bodies** | `/sign-in/email`, `/get-session`, `/callback/{provider}` … same paths, same success and error JSON |
 | **Error codes** | Same strings and statuses — `INVALID_EMAIL_OR_PASSWORD` 401, `USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL` 422 |
@@ -102,6 +102,9 @@ curl -s -b /tmp/jar https://python.example.com/api/auth/get-session
 
 Because both runtimes are stateless over one database, you can cut over a
 percentage of traffic at the load balancer and roll back by moving it away.
+During the transition, Python services can also consume the still-running Node
+server over HTTP with [`better-auth-client`](https://pypi.org/project/better-auth-client/)
+— the wire is the same on both sides.
 
 ## Translating configuration
 
@@ -150,10 +153,12 @@ project's parity decision log:
 - **`open-api`** (developer tooling, no wire or storage contract) and the
   telemetry and logger option groups (logging stays on the standard library's
   `logging`).
-- The JavaScript **`client`**, **expo**, **electron** and **cli** packages. A
-  Python client is a separate, unstarted project — but you do not need one:
-  the HTTP API is identical, so an existing `better-auth` JavaScript client in
-  your frontend keeps working unchanged against the Python server.
+- The JavaScript **`client`**, **expo**, **electron** and **cli** packages.
+  Your frontend does not need to change: the HTTP API is identical, so an
+  existing `better-auth` JavaScript client keeps working unchanged against the
+  Python server. For Python-side callers, the separate
+  [`better-auth-client`](https://pypi.org/project/better-auth-client/) package
+  covers the HTTP client role.
 
 Also still open, and not blockers for a migration: framework integrations
 beyond FastAPI (Litestar, Django, Flask) and CLI schema migrations.

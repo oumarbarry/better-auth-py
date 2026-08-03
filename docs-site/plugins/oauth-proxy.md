@@ -47,4 +47,4 @@ The rest of the plugin is request hooks around `/sign-in/social`,
   `secret` if they don't).
 - Deploy checklist: see [production deployment](/deploy/production).
 - Works with both registry [providers](/providers/) and
-  [generic-oauth](./generic-oauth).
+  [Generic OAuth](./generic-oauth).

@@ -2,9 +2,9 @@
 layout: home
 
 hero:
-  name: better-auth-server
+  name: Better Auth for Python
   text: Authentication for Python, at parity.
-  tagline: A server-side port of better-auth. Same routes, same JSON shapes, same error codes, same database — so a Python service and a TypeScript one are interchangeable on one schema.
+  tagline: A server-side port of Better Auth. Same routes, same JSON shapes, same error codes, same database — so a Python service and a TypeScript one are interchangeable on one schema.
   actions:
     - theme: brand
       text: Get started
@@ -17,7 +17,7 @@ hero:
       link: https://github.com/oumarbarry/better-auth-py
 
 features:
-  - title: Full parity with better-auth v1.6.25
+  - title: Full parity with Better Auth v1.6.25
     details: Identical paths, success and error bodies, error-code strings, camelCase columns, scrypt hash format and cookie signing scheme. A password created by the TypeScript library verifies in Python, and the reverse.
     link: /migrate/from-node
     linkText: What parity means
@@ -61,8 +61,10 @@ async def me(result: dict = Depends(ba.require_session)):
 uv add better-auth-server[fastapi,sqlalchemy]
 ```
 
-The core is framework-agnostic: the FastAPI layer is about 80 lines over plain
-request/response dataclasses, so a Litestar or Django integration follows the
-same shape. [Start here.](/guide/getting-started)
+The core is framework-agnostic, and FastAPI, Litestar, Flask and Django
+integrations ship in the box — each a thin layer over plain request/response
+dataclasses. There is a client too: [better-auth-client](https://pypi.org/project/better-auth-client/)
+talks to any Better Auth server from Python, sync or async.
+[Start here.](/guide/getting-started)
 
 </div>

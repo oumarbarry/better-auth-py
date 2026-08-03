@@ -1,10 +1,10 @@
 ---
-title: SIWE
+title: Sign-In with Ethereum
 ---
 
-# SIWE
+# Sign-In with Ethereum
 
-Sign-In with Ethereum (ERC-4361) wallet authentication. You supply nonce
+Sign-In with Ethereum (SIWE, ERC-4361) wallet authentication. You supply nonce
 generation and signature verification; the plugin owns message parsing and the
 session half. Mirrors the TS `siwe()` plugin.
 
@@ -23,7 +23,9 @@ async def verify_message(args):
 auth = BetterAuth(
     secret="a-strong-32-character-minimum-secret",
     plugins=[
-        SiwePlugin(domain="example.com", get_nonce=get_nonce, verify_message=verify_message)
+        SiwePlugin(
+            domain="example.com", get_nonce=get_nonce, verify_message=verify_message
+        )
     ],
 )
 ```

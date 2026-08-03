@@ -72,4 +72,4 @@ auth = BetterAuth(
 - TS's trusted null-session server calls (`create-user` / `has-permission`
   without a request) are not reachable through this HTTP-only router; both
   endpoints simply require a session.
-- Dynamic per-organization roles live in [organization](./organization), not here.
+- Dynamic per-organization roles live in [Organization](./organization), not here.

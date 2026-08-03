@@ -422,7 +422,8 @@ html:not(.dark) .ba-sky-canvas {
 /* The quickstart block on the home page floats above the field. */
 .VPHome .ba-quickstart {
   max-width: 760px;
-  margin: 0 auto;
+  /* clear air between the feature cards above and this section */
+  margin: 72px auto 0;
   padding: 0 24px;
 }
 

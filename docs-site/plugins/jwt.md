@@ -56,5 +56,5 @@ auth = BetterAuth(
   row written here is readable by a TS app sharing the database and vice versa.
   `alg`/`crv` are not persisted (TS declares no such columns); they are
   reconstructed from `key_pair_config` on read.
-- Required by [oauth-provider](./oauth-provider) unless that plugin is
+- Required by [OAuth Provider](./oauth-provider) unless that plugin is
   configured with `disable_jwt_plugin=True`.

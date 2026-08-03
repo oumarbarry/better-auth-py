@@ -59,5 +59,5 @@ auth = BetterAuth(
   pollers race on the same delete and exactly one mints a session. The pending
   claim and polling-interval bump use a guarded compare-and-swap, closing the
   race behind TS's GHSA-cq3f-vc6p-68fh fix.
-- Pairs naturally with [oauth-provider](./oauth-provider) when you are the
+- Pairs naturally with [OAuth Provider](./oauth-provider) when you are the
   authorization server.

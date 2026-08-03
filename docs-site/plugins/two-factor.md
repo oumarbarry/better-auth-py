@@ -1,8 +1,8 @@
 ---
-title: Two-Factor
+title: Two-Factor Authentication
 ---
 
-# Two-Factor
+# Two-Factor Authentication
 
 Second-factor authentication via TOTP, emailed/SMS OTP and backup codes, with a
 short-lived two-factor cookie between the password step and the code step,
@@ -57,7 +57,7 @@ The TS server-only endpoints `/totp/generate` and
 `/two-factor/view-backup-codes` are not mounted as HTTP routes; they are
 exposed as plain async methods on the plugin instance —
 `generate_totp_code(secret)` and `view_backup_codes(user_id)` — following the
-[email-otp](./email-otp) precedent.
+[Email OTP](./email-otp) precedent.
 
 ## Schema
 

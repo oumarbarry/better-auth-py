@@ -41,5 +41,5 @@ auth = BetterAuth(
 - `set-active` and `revoke` act on the token proven by the signed cookie value,
   never on the request-body value itself — a request cannot pair a
   validly-signed cookie with an unrelated token.
-- [custom-session](./custom-session) can opt into reshaping
+- [Custom Session](./custom-session) can opt into reshaping
   `list-device-sessions` via `should_mutate_list_device_sessions_endpoint`.

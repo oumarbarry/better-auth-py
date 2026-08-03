@@ -58,6 +58,6 @@ auth = BetterAuth(
 - Storage parity with TS: codes stored as `"<code>:<attempts>"` under the raw
   phone number; reset OTPs under `"<phoneNumber>-request-password-reset"`.
 - Codes are consumed atomically — one code never satisfies two verifications.
-- `ponytail`: the TS per-instance `schema` field-name override is not exposed,
-  and SMS-send failures are not isolated in a background task (no
-  `advanced.backgroundTasks` seam in this port).
+- Deliberate simplifications: the TS per-instance `schema` field-name override
+  is not exposed, and SMS-send failures are not isolated in a background task
+  (no `advanced.backgroundTasks` seam in this port).

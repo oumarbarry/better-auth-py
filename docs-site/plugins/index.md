@@ -25,50 +25,50 @@ authoritative list. Each plugin has its own page:
 
 ## Sign-in methods
 
-- [username](./username) — sign in with a username instead of an email
-- [magic-link](./magic-link) — passwordless sign-in through a single-use link
-- [email-otp](./email-otp) — one-time codes by email
-- [phone-number](./phone-number) — SMS one-time codes
-- [passkey](./passkey) — WebAuthn/FIDO2
-- [anonymous](./anonymous) — throwaway guest users, linked on real sign-up
-- [siwe](./siwe) — Sign-In with Ethereum
-- [one-tap](./one-tap) — Google One Tap
-- [two-factor](./two-factor) — TOTP, OTP and backup codes as a second factor
+- [Username](./username) — sign in with a username instead of an email
+- [Magic Link](./magic-link) — passwordless sign-in through a single-use link
+- [Email OTP](./email-otp) — one-time codes by email
+- [Phone Number](./phone-number) — SMS one-time codes
+- [Passkey (WebAuthn)](./passkey) — WebAuthn/FIDO2
+- [Anonymous](./anonymous) — throwaway guest users, linked on real sign-up
+- [Sign-In with Ethereum](./siwe) — SIWE (ERC-4361) wallet authentication
+- [Google One Tap](./one-tap) — sign in from Google's One Tap prompt
+- [Two-Factor Authentication](./two-factor) — TOTP, OTP and backup codes as a second factor
 
 ## Organizations and access control
 
-- [admin](./admin) — user administration, bans, impersonation
-- [organization](./organization) — organizations, members, invitations, teams
+- [Admin](./admin) — user administration, bans, impersonation
+- [Organization](./organization) — organizations, members, invitations, teams
 
 ## Tokens and keys
 
-- [api-key](./api-key) — long-lived database-backed API keys
-- [jwt](./jwt) — signed JWTs plus a published JWKS
-- [bearer](./bearer) — the `set-auth-token` response header
-- [one-time-token](./one-time-token) — single-use session handoff tokens
+- [API Key](./api-key) — long-lived database-backed API keys
+- [JWT](./jwt) — signed JWTs plus a published JWKS
+- [Bearer Token](./bearer) — the `set-auth-token` response header
+- [One-Time Token](./one-time-token) — single-use session handoff tokens
 
 ## Being an OAuth server
 
-- [oauth-provider](./oauth-provider) — a full OAuth 2.1 / OIDC authorization server
-- [device-authorization](./device-authorization) — the RFC 8628 device flow
+- [OAuth Provider](./oauth-provider) — a full OAuth 2.1 / OIDC authorization server
+- [Device Authorization](./device-authorization) — the RFC 8628 device flow
 
 ## Federating outward
 
-- [sso](./sso) — OIDC identity providers per domain or organization
-- [generic-oauth](./generic-oauth) — any OAuth2/OIDC provider, configured at runtime
-- [oauth-proxy](./oauth-proxy) — social login from preview deployments
-- [oauth-popup](./oauth-popup) — social sign-in in a popup window
+- [SSO (OIDC)](./sso) — OIDC identity providers per domain or organization
+- [Generic OAuth](./generic-oauth) — any OAuth2/OIDC provider, configured at runtime
+- [OAuth Proxy](./oauth-proxy) — social login from preview deployments
+- [OAuth Popup](./oauth-popup) — social sign-in in a popup window
 
 ## Session shaping
 
-- [multi-session](./multi-session) — several accounts signed in at once
-- [custom-session](./custom-session) — reshape the `/get-session` payload
-- [last-login-method](./last-login-method) — the "you last signed in with…" hint
+- [Multi-Session](./multi-session) — several accounts signed in at once
+- [Custom Session](./custom-session) — reshape the `/get-session` payload
+- [Last Login Method](./last-login-method) — the "you last signed in with…" hint
 
 ## Abuse prevention
 
-- [captcha](./captcha) — CAPTCHA checks before protected endpoints
-- [have-i-been-pwned](./have-i-been-pwned) — reject breached passwords
+- [Captcha](./captcha) — CAPTCHA checks before protected endpoints
+- [Have I Been Pwned](./have-i-been-pwned) — reject breached passwords
 
 ## Writing your own
 

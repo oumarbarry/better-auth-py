@@ -28,7 +28,7 @@ auth = BetterAuth(
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `fn` | `callable` | required (positional) | `(session, ctx) -> dict`, returns the payload clients receive. |
-| `should_mutate_list_device_sessions_endpoint` | `bool` | `False` | Also apply `fn` to each entry of [multi-session](./multi-session)'s `list-device-sessions`. |
+| `should_mutate_list_device_sessions_endpoint` | `bool` | `False` | Also apply `fn` to each entry of [Multi-Session](./multi-session)'s `list-device-sessions`. |
 
 ## Endpoints
 
@@ -40,5 +40,5 @@ Overrides the existing route:
 
 ## Notes
 
-- `ponytail`: TS's `fn` also receives a third `options` argument used only for
+- Deliberate simplification: TS's `fn` also receives a third `options` argument used only for
   type inference; the Python callable takes `(session, ctx)`.

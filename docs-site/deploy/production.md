@@ -77,14 +77,16 @@ from better_auth import DynamicBaseURL
 
 auth = BetterAuth(
     secret=...,
-    base_url=DynamicBaseURL(allowed_hosts=["example.com", "*.vercel.app"], protocol="https"),
+    base_url=DynamicBaseURL(
+        allowed_hosts=["example.com", "*.vercel.app"], protocol="https"
+    ),
 )
 ```
 
 The base URL is derived per request from the `Host` header and restricted to
 `allowed_hosts`; each pattern also becomes a trusted origin. This is the option
 for preview deployments — for social sign-in from preview URLs specifically,
-see the [`oauth-proxy` plugin](/plugins/oauth-proxy).
+see the [OAuth Proxy plugin](/plugins/oauth-proxy).
 
 ## Trust your proxy, not the client
 
@@ -126,15 +128,17 @@ auth = BetterAuth(
 )
 ```
 
-better-auth's per-path rules ship built in. The trap is the default:
+Better Auth's per-path rules ship built in. The trap is the default:
 `storage="memory"` counts per process, so four uvicorn workers means four times
 the limit. Use `"database"` for the shared adapter, or `"secondary-storage"`
 with a Redis-shaped store:
 
 ```python
-auth = BetterAuth(secret=..., secondary_storage=my_redis, rate_limit=RateLimit(
-    enabled=True, storage="secondary-storage",
-))
+auth = BetterAuth(
+    secret=...,
+    secondary_storage=my_redis,
+    rate_limit=RateLimit(enabled=True, storage="secondary-storage"),
+)
 ```
 
 Any object implementing the `SecondaryStorage` protocol works.
@@ -165,7 +169,7 @@ open connections faster than a database wants.
 Preview deployments get a different hostname on every push, which breaks the
 one redirect URI registered with each OAuth provider. Two fixes: `DynamicBaseURL`
 with `allowed_hosts=["*.vercel.app"]`, or the
-[`oauth-proxy` plugin](/plugins/oauth-proxy) to bounce callbacks through
+[OAuth Proxy plugin](/plugins/oauth-proxy) to bounce callbacks through
 production.
 
 ## What is already hardened

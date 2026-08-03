@@ -1,7 +1,7 @@
 # Getting started
 
 `better-auth-server` is a server-side Python port of
-[better-auth](https://better-auth.com), at full parity with the TypeScript
+[Better Auth](https://better-auth.com), at full parity with the TypeScript
 library **v1.6.25**. The PyPI package is `better-auth-server`; the import name
 is `better_auth`.
 
@@ -63,7 +63,8 @@ real database before you store anything you care about.
 from sqlalchemy.ext.asyncio import create_async_engine
 from better_auth.adapters.sqlalchemy import SQLAlchemyAdapter
 
-engine = create_async_engine("postgresql+asyncpg://…")  # or sqlite+aiosqlite, mysql+aiomysql
+# or sqlite+aiosqlite, mysql+aiomysql
+engine = create_async_engine("postgresql+asyncpg://…")
 adapter = SQLAlchemyAdapter(engine)
 
 auth = BetterAuth(secret=..., adapter=adapter)
@@ -72,7 +73,7 @@ await adapter.create_tables()  # dev convenience; use Alembic in production
 ```
 
 Four tables are created — `user`, `session`, `account` and `verification` —
-with better-auth's exact camelCase column names. Plugins that need storage
+with Better Auth's exact camelCase column names. Plugins that need storage
 declare their own tables the same way.
 
 ## Try it
@@ -177,22 +178,44 @@ back on a `set-auth-token` response header.
 
 ## Errors
 
-Failures use better-auth's exact codes and statuses, so a client written
+Failures use Better Auth's exact codes and statuses, so a client written
 against the TypeScript server needs no changes:
 
 ```json
 // POST /sign-in/email with a wrong password → 401
-{ "code": "INVALID_EMAIL_OR_PASSWORD", "message": "Invalid email or password" }
+{
+  "code": "INVALID_EMAIL_OR_PASSWORD",
+  "message": "Invalid email or password"
+}
 ```
 
 ```json
 // POST /sign-up/email with a taken address → 422
-{ "code": "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL", "message": "User already exists. Use another email." }
+{
+  "code": "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL",
+  "message": "User already exists. Use another email."
+}
 ```
 
 Note that sign-in runs a dummy scrypt hash when the user does not exist, so an
 unknown address and a wrong password take the same time and return the same
 401.
+
+## Call it from Python
+
+Python services that talk to this server (or to a TypeScript Better Auth
+server — same wire) can use `better-auth-client` from PyPI instead of raw
+`httpx`:
+
+```python
+from better_auth_client import AuthClient
+
+client = AuthClient("http://localhost:8000")  # base_path defaults to /api/auth
+client.sign_in.email(email="ada@example.com", password="s3cret-password")
+session = client.get_session()  # dict, or None when unauthenticated
+```
+
+An `AsyncAuthClient` offers the same surface, awaited.
 
 ## Next
 

@@ -1,8 +1,8 @@
 ---
-title: SSO
+title: SSO (OIDC)
 ---
 
-# SSO
+# SSO (OIDC)
 
 OIDC federation: register external identity providers per domain or
 organization and route `/sign-in/sso` to the right one, with SSRF-guarded
@@ -67,4 +67,4 @@ auth = BetterAuth(
   cross-runtime contract (the secret is needed cleartext at every token
   exchange); it is masked on read.
 - For a single hand-configured OAuth2/OIDC provider without per-domain
-  routing, [generic-oauth](./generic-oauth) is the lighter tool.
+  routing, [Generic OAuth](./generic-oauth) is the lighter tool.

@@ -40,7 +40,7 @@ The most-used options (the full TS option surface is ported; all snake_case):
 | `code_expires_in` | `int` | `600` | Authorization-code lifetime (seconds). |
 | `access_token_expires_in` | `int` | `3600` | Access-token lifetime. |
 | `m2m_access_token_expires_in` | `int` | `3600` | Client-credentials token lifetime. |
-| `id_token_expires_in` | `int` | `36000` | ID-token lifetime. |
+| `id_token_expires_in` | `int` | `36000` | Id-token lifetime. |
 | `refresh_token_expires_in` | `int` | `2592000` | Refresh-token lifetime (30 days). |
 | `allow_dynamic_client_registration` | `bool` | `False` | Enable RFC 7591 `/oauth2/register`. |
 | `allow_unauthenticated_client_registration` | `bool` | `False` | Registration without a session. |
@@ -96,6 +96,6 @@ request hooks.
 ## Notes
 
 - For the "enter this code on your TV" flow, add
-  [device-authorization](./device-authorization).
+  [Device Authorization](./device-authorization).
 - To *consume* someone else's OAuth server instead of being one, see
-  [generic-oauth](./generic-oauth) or the [providers](/providers/) registry.
+  [Generic OAuth](./generic-oauth) or the [providers](/providers/) registry.
