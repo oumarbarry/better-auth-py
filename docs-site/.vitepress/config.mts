@@ -4,9 +4,9 @@ const REPO = 'https://github.com/oumarbarry/better-auth-py'
 const PYPI = 'https://pypi.org/project/better-auth-server/'
 
 const DESCRIPTION =
-  'Authentication for Python, ported from better-auth. Full parity with the ' +
+  'Authentication for Python, ported from Better Auth. Full parity with the ' +
   'TypeScript v1.6.25 wire and storage format: 35 social providers, 26 plugins, ' +
-  'FastAPI integration, your database.'
+  'FastAPI, Litestar, Flask and Django integrations, a Python client, your database.'
 
 // Absolute URLs (og:url, sitemap) need a real hostname. Vercel exposes one; a
 // self-hosted build can pass SITE_URL. Never guessed — omitted when unknown.
@@ -63,6 +63,7 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/getting-started', activeMatch: '/guide/' },
       { text: 'Plugins', link: '/plugins/', activeMatch: '/plugins/' },
       { text: 'Providers', link: '/providers/', activeMatch: '/providers/' },
+      { text: 'Client', link: '/guide/client' },
       { text: 'Migrate', link: '/migrate/from-node', activeMatch: '/migrate/' },
       { text: 'Deploy', link: '/deploy/production', activeMatch: '/deploy/' },
       { text: 'PyPI', link: PYPI },
@@ -75,6 +76,7 @@ export default defineConfig({
           { text: 'Getting Started', link: '/guide/getting-started' },
           { text: 'Core Concepts', link: '/guide/concepts' },
           { text: 'Configuration', link: '/guide/configuration' },
+          { text: 'Python client', link: '/guide/client' },
         ],
       },
       {

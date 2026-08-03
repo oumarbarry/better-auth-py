@@ -34,7 +34,7 @@ session = await client.get_session()
 ```
 
 Kwargs are sent verbatim as wire keys (JSON body on POST, query params on GET), so
-camelCase wire fields stay camelCase: `client.forget_password(email=..., redirectTo=...)`.
+camelCase wire fields stay camelCase: `client.sign_in.social(provider=..., callbackURL=...)`.
 
 Errors raise `APIError(status, code, message, body)` with the exact wire `code`.
 Redirect responses (e.g. the OAuth authorization step) are returned as-is, never
@@ -69,7 +69,7 @@ client.set_bearer(token["access_token"])
 
 ## Coverage
 
-161 endpoints, mirroring the server routes: the full core surface plus
+158 endpoints, mirroring the server routes: the full core surface plus
 
 - `sign_in.*` — `email`, `social`, `username`, `phone_number`, `anonymous`,
   `magic_link`, `email_otp`, `oauth2` (generic-oauth), `sso`

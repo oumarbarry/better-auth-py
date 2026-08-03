@@ -215,11 +215,13 @@ client.sign_in.email(email="ada@example.com", password="s3cret-password")
 session = client.get_session()  # dict, or None when unauthenticated
 ```
 
-An `AsyncAuthClient` offers the same surface, awaited.
+An `AsyncAuthClient` offers the same surface, awaited — see the
+[Python client](/guide/client) guide for sessions, errors, and the full surface.
 
 ## Next
 
 - [Core concepts](/guide/concepts) — sessions, adapters, plugins, what parity buys you.
 - [Configuration](/guide/configuration) — every option on `BetterAuth`.
+- [Python client](/guide/client) — `better-auth-client`, the PyPI client for this server.
 - [Social providers](/providers/) — the 35 built-ins and custom ones.
 - [Production deploy](/deploy/production) — secrets, proxies, rate limits.
