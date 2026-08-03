@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-03
+
 ### Removed
 
 - Three entries whose requests are only ever emitted by the end user's own
@@ -63,5 +65,6 @@ Initial release.
 Works against any better-auth server — the TypeScript original or
 [better-auth-server](https://pypi.org/project/better-auth-server/) — same wire.
 
+[0.3.0]: https://github.com/oumarbarry/better-auth-py/compare/client-v0.2.0...client-v0.3.0
 [0.2.0]: https://github.com/oumarbarry/better-auth-py/compare/client-v0.1.0...client-v0.2.0
 [0.1.0]: https://github.com/oumarbarry/better-auth-py/releases/tag/client-v0.1.0
