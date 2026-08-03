@@ -84,7 +84,7 @@ auth = BetterAuth(
 The base URL is derived per request from the `Host` header and restricted to
 `allowed_hosts`; each pattern also becomes a trusted origin. This is the option
 for preview deployments — for social sign-in from preview URLs specifically,
-see the [`oauth-proxy` plugin](/plugins/#oauth-proxy).
+see the [`oauth-proxy` plugin](/plugins/oauth-proxy).
 
 ## Trust your proxy, not the client
 
@@ -165,7 +165,7 @@ open connections faster than a database wants.
 Preview deployments get a different hostname on every push, which breaks the
 one redirect URI registered with each OAuth provider. Two fixes: `DynamicBaseURL`
 with `allowed_hosts=["*.vercel.app"]`, or the
-[`oauth-proxy` plugin](/plugins/#oauth-proxy) to bounce callbacks through
+[`oauth-proxy` plugin](/plugins/oauth-proxy) to bounce callbacks through
 production.
 
 ## What is already hardened

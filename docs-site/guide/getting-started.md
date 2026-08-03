@@ -172,7 +172,7 @@ curl -s localhost:8000/me -H "Authorization: Bearer $TOKEN"
 ```
 
 Bearer reading is built into the core session layer, so no plugin is required.
-Add [`BearerPlugin`](/plugins/#bearer) only if you also want the token echoed
+Add [`BearerPlugin`](/plugins/bearer) only if you also want the token echoed
 back on a `set-auth-token` response header.
 
 ## Errors

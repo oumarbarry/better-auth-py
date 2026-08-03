@@ -169,7 +169,7 @@ expects an OIDC-shaped userinfo payload (`sub`, `email`, `email_verified`,
 Discord sources are the two worked examples in the codebase.
 
 For a provider you would rather configure at runtime than as a class — from a
-database row, say — use the [`generic-oauth` plugin](/plugins/#generic-oauth),
+database row, say — use the [`generic-oauth` plugin](/plugins/generic-oauth),
 which also supports OIDC discovery URLs.
 
 ## Account linking

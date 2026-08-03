@@ -45,7 +45,7 @@ the cache is ignored the moment it expires.
 **Bearer tokens.** `/sign-in/email` and `/sign-up/email` return a `token`, and
 the core session layer reads `Authorization: Bearer <token>` on every request.
 API clients never need a cookie jar. (In the TypeScript library this is a
-plugin; here it is built in, and [`BearerPlugin`](/plugins/#bearer) only adds
+plugin; here it is built in, and [`BearerPlugin`](/plugins/bearer) only adds
 the response-side `set-auth-token` header.)
 
 ## Adapters

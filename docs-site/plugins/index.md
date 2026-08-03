@@ -74,17 +74,3 @@ authoritative list. Each plugin has its own page:
 
 Everything above uses the same public surface your plugin has — see
 [Core concepts](/guide/concepts#plugins).
-
-<!-- Back-compat anchors: pages elsewhere link to /plugins/#<slug>. -->
-
-### bearer {#bearer}
-
-Moved to its own page: [bearer](./bearer).
-
-### generic-oauth {#generic-oauth}
-
-Moved to its own page: [generic-oauth](./generic-oauth).
-
-### oauth-proxy {#oauth-proxy}
-
-Moved to its own page: [oauth-proxy](./oauth-proxy).
