@@ -5,6 +5,8 @@ One module per plugin; this package re-exports every Plugin subclass.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from .admin import AdminPlugin
 from .anonymous import AnonymousPlugin
 from .api_key import ApiKeyPlugin
@@ -25,12 +27,25 @@ from .oauth_proxy import OAuthProxyPlugin
 from .one_tap import OneTapPlugin
 from .one_time_token import OneTimeTokenPlugin
 from .organization import OrganizationPlugin
-from .passkey import PasskeyPlugin
 from .phone_number import PhoneNumberPlugin
 from .siwe import SiwePlugin
 from .sso import SSOPlugin
 from .two_factor import TwoFactorPlugin
 from .username import UsernamePlugin
+
+if TYPE_CHECKING:
+    from .passkey import PasskeyPlugin
+
+
+def __getattr__(name: str) -> Any:
+    # passkey pulls the optional `webauthn` dependency ([passkey] extra), so it is
+    # imported lazily: the package must import without the extra installed.
+    if name == "PasskeyPlugin":
+        from .passkey import PasskeyPlugin
+
+        return PasskeyPlugin
+    raise AttributeError(name)
+
 
 __all__ = [
     "AdminPlugin",
