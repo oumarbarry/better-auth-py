@@ -287,10 +287,20 @@ User deploys the site on Vercel (root=docs-site) après merge.
       workspace=true required for dev-group member. Accepted deviations:
       BearerPlugin added to test fixture (set-auth-token capture needs
       it); device fixture interval="0s" for driven polls.
-      NEXT: Phase 2 release client-v0.1.0 — BLOCKED on user action:
-      register PyPI pending publisher for better-auth-client (repo
-      oumarbarry/better-auth-py, workflow client-release.yml), then
-      Fable ships workflow + tag.
+- [x] CLIENT PHASE 2 RELEASE: DONE. User registered the PyPI pending
+      publisher (project better-auth-client, workflow client-release.yml,
+      environment pypi) and gave GO. client-release.yml committed 4713976
+      (mirror of release.yml, tag client-v*, uv build --package —
+      build verified locally first; no tag-glob collision: v* only
+      matches tags starting with "v"). Package CHANGELOG added, gate
+      re-run green (2091/clean/clean incl. format), chore(release)
+      b481e20, tag client-v0.1.0 → workflow SUCCESS first try, GitHub
+      release created. CROSS-WHEEL SMOKE in a fresh venv: PyPI
+      better-auth-client 0.1.0 against PyPI better-auth-server[flask]
+      0.5.0 via WSGITransport — sign-up/get-session/sign-out e2e AND
+      exact wire error (401 INVALID_EMAIL_OR_PASSWORD through APIError).
+      REMAINING (queued): 19 plugin namespaces batch-wise; docs-site
+      client page; both post-launch.
 - npx skills add oumarbarry/better-auth-py: CONFIRMED working (user).
 
 ## Backlog burn-down (started 2026-07-24 on user "continue")
