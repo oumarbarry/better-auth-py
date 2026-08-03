@@ -301,6 +301,18 @@ User deploys the site on Vercel (root=docs-site) après merge.
       exact wire error (401 INVALID_EMAIL_OR_PASSWORD through APIError).
       REMAINING (queued): 19 plugin namespaces batch-wise; docs-site
       client page; both post-launch.
+- [x] DOCS POLISH (user feedback round, 2026-08-03): DONE, committed
+      8b36f39, build green anchors-OK 71 pages. Rebrand "Better Auth
+      for Python" (hero/nav/meta; better-auth-server only as pip name),
+      sidebar + hub in human plugin names (URLs stable), quickstart
+      spacing fixed, single-line JSON → multi-line, UK→US spellings,
+      "ponytail:" jargon de-internalized on 7 public pages, stale
+      claims fixed (4 integrations, client exists), "34 endpoints"
+      verified == len(ROUTES), client mentions on getting-started +
+      migrate. Perf: metaChunk enabled; nav slowness = on-demand
+      per-page chunks (30-90K), re-measure on prod after deploy.
+      User standards recorded: human-first docs, no internal jargon,
+      no horizontal scroll in code blocks, proper names in nav.
 - npx skills add oumarbarry/better-auth-py: CONFIRMED working (user).
 
 ## Backlog burn-down (started 2026-07-24 on user "continue")
