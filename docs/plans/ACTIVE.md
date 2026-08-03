@@ -241,11 +241,31 @@ User deploys the site on Vercel (root=docs-site) après merge.
       Flask, Django. Integration queue empty — next big rocks are the
       user-choice items below (docs-2, better-auth-client brainstorm,
       v1.7.0 campaign when stable).
-- [ ] Queued: docs iteration 2 (per-plugin/provider pages), and
-      better-auth-client (PyPI name free — needs its own brainstorm:
-      API surface + repo question before any code).
-- Vercel deploy: was serving raw markdown (build not running) — fixed by
-  explicit docs-site/vercel.json ee3c5ea; user re-checks Root Directory.
+- [x] DOCS-2: DONE, validated (Fable wired the sidebar in config.mts
+      — two collapsed groups — and ran the single docs:build: green,
+      anchors OK across 71 pages; agents were forbidden to build, zero
+      contention). 26 per-plugin + 35 per-provider pages, both index
+      pages rebuilt as hubs, uniform templates, options/routes/schema
+      extracted by real introspection (inspect.signature/plugin.routes/
+      schema; provider count == PROVIDER_REGISTRY, plugin count ==
+      plugins_ext.__all__). 97 snippets executed live (27 plugin Enable
+      + 70 provider config forms). Back-compat anchors kept in
+      plugins/index.md for #bearer/#oauth-proxy/#generic-oauth (linked
+      from guide/deploy/providers pages). Agents fixed 5 stale claims
+      in the old indexes (jwt alg union had HS256 — wrong, that's
+      oauth-provider's disable_jwt_plugin path only; oauth-provider has
+      22 routes not 21; org = 20 core + 9 teams routes; oauth-provider's
+      hard JWTPlugin init dependency was undocumented; skill ref
+      plugins.md annotates one_time_token expires_in as seconds — it's
+      MINUTES (source does *60): skill-ref fix pending, one line).
+- [x] Marketing thread aligned (parent dir, out of git): 2063 tests ×3,
+      four frameworks ×3 (tweet 2 gained the integrations line).
+- Vercel deploy: CONFIRMED WORKING by user 2026-08-03 ("la doc roule
+  propre sur vercel"). vercel.json fix ee3c5ea validated in prod.
+- better-auth-client brainstorm IN PROGRESS (user answered the 4
+  structural questions 2026-08-03): BOTH usages v0 (S2S + scripts/CLI),
+  monorepo uv workspace, TS-mirror namespaced surface, sync AND async
+  clients. Design presentation next — no code before approved spec.
 - npx skills add oumarbarry/better-auth-py: CONFIRMED working (user).
 
 ## Backlog burn-down (started 2026-07-24 on user "continue")

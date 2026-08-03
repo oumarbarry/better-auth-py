@@ -69,72 +69,56 @@ The redirect URI you register with the provider is
 `https://example.com/api/auth/callback/github`. Override it with
 `redirect_uri=` when the provider insists on something else.
 
-## The registry
+## The 35 providers
 
-Key is the name you use in `social_providers` and in the callback path.
+One page per provider — endpoints, real dataclass options, default scopes,
+and per-provider quirks:
 
-| Key | Class | Default scopes | Notes |
-| --- | --- | --- | --- |
-| `apple` | `Apple` | `email name` | PKCE · id-token |
-| `atlassian` | `Atlassian` | `read:jira-user offline_access` | PKCE |
-| `cognito` | `Cognito` | `openid profile email` | PKCE · id-token · needs `domain`, `region`, `user_pool_id` |
-| `discord` | `Discord` | `identify email` | |
-| `dropbox` | `Dropbox` | `account_info.read` | PKCE |
-| `facebook` | `Facebook` | `email public_profile` | id-token |
-| `figma` | `Figma` | `current_user:read` | PKCE |
-| `github` | `GitHub` | `read:user user:email` | |
-| `gitlab` | `Gitlab` | `read_user` | PKCE |
-| `google` | `Google` | `openid email profile` | PKCE · nonce · id-token |
-| `huggingface` | `Huggingface` | `openid profile email` | PKCE |
-| `kakao` | `Kakao` | `account_email profile_image profile_nickname` | |
-| `kick` | `Kick` | `user:read` | PKCE |
-| `line` | `Line` | `openid profile email` | PKCE |
-| `linear` | `Linear` | `read` | |
-| `linkedin` | `LinkedIn` | `profile email openid` | |
-| `microsoft` | `MicrosoftEntraId` | `openid profile email User.Read offline_access` | PKCE · id-token · `tenant_id` (default `common`) |
-| `naver` | `Naver` | `profile email` | |
-| `notion` | `Notion` | — | |
-| `paybin` | `Paybin` | `openid email profile` | PKCE |
-| `paypal` | `Paypal` | — | PKCE · id-token |
-| `polar` | `Polar` | `openid profile email` | PKCE |
-| `railway` | `Railway` | `openid email profile` | PKCE |
-| `reddit` | `Reddit` | `identity` | |
-| `roblox` | `Roblox` | `openid profile` | |
-| `salesforce` | `Salesforce` | `openid email profile` | PKCE |
-| `slack` | `Slack` | `openid profile email` | |
-| `spotify` | `Spotify` | `user-read-email` | PKCE |
-| `tiktok` | `TikTok` | `user.info.profile` | |
-| `twitch` | `Twitch` | `user:read:email openid` | |
-| `twitter` | `Twitter` | `users.read tweet.read offline.access users.email` | PKCE |
-| `vercel` | `Vercel` | — | PKCE |
-| `vk` | `VK` | `email phone` | PKCE |
-| `wechat` | `WeChat` | `snsapi_login` | comma-joined scopes · `lang` |
-| `zoom` | `Zoom` | — | PKCE |
+- [Apple](/providers/apple)
+- [Atlassian](/providers/atlassian)
+- [Amazon Cognito](/providers/cognito)
+- [Discord](/providers/discord)
+- [Dropbox](/providers/dropbox)
+- [Facebook](/providers/facebook)
+- [Figma](/providers/figma)
+- [GitHub](/providers/github)
+- [GitLab](/providers/gitlab)
+- [Google](/providers/google)
+- [Hugging Face](/providers/huggingface)
+- [Kakao](/providers/kakao)
+- [Kick](/providers/kick)
+- [LINE](/providers/line)
+- [Linear](/providers/linear)
+- [LinkedIn](/providers/linkedin)
+- [Microsoft Entra ID](/providers/microsoft)
+- [Naver](/providers/naver)
+- [Notion](/providers/notion)
+- [Paybin](/providers/paybin)
+- [PayPal](/providers/paypal)
+- [Polar](/providers/polar)
+- [Railway](/providers/railway)
+- [Reddit](/providers/reddit)
+- [Roblox](/providers/roblox)
+- [Salesforce](/providers/salesforce)
+- [Slack](/providers/slack)
+- [Spotify](/providers/spotify)
+- [TikTok](/providers/tiktok)
+- [Twitch](/providers/twitch)
+- [Twitter (X)](/providers/twitter)
+- [Vercel](/providers/vercel)
+- [VK](/providers/vk)
+- [WeChat](/providers/wechat)
+- [Zoom](/providers/zoom)
 
-`better_auth.oauth.PROVIDER_REGISTRY` is the same map at runtime:
+The link slug is the registry key — the name you use in `social_providers` and
+in the callback path. `better_auth.oauth.PROVIDER_REGISTRY` is the same map at
+runtime:
 
 ```python
 from better_auth.oauth import PROVIDER_REGISTRY
 
 len(PROVIDER_REGISTRY)   # 35
 ```
-
-### Providers that need more than a client id
-
-```python
-from better_auth.oauth.providers_ext import Cognito, MicrosoftEntraId
-
-social_providers = {
-    "cognito": Cognito(
-        client_id="…", client_secret="…",
-        domain="your-domain", region="eu-west-1", user_pool_id="eu-west-1_XXXX",
-    ),
-    "microsoft": MicrosoftEntraId(client_id="…", client_secret="…", tenant_id="common"),
-}
-```
-
-Cognito raises at construction if `domain`, `region` or `user_pool_id` is
-missing, rather than failing on the first sign-in.
 
 ## Per-provider options
 
