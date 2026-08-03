@@ -6,6 +6,12 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 
+[manifest]
+members = [
+    "better-auth-client",
+    "better-auth-server",
+]
+
 [[package]]
 name = "aiosqlite"
 version = "0.22.1"
@@ -69,6 +75,17 @@ wheels = [
 ]
 
 [[package]]
+name = "better-auth-client"
+version = "0.1.0"
+source = { editable = "packages/better-auth-client" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx", specifier = ">=0.28" }]
+
+[[package]]
 name = "better-auth-server"
 version = "0.5.0"
 source = { editable = "." }
@@ -107,6 +124,7 @@ sso = [
 [package.dev-dependencies]
 dev = [
     { name = "aiosqlite" },
+    { name = "better-auth-client" },
     { name = "django", version = "5.2.16", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "django", version = "6.0.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "dnspython" },
@@ -143,6 +161,7 @@ provides-extras = ["fastapi", "sqlalchemy", "passkey", "sso", "litestar", "flask
 [package.metadata.requires-dev]
 dev = [
     { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "better-auth-client", editable = "packages/better-auth-client" },
     { name = "django", specifier = ">=5.0" },
     { name = "dnspython", specifier = ">=2.7" },
     { name = "fastapi", specifier = ">=0.110" },

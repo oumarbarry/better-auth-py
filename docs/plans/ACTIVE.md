@@ -262,10 +262,35 @@ User deploys the site on Vercel (root=docs-site) après merge.
       four frameworks ×3 (tweet 2 gained the integrations line).
 - Vercel deploy: CONFIRMED WORKING by user 2026-08-03 ("la doc roule
   propre sur vercel"). vercel.json fix ee3c5ea validated in prod.
-- better-auth-client brainstorm IN PROGRESS (user answered the 4
-  structural questions 2026-08-03): BOTH usages v0 (S2S + scripts/CLI),
-  monorepo uv workspace, TS-mirror namespaced surface, sync AND async
-  clients. Design presentation next — no code before approved spec.
+- better-auth-client: brainstorm CLOSED (user 2026-08-03, 4 answers +
+  design approved "let's go"): BOTH usages v0, monorepo uv workspace,
+  TS-mirror namespaced surface, sync AND async, device flow IN (Fable
+  reco — CLI = RFC 8628's exact audience; server plugin already ported).
+  Spec + plan committed 9978b23 (docs/superpowers/specs/2026-08-03-
+  better-auth-client-design.md).
+- [x] CLIENT PHASE 1: DONE, validated (Fable re-ran FULL gate at CLI:
+      2091 pass = 2063 + 28, ruff/format/ty clean — live-IDE ty errors
+      stale-daemon again, 3rd occurrence). packages/better-auth-client/
+      workspace member: catalog.py (132 lines, pure data, one line per
+      endpoint) + client.py (AuthClient/AsyncAuthClient, each implements
+      only _call + _device_flow; namespaces generated). 102 entries:
+      core 24 + two_factor 8 + organization 34 (incl. teams/dyn-roles,
+      conditional server-side) + admin 15 + api_key 5 + magic_link +
+      email_otp 9 + device 5 + flow helper. Fable spot-checks: device
+      error codes slow_down/authorization_pending/expired_token/
+      access_denied match device_authorization.py:300-323 verbatim;
+      _next_interval +5s on slow_down == RFC 8628 §3.5. Tests = 14
+      scenarios ×2 (ASGITransport/FastAPI async, WSGITransport/Flask
+      sync — dogfoods the integrations, in-process, no sockets).
+      Workspace frictions solved: tests/__init__.py to avoid conftest
+      module-name collision with root tests; [tool.uv.sources]
+      workspace=true required for dev-group member. Accepted deviations:
+      BearerPlugin added to test fixture (set-auth-token capture needs
+      it); device fixture interval="0s" for driven polls.
+      NEXT: Phase 2 release client-v0.1.0 — BLOCKED on user action:
+      register PyPI pending publisher for better-auth-client (repo
+      oumarbarry/better-auth-py, workflow client-release.yml), then
+      Fable ships workflow + tag.
 - npx skills add oumarbarry/better-auth-py: CONFIRMED working (user).
 
 ## Backlog burn-down (started 2026-07-24 on user "continue")

@@ -1,0 +1,39 @@
+[project]
+name = "better-auth-client"
+version = "0.1.0"
+description = "Python HTTP client for better-auth servers (better-auth-server or the TypeScript original)."
+readme = "README.md"
+authors = [
+    { name = "Oumar Barry" }
+]
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["auth", "authentication", "client", "httpx", "better-auth"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP :: Session",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.28",
+]
+
+[project.urls]
+Homepage = "https://github.com/oumarbarry/better-auth-py"
+Repository = "https://github.com/oumarbarry/better-auth-py"
+Issues = "https://github.com/oumarbarry/better-auth-py/issues"
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "better_auth_client"
