@@ -317,6 +317,22 @@ User deploys the site on Vercel (root=docs-site) après merge.
       server-only admin_create_client not exposed (email-otp
       precedent). Agent stalled once at gate time (watchdog 600s),
       resumed via SendMessage, zero rework.
+      RELEASED 2026-08-03: client-v0.2.0 on PyPI (feat 7dd2382, chore
+      7f5e49a, workflow green, GitHub release, cross-wheel smoke:
+      username + multi_session e2e vs server 0.5.0 wheel). Smoke
+      false-alarm learned: 'someone-else' hit the port's correct
+      INVALID_USERNAME (hyphen outside default [a-zA-Z0-9_.] regex).
+- [x] HOTFIX v0.5.1 (found BY the cross-wheel smoke): plugins_ext
+      eagerly imported passkey.py whose unguarded webauthn import
+      crashed `from better_auth.plugins_ext import <anything>` on
+      wheels without [passkey] — invisible in dev (extras always
+      installed). Fix f15766d: PEP 562 lazy PasskeyPlugin +
+      TYPE_CHECKING re-export (ty clean) + import guard naming the
+      extra; regression test blocks webauthn via meta_path in a
+      subprocess. Gate 2122/clean ×2 (fix + bump). chore(release)
+      3fbf42d, tag v0.5.1, workflow green, GitHub release. Patch
+      shipped BEFORE any next feature merge (versioning rule).
+      PyPI-wheel smoke of the fix GREEN (0.5.1 wheel imports plugins_ext without extras; PasskeyPlugin error names the extra).
 - [x] DOCS POLISH (user feedback round, 2026-08-03): DONE, committed
       8b36f39, build green anchors-OK 71 pages. Rebrand "Better Auth
       for Python" (hero/nav/meta; better-auth-server only as pip name),
