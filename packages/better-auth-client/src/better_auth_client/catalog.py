@@ -18,8 +18,10 @@ browser-redirect OAuth callbacks with path params (``/oauth2/callback/{providerI
 ``/sso/callback[/{providerId}]``, ``/oauth-proxy-callback``). Plugins without mounted
 routes (``bearer``, ``captcha``, ``have-i-been-pwned``, ``last-login-method``) and
 ``custom-session`` (which shadows the core ``/get-session``) add no namespace.
-``/oauth2/continue`` is exposed as ``oauth2.continue_`` (``continue`` is a Python
-keyword).
+``/oauth2/continue`` is exposed as ``oauth2.continue_authorization`` — the SDK name
+is free to differ from the wire path (``continue`` is a Python keyword, and a
+trailing-underscore name reads poorly); it resumes an interrupted authorization
+after sign-in.
 """
 
 from __future__ import annotations
@@ -208,7 +210,7 @@ CATALOG: tuple[tuple[str, str, str], ...] = (
     ("oauth2.userinfo", "GET", "/oauth2/userinfo"),
     ("oauth2.end_session", "GET", "/oauth2/end-session"),
     ("oauth2.consent", "POST", "/oauth2/consent"),
-    ("oauth2.continue_", "POST", "/oauth2/continue"),
+    ("oauth2.continue_authorization", "POST", "/oauth2/continue"),
     ("oauth2.get_consent", "GET", "/oauth2/get-consent"),
     ("oauth2.get_consents", "GET", "/oauth2/get-consents"),
     ("oauth2.update_consent", "POST", "/oauth2/update-consent"),

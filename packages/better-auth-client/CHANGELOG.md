@@ -22,8 +22,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
     `oauth_popup.start`, `sso.*` (provider CRUD + domain verification);
   - the oauth-provider surface under `oauth2.*`: DCR `register`, client CRUD
     + `client.rotate_secret`, `authorize`, `token`, `introspect`, `revoke`,
-    `userinfo`, `end_session`, `consent`/`continue_`/consent CRUD
-    (`/oauth2/continue` is exposed as `continue_` — Python keyword);
+    `userinfo`, `end_session`, `consent`/`continue_authorization`/consent CRUD
+    (`/oauth2/continue` is exposed as `continue_authorization` — `continue`
+    is a Python keyword);
   - root-mounted jwt-plugin routes as `token()` and `jwks()`.
 - Namespaces now nest to any depth (`client.oauth2.client.rotate_secret`).
 

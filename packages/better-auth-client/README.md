@@ -80,7 +80,7 @@ client.set_bearer(token["access_token"])
 - `oauth2` — generic-oauth (`link`) plus the whole oauth-provider surface
   (DCR `register`, client CRUD, `client.rotate_secret`, `authorize`, `token`,
   `introspect`, `revoke`, `userinfo`, `end_session`, consent + consent CRUD;
-  `/oauth2/continue` is `oauth2.continue_` — `continue` is a Python keyword)
+  `/oauth2/continue` is `oauth2.continue_authorization` — `continue` is a Python keyword)
 - root-mounted jwt-plugin routes as `token()` / `jwks()`, plus
   `is_username_available()` and `delete_anonymous_user()`
 
