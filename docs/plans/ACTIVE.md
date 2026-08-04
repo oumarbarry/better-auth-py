@@ -356,6 +356,19 @@ User deploys the site on Vercel (root=docs-site) après merge.
       entries, e2e, dropped namespaces raise AttributeError). PROCESS LESSON recorded in memory: user questions
       get answered + options BEFORE any action (the rename had been
       executed mid-question).
+- [x] AX ITERATION (2026-08-04, user "faisons le AX"): DONE, committed
+      06d7e35, build green 73 pages. llms.txt + llms-full.txt (llmstxt
+      .org) generated at docs:build from the config.mts sidebar (drift
+      = build failure; 71 pages, 167 KB full file, base URL resolution
+      == config.mts); /guide/agents page (skill install + endpoints +
+      skill-vs-AGENTS.md split); README "For AI agents" section. The
+      npx skills add path was previously documented NOWHERE public
+      (user's question caught it). Skill refreshed facts-only, each
+      verified by command (2064 server tests, 4 integrations, 7 extras,
+      migrate ref → better-auth-client). Fable merge-window fixes: README
+      tagline still said "Ships with a FastAPI integration" (most
+      visible stale line in the repo) + out-of-scope line now nuances
+      the browser packages vs better-auth-client.
 - [x] DOCS POLISH (user feedback round, 2026-08-03): DONE, committed
       8b36f39, build green anchors-OK 71 pages. Rebrand "Better Auth
       for Python" (hero/nav/meta; better-auth-server only as pip name),
