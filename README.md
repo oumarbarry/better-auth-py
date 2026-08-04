@@ -4,6 +4,8 @@
 
 **Authentication for Python, ported from [better-auth](https://better-auth.com). Ships with FastAPI, Litestar, Flask and Django integrations — and a Python client.**
 
+Docs: **[better-auth-py.oumarbarry.tech](https://better-auth-py.oumarbarry.tech)**
+
 Your users, sessions and accounts live in your own database. There is no hosted service to depend on and no per-user pricing, and the API surface is the one the TypeScript original has proven in production.
 
 Full parity with better-auth (TypeScript) **v1.6.25**: same routes, JSON shapes and error codes, 35 social providers, 26 built-in plugins.
