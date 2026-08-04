@@ -77,6 +77,7 @@ export default defineConfig({
           { text: 'Core Concepts', link: '/guide/concepts' },
           { text: 'Configuration', link: '/guide/configuration' },
           { text: 'Python client', link: '/guide/client' },
+          { text: 'AI agents', link: '/guide/agents' },
         ],
       },
       {

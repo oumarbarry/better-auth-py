@@ -6,7 +6,7 @@
   "description": "Documentation site for better-auth-server (Python port of better-auth).",
   "scripts": {
     "docs:dev": "vitepress dev",
-    "docs:build": "vitepress build && node scripts/check-anchors.mjs",
+    "docs:build": "vitepress build && node scripts/check-anchors.mjs && node scripts/build-llms.mjs",
     "docs:preview": "vitepress preview"
   },
   "devDependencies": {

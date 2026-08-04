@@ -132,9 +132,11 @@ Not ported, and not planned — keep these on the Node side or drop them:
 
 - **SAML** (the non-OIDC half of the `sso` plugin), **`scim`**, **`stripe`**.
 - **`open-api`**, telemetry / logger config groups.
-- The whole client story: `better-auth/client`, `expo`, `electron`, `cli`. This is a
+- The TS client packages: `better-auth/client`, `expo`, `electron`, `cli`. This is a
   **server-side** port. The TS client library talks to the Python server unchanged
-  (same routes and JSON), so keep using it on the frontend; there is no Python client and
+  (same routes and JSON), so keep using it on the frontend. For Python callers
+  (scripts, CLIs, service-to-service) there is a separate PyPI package,
+  `better-auth-client` (import `better_auth_client`), speaking the same wire. There is
   no `better-auth migrate` CLI — manage the schema with Alembic (or
   `adapter.create_tables()` in dev).
 

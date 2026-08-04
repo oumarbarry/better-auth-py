@@ -1,8 +1,9 @@
 ---
 name: better-auth-server
 description:
-  Guide for better-auth-server, the Python port of better-auth (TypeScript) with a
-  FastAPI integration. Use this when adding auth to a FastAPI or Python server —
+  Guide for better-auth-server, the Python port of better-auth (TypeScript) with
+  FastAPI, Litestar, Flask and Django integrations and a companion Python HTTP
+  client (`better-auth-client`). Use this when adding auth to a Python server —
   "add auth to fastapi", "better auth python", "authentication python server" —
   when a project imports `better_auth` or configures `BetterAuth`, or when migrating
   a Node better-auth server to Python.
@@ -13,7 +14,10 @@ description:
 Server-side authentication for Python, ported from [better-auth](https://better-auth.com)
 at parity with **v1.6.25**: same routes, JSON bodies, error codes and camelCase database
 columns, so a Python and a TypeScript server can share one database. 35 social providers,
-26 plugins, 2006 tests. PyPI package `better-auth-server`; import name `better_auth`.
+26 plugins, 2064 tests. PyPI package `better-auth-server`; import name `better_auth`.
+A companion Python HTTP client, `better-auth-client` (import `better_auth_client`), talks
+to this server or the TypeScript one — reach for it from Python scripts, CLIs and
+service-to-service calls.
 
 ## Project detection
 
@@ -22,7 +26,8 @@ columns, so a Python and a TypeScript server can share one database. 35 social p
 | `better-auth-server` in `pyproject.toml` / `import better_auth` | Already installed — read the existing `BetterAuth(...)` call before changing anything |
 | `auth.ts` / `betterAuth({...})` in the repo | A Node better-auth server exists → read `references/migrate-from-ts.md` first |
 | FastAPI app, no auth | The path below; install with the `fastapi` extra |
-| Litestar / Django / Flask | Core is framework-agnostic (`await auth.handle(AuthRequest(...))`), but only FastAPI ships an integration |
+| Litestar / Flask / Django | Same pattern with the matching extra: `BetterAuthLitestar`, `BetterAuthFlask`, `BetterAuthDjango` (from `better_auth.integrations.<framework>`) |
+| Any other framework | Core is framework-agnostic: `await auth.handle(AuthRequest(...))` |
 
 ## Install
 
@@ -31,9 +36,9 @@ uv add "better-auth-server[fastapi,sqlalchemy]"
 # or: pip install "better-auth-server[fastapi,sqlalchemy]"
 ```
 
-Extras: `fastapi` (the integration), `sqlalchemy` (async adapter), `passkey`
-(WebAuthn, required by the `passkey` plugin), `sso` (dnspython, for the `sso` plugin's
-domain verification). Python 3.10–3.14.
+Extras: `fastapi`, `litestar`, `flask`, `django` (one per framework integration),
+`sqlalchemy` (async adapter), `passkey` (WebAuthn, required by the `passkey` plugin),
+`sso` (dnspython, for the `sso` plugin's domain verification). Python 3.10–3.14.
 
 ## Minimal server
 

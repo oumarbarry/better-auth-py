@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/oumarbarry/better-auth-py/actions/workflows/ci.yml/badge.svg)](https://github.com/oumarbarry/better-auth-py/actions/workflows/ci.yml)
 
-**Authentication for Python, ported from [better-auth](https://better-auth.com). Ships with a FastAPI integration.**
+**Authentication for Python, ported from [better-auth](https://better-auth.com). Ships with FastAPI, Litestar, Flask and Django integrations — and a Python client.**
 
 Your users, sessions and accounts live in your own database. There is no hosted service to depend on and no per-user pricing, and the API surface is the one the TypeScript original has proven in production.
 
@@ -53,7 +53,7 @@ The wire protocol and storage format follow the TypeScript implementation closel
 | Session cookies | Same name (`better-auth.session_token`, `__Secure-` over HTTPS) and signing scheme (HMAC-SHA256, base64, URI-encoded `token.sig`) |
 | IDs and tokens | Same alphabets and lengths (62-character IDs, 64-character state and verification tokens) |
 
-Known divergences: reset-password tokens are stored in the database (email-verification tokens are stateless HS256 JWTs, matching the TypeScript library); bearer-token reading is built into the core session layer (a plugin over there, `bearer` here only adds the response-side `set-auth-token` header); SAML (part of the `sso` plugin), `scim`, `stripe` and the client/expo/electron/cli packages are out of scope (server-side parity only — see the changelog).
+Known divergences: reset-password tokens are stored in the database (email-verification tokens are stateless HS256 JWTs, matching the TypeScript library); bearer-token reading is built into the core session layer (a plugin over there, `bearer` here only adds the response-side `set-auth-token` header); SAML (part of the `sso` plugin), `scim`, `stripe` and the browser client/expo/electron/cli packages are out of scope (server-side parity only — see the changelog; for calling a Better Auth server *from* Python there is [`better-auth-client`](https://pypi.org/project/better-auth-client/)).
 
 ## Install
 
@@ -233,6 +233,10 @@ uv run ty check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+
+## For AI agents
+
+`npx skills add oumarbarry/better-auth-py` installs the `better-auth-server` skill (setup, plugins, providers, TS-to-Python migration — every snippet executed and verified) for Claude Code and compatible harnesses. The documentation site serves [llms.txt](https://llmstxt.org) at `/llms.txt` (index) and `/llms-full.txt` (all pages, one file). Agents contributing to this repo are governed by [AGENTS.md](AGENTS.md); the details live on the [AI agents](docs-site/guide/agents.md) docs page.
 
 ## License
 
