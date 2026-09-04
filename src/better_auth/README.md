@@ -218,7 +218,7 @@ class ApiKeys(Plugin):
 ## Roadmap
 
 The parity campaign against the TypeScript library is complete; the
-[changelog](CHANGELOG.md) tracks each catch-up against upstream releases. Still
+[changelog](https://github.com/oumarbarry/better-auth-py/blob/main/CHANGELOG.md) tracks each catch-up against upstream releases. Still
 open: CLI schema migrations. Deliberately out of scope: `open-api`,
 telemetry/logger config groups, SAML, `scim`, `stripe`, and the TypeScript
 `client`/expo/electron/cli packages (server-side parity only).
@@ -233,12 +233,12 @@ uv run ruff check .
 uv run ty check
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+See [CONTRIBUTING.md](https://github.com/oumarbarry/better-auth-py/blob/main/CONTRIBUTING.md) for guidelines. Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
 
 ## For AI agents
 
-`npx skills add oumarbarry/better-auth-py` lists the skills in this repository; pick `better-auth-py` to install it for Claude Code and compatible harnesses. It covers setup, plugins, providers and TS-to-Python migration, and every snippet in it has been executed and verified. The documentation site serves [llms.txt](https://llmstxt.org) at `/llms.txt` (index) and `/llms-full.txt` (all pages, one file). Agents contributing to this repo are governed by [AGENTS.md](AGENTS.md); the details live on the [AI agents](docs-site/guide/agents.md) docs page.
+`npx skills add oumarbarry/better-auth-py` lists the skills in this repository; pick `better-auth-py` to install it for Claude Code and compatible harnesses. It covers setup, plugins, providers and TS-to-Python migration, and every snippet in it has been executed and verified. The documentation site serves [llms.txt](https://llmstxt.org) at `/llms.txt` (index) and `/llms-full.txt` (all pages, one file). Agents contributing to this repo are governed by [AGENTS.md](https://github.com/oumarbarry/better-auth-py/blob/main/AGENTS.md); the details live on the [AI agents](https://better-auth-py.oumarbarry.dev/guide/agents) docs page.
 
 ## License
 
-[MIT](LICENSE). Inspired by and API-compatible with [better-auth](https://github.com/better-auth/better-auth), also MIT.
+[MIT](https://github.com/oumarbarry/better-auth-py/blob/main/LICENSE). Inspired by and API-compatible with [better-auth](https://github.com/better-auth/better-auth), also MIT.
