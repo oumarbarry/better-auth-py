@@ -46,6 +46,7 @@ export default defineConfig({
   description: DESCRIPTION,
   lang: 'en-US',
   cleanUrls: true,
+  srcExclude: ['README.md'],
   metaChunk: true,
   appearance: 'dark',
   lastUpdated: false,
