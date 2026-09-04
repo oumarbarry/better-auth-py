@@ -28,9 +28,10 @@ HOTP/TOTP) are sacred: never regenerate or "fix" them.
 - Every change goes through a worktree/branch, never directly on main.
   Merging is the user's decision, taken on demonstrated evidence (full
   gate plus proof of behavior).
-- Ship a pending patch release before merging the next feature. Server
-  releases tag `v*`; client releases tag `client-v*`. Both publish to
-  PyPI through trusted publishing from GitHub Actions.
+- Ship a pending patch release before merging the next feature. The server
+  and the client are versioned independently (each bumps only when its own
+  content changes). Server releases tag `v*`, client releases `client-v*`;
+  both publish to PyPI through trusted publishing from GitHub Actions.
 
 ## Commands
 

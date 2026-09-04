@@ -45,3 +45,10 @@ chore: bump ruff
 ```
 
 Use `feat!:` or a `BREAKING CHANGE:` footer for breaking changes. PRs target `main`.
+
+## Releases
+
+The server package and the client package are versioned and released
+independently: each one bumps only when its own content changes. Server
+releases are tagged `v*`, client releases `client-v*`, and each tag publishes
+its package to PyPI through GitHub Actions.
