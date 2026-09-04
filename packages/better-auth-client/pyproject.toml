@@ -1,0 +1,42 @@
+[project]
+name = "better-auth-client"
+version = "1.0.0"
+description = "Python HTTP client for better-auth servers (better-auth-server or the TypeScript original)."
+readme = "README.md"
+authors = [
+    { name = "Oumar Barry" }
+]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+keywords = ["auth", "authentication", "client", "httpx", "better-auth"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP :: Session",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.28",
+]
+
+[project.urls]
+Homepage = "https://github.com/oumarbarry/better-auth-py"
+Documentation = "https://better-auth-py.oumarbarry.tech/guide/client"
+Repository = "https://github.com/oumarbarry/better-auth-py"
+Issues = "https://github.com/oumarbarry/better-auth-py/issues"
+Changelog = "https://github.com/oumarbarry/better-auth-py/blob/main/packages/better-auth-client/CHANGELOG.md"
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "better_auth_client"

@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Test & demo artifacts
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+better-auth-demo.db
+
+# Secrets (auth lib — never commit these)
+.env
+.env.*
+!.env.example
+
+# Node / docs site
+node_modules/
+docs-site/.vitepress/dist/
+docs-site/.vitepress/cache/
+npm-debug.log*
+.vercel/
+
+# macOS
+.DS_Store
+.claude/worktrees/
