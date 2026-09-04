@@ -29,7 +29,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/oumarbarry/better-auth-py"
-Documentation = "https://better-auth-py.oumarbarry.tech/guide/client"
+Documentation = "https://better-auth-py.oumarbarry.dev/guide/client"
 Repository = "https://github.com/oumarbarry/better-auth-py"
 Issues = "https://github.com/oumarbarry/better-auth-py/issues"
 Changelog = "https://github.com/oumarbarry/better-auth-py/blob/main/packages/better-auth-client/CHANGELOG.md"

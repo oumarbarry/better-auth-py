@@ -9,7 +9,7 @@ Authentication for Python, ported from [better-auth](https://better-auth.com). Y
 | **better-auth-server** | The server port. Full parity with better-auth (TypeScript); import name `better_auth`. | [README](src/better_auth/README.md) · [PyPI](https://pypi.org/project/better-auth-server/) |
 | **better-auth-client** | Python HTTP client for a better-auth server, 158 endpoints. | [README](packages/better-auth-client/README.md) · [PyPI](https://pypi.org/project/better-auth-client/) |
 
-Docs: **[better-auth-py.oumarbarry.tech](https://better-auth-py.oumarbarry.tech)**
+Docs: **[better-auth-py.oumarbarry.dev](https://better-auth-py.oumarbarry.dev)**
 
 ## For AI agents
 
