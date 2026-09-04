@@ -1,6 +1,6 @@
 [project]
 name = "better-auth-client"
-version = "1.0.0"
+version = "1.0.1"
 description = "Python HTTP client for better-auth servers (better-auth-server or the TypeScript original)."
 readme = "README.md"
 authors = [

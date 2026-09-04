@@ -7,6 +7,13 @@ and the package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-04
+
+### Fixed
+
+- Package metadata now links to the client documentation page at its
+  current address.
+
 ## [1.0.0] - 2026-09-04
 
 First public release of `better-auth-client`, the Python HTTP client for

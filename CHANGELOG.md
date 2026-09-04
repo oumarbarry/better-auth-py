@@ -7,6 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-04
+
+### Fixed
+
+- Package metadata and readme now link to the documentation site at its
+  current address.
+
 ## [1.0.0] - 2026-09-04
 
 First public release of `better-auth-server`, the server-side Python port of
