@@ -7,8 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-24
+
 ### Fixed
 
+- Passwords longer than `max_password_length` are now rejected with
+  `PASSWORD_TOO_LONG` before any hashing on sign-in (email, username, phone
+  number), verify-password, change-password (`currentPassword`), delete-user,
+  the two-factor endpoints that take a password, and admin create-user.
+  Sign-up and password reset already did this. Matches better-auth #11324.
+- The `PASSWORD_TOO_SHORT` and `PASSWORD_TOO_LONG` messages now read
+  "Password too short" and "Password too long", the same strings as
+  better-auth.
+- The captcha plugin logs a warning when Cloudflare Turnstile rejects a token,
+  with the error codes or the action or hostname that did not match.
 - Readme links are absolute, so they also work on the PyPI project page.
 
 ## [1.0.1] - 2026-09-04
