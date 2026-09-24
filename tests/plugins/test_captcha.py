@@ -426,6 +426,57 @@ async def test_turnstile_accepts_when_action_and_hostname_match():
     assert result is None
 
 
+TURNSTILE_FAILURES = [
+    (
+        {
+            "success": False,
+            "error-codes": ["invalid-input-response"],
+            "hostname": "example.com",
+            "action": "login",
+        },
+        {},
+        {
+            "reason": "siteverify_rejected",
+            "errorCodes": ["invalid-input-response"],
+            "hostname": "example.com",
+            "action": "login",
+        },
+    ),
+    ({"success": False}, {}, {"reason": "siteverify_rejected", "errorCodes": []}),
+    (
+        {"success": True, "action": "signup"},
+        {"expected_action": "login"},
+        {"reason": "action_mismatch", "expectedAction": "login", "actualAction": "signup"},
+    ),
+    (
+        {"success": True, "hostname": "untrusted.example"},
+        {"allowed_hostnames": ["myapp.com"]},
+        {
+            "reason": "hostname_mismatch",
+            "allowedHostnames": ["myapp.com"],
+            "actualHostname": "untrusted.example",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize(("siteverify", "options", "details"), TURNSTILE_FAILURES)
+async def test_turnstile_logs_verification_failures(siteverify, options, details, caplog):
+    # a17efd7cf (#11286) cloudflare-turnstile.ts:56: every 403 logs a warning with the
+    # siteverify error codes or the binding mismatch, so failures can be diagnosed.
+    plugin = CaptchaPlugin(provider="cloudflare-turnstile", secret_key="xx-secret-key", **options)
+    auth = make_auth(plugins=[plugin], http_client=mock_http(json_handler(200, siteverify)))
+    ctx = ctx_for(auth, "/sign-in/email", headers={"x-captcha-response": "token"})
+
+    with caplog.at_level("WARNING", logger="better_auth.captcha"):
+        result = await plugin.on_request(ctx)
+
+    assert result is not None and result.status == 403
+    [record] = caplog.records
+    assert record.getMessage().startswith("Cloudflare Turnstile verification failed")
+    assert record.args == {"provider": "cloudflare-turnstile", **details}
+
+
 # --- google-recaptcha specifics -----------------------------------------------------------
 
 

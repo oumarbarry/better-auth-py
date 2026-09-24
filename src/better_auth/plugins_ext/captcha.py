@@ -63,6 +63,15 @@ def _verification_failed() -> AuthResponse:
     )
 
 
+def _turnstile_failed(details: dict[str, Any]) -> AuthResponse:
+    """cloudflare-turnstile.ts:56 (a17efd7cf): log why siteverify refused the token."""
+    logger.warning(
+        "Cloudflare Turnstile verification failed: %s",
+        {"provider": "cloudflare-turnstile", **details},
+    )
+    return _verification_failed()
+
+
 async def _post_json(http: httpx.AsyncClient, url: str, payload: dict[str, Any]) -> dict[str, Any]:
     response = await http.post(url, json=payload, timeout=CAPTCHA_VERIFY_TIMEOUT)
     if not response.is_success:
@@ -176,13 +185,30 @@ class CaptchaPlugin(Plugin):
             payload["remoteip"] = remote_ip
         data = await _post_json(http, url, payload)
         if not data.get("success"):
-            return _verification_failed()
+            details: dict[str, Any] = {
+                "reason": "siteverify_rejected",
+                "errorCodes": data.get("error-codes") or [],
+            }
+            details.update({k: data[k] for k in ("hostname", "action") if data.get(k)})
+            return _turnstile_failed(details)
         # Bind the token to the expected action / hostname allowlist so a token issued
         # for a different action or host can't be replayed against this endpoint.
         if self.expected_action and data.get("action") != self.expected_action:
-            return _verification_failed()
+            return _turnstile_failed(
+                {
+                    "reason": "action_mismatch",
+                    "expectedAction": self.expected_action,
+                    "actualAction": data.get("action"),
+                }
+            )
         if self.allowed_hostnames and data.get("hostname") not in self.allowed_hostnames:
-            return _verification_failed()
+            return _turnstile_failed(
+                {
+                    "reason": "hostname_mismatch",
+                    "allowedHostnames": self.allowed_hostnames,
+                    "actualHostname": data.get("hostname"),
+                }
+            )
         return None
 
     async def _verify_recaptcha(

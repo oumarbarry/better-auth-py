@@ -45,5 +45,8 @@ handler.
 
 - Fails closed: any non-2xx, transport error or malformed body from the
   provider's siteverify endpoint is a 500, never a pass.
+- Cloudflare Turnstile rejections are logged as warnings on the
+  `better_auth.captcha` logger, with the provider's error codes or the action
+  or hostname that did not match. The client still gets the same 403.
 - Flattened option set: only the fields relevant to the configured `provider`
   are read (the TS options are a per-provider union).
