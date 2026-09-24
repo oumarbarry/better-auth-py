@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..adapters.base import Where
 from ..crypto import generate_otp, verify_password
-from ..endpoints import validate_password
+from ..endpoints import assert_password_not_too_long, validate_password
 from ..plugins import HookSet, Plugin, PluginHook, RateLimitRule, Route
 from ..schema import Field, Schema
 from ..session import create_session, utcnow
@@ -247,6 +247,7 @@ class PhoneNumberPlugin(Plugin):
         phone = _required_str(body, "phoneNumber")
         password = _required_str(body, "password")
         await self._validate_phone(phone)
+        assert_password_not_too_long(ctx.auth, password)  # phone-number/routes.ts:109
 
         user = await ctx.adapter.find_one("user", [Where("phoneNumber", phone)])
         if user is None:

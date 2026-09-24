@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 from ..access_control import ADMIN_DEFAULT_ROLES, Role
 from ..adapters.base import Where
 from ..crypto import generate_id, sign_value, unsign_value
-from ..endpoints import EMAIL_RE
+from ..endpoints import EMAIL_RE, assert_password_not_too_long, validate_password
 from ..ip import get_request_ip
 from ..plugins import HookSet, Plugin, PluginHook, Route
 from ..schema import Field, Schema
@@ -313,6 +313,8 @@ class AdminPlugin(Plugin):
         email = str(body["email"]).lower()
         if not EMAIL_RE.match(email):
             raise APIError(400, "INVALID_EMAIL", "Invalid email")
+        if body.get("password"):
+            assert_password_not_too_long(ctx.auth, body["password"])  # admin/routes.ts:434
         if await ctx.adapter.find_one("user", [Where("email", email)]) is not None:
             raise _err(400, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL")
 
@@ -628,11 +630,7 @@ class AdminPlugin(Plugin):
         body = ctx.body()
         new_password = body["newPassword"]
         user_id = str(body["userId"])
-        cfg = ctx.auth.email_and_password
-        if len(new_password) < cfg.min_password_length:
-            raise APIError(400, "PASSWORD_TOO_SHORT", "Password too short")
-        if len(new_password) > cfg.max_password_length:
-            raise APIError(400, "PASSWORD_TOO_LONG", "Password too long")
+        validate_password(ctx, new_password)
         if await ctx.adapter.find_one("user", [Where("id", user_id)]) is None:
             raise _not_found()
 

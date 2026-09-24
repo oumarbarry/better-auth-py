@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import jwt as pyjwt
@@ -31,6 +31,9 @@ from .oauth.flow import _valid_access_token
 from .session import clear_cookie, create_session, get_session, refresh_session_cookie, utcnow
 from .types import APIError, AuthResponse, Ctx
 
+if TYPE_CHECKING:
+    from .auth import BetterAuth
+
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -46,12 +49,17 @@ def validate_email(email: str) -> str:
     return email.lower()
 
 
+def assert_password_not_too_long(auth: BetterAuth, password: str) -> None:
+    """TS utils/password.ts:14 ``assertPasswordNotTooLong``: every endpoint that verifies
+    a password calls this before any scrypt work, so oversized input is never hashed."""
+    if len(password) > auth.email_and_password.max_password_length:
+        raise APIError(400, "PASSWORD_TOO_LONG", "Password too long")
+
+
 def validate_password(ctx: Ctx, password: str) -> None:
-    cfg = ctx.auth.email_and_password
-    if len(password) < cfg.min_password_length:
-        raise APIError(400, "PASSWORD_TOO_SHORT", "Password is too short")
-    if len(password) > cfg.max_password_length:
-        raise APIError(400, "PASSWORD_TOO_LONG", "Password is too long")
+    if len(password) < ctx.auth.email_and_password.min_password_length:
+        raise APIError(400, "PASSWORD_TOO_SHORT", "Password too short")
+    assert_password_not_too_long(ctx.auth, password)
 
 
 def _require_email_password_enabled(ctx: Ctx) -> None:
@@ -183,6 +191,7 @@ async def sign_in_email(ctx: Ctx) -> AuthResponse:
     require_fields(body, "email", "password")
     email = body["email"].lower()
     password = body["password"]
+    assert_password_not_too_long(ctx.auth, password)  # sign-in.ts:527
 
     user = await ctx.adapter.find_one("user", [Where("email", email)])
     if user is None:
@@ -375,6 +384,7 @@ async def change_password(ctx: Ctx) -> AuthResponse:
     body = ctx.body()
     require_fields(body, "newPassword", "currentPassword")
     validate_password(ctx, body["newPassword"])
+    assert_password_not_too_long(ctx.auth, body["currentPassword"])  # update-user.ts:260
     user = result["user"]
 
     account = await _credential_account(ctx, user["id"])
@@ -442,6 +452,7 @@ async def verify_password_handler(ctx: Ctx) -> AuthResponse:
     result = await ctx.require_session()
     body = ctx.body()
     require_fields(body, "password")
+    assert_password_not_too_long(ctx.auth, body["password"])  # utils/password.ts:31
     account = await _credential_account(ctx, result["user"]["id"])
     if account is None or not account.get("password"):
         raise APIError(400, "CREDENTIAL_ACCOUNT_NOT_FOUND", "Credential account not found")
@@ -855,6 +866,7 @@ async def delete_user(ctx: Ctx) -> AuthResponse:
     body = ctx.body()
 
     if body.get("password"):
+        assert_password_not_too_long(ctx.auth, body["password"])  # update-user.ts:459
         account = await _credential_account(ctx, user["id"])
         if account is None or not account.get("password"):
             raise APIError(400, "CREDENTIAL_ACCOUNT_NOT_FOUND", "Credential account not found")

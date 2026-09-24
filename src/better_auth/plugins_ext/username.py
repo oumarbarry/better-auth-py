@@ -31,6 +31,7 @@ from urllib.parse import quote
 
 from ..adapters.base import Where
 from ..crypto import dummy_verify, sign_email_verification_token, verify_password
+from ..endpoints import assert_password_not_too_long
 from ..plugins import HookSet, Plugin, PluginHook
 from ..schema import Field, Schema
 from ..session import create_session
@@ -316,6 +317,7 @@ class UsernamePlugin(Plugin):
             raise APIError(422, "USERNAME_TOO_LONG", ERROR_CODES["USERNAME_TOO_LONG"])
         if not await _maybe_await(self._run_validator(username)):
             raise APIError(422, "INVALID_USERNAME", ERROR_CODES["INVALID_USERNAME"])
+        assert_password_not_too_long(ctx.auth, password)  # username/index.ts:459
 
         user = await ctx.adapter.find_one("user", [Where("username", self._normalize(username))])
         if user is None:

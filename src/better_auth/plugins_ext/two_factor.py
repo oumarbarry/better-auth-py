@@ -47,7 +47,7 @@ from ..crypto import (
     verify_password,
     verify_totp,
 )
-from ..endpoints import require_fields
+from ..endpoints import assert_password_not_too_long, require_fields
 from ..plugins import HookSet, Plugin, PluginHook, RateLimitRule
 from ..schema import Field, Reference, Schema
 from ..session import build_cookie, clear_cookie, cookie_name, create_session, get_session, utcnow
@@ -373,6 +373,7 @@ class TwoFactorPlugin(Plugin):
             return
         if not password:
             raise APIError(400, "INVALID_PASSWORD", "Invalid password")
+        assert_password_not_too_long(self.auth, password)  # utils/password.ts:31/48
         if not await _password_valid(self.auth, user_id, password):
             raise APIError(400, "INVALID_PASSWORD", "Invalid password")
 
