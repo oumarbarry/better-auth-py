@@ -78,6 +78,21 @@ async def test_sign_up_invalid_email(client):
     assert response.json()["code"] == "INVALID_EMAIL"
 
 
+async def test_sign_in_invalid_email(client, monkeypatch):
+    # sign-in.ts:484 (v1.6.29): the email format is checked before any lookup or hashing.
+    from better_auth import crypto
+
+    def no_scrypt(*_: object) -> bytes:
+        raise AssertionError("scrypt must not run for a malformed email")
+
+    monkeypatch.setattr(crypto, "_scrypt", no_scrypt)
+    response = await client.post(
+        "/api/auth/sign-in/email", json={"email": "not-an-email", "password": "s3cret-password"}
+    )
+    assert response.status_code == 400
+    assert response.json() == {"code": "INVALID_EMAIL", "message": "Invalid email"}
+
+
 async def test_sign_up_password_length(client):
     response = await client.post("/api/auth/sign-up/email", json={**SIGNUP, "password": "short"})
     assert response.status_code == 400

@@ -189,7 +189,7 @@ async def sign_in_email(ctx: Ctx) -> AuthResponse:
     _require_email_password_enabled(ctx)
     body = ctx.body()
     require_fields(body, "email", "password")
-    email = body["email"].lower()
+    email = validate_email(body["email"])  # sign-in.ts:484
     password = body["password"]
     assert_password_not_too_long(ctx.auth, password)  # sign-in.ts:527
 

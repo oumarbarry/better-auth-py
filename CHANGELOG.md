@@ -7,10 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## [1.0.2] - 2026-09-24
+## [1.0.2] - 2026-09-25
 
 ### Fixed
 
+- Sign-in with email rejects a malformed address with `INVALID_EMAIL` (400)
+  before looking up the user, as better-auth does.
 - Passwords longer than `max_password_length` are now rejected with
   `PASSWORD_TOO_LONG` before any hashing on sign-in (email, username, phone
   number), verify-password, change-password (`currentPassword`), delete-user,
