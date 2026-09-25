@@ -14,6 +14,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   It backs the lock used by the unverified-account cleanup.
 - `MicrosoftEntraId(account_id_claim=...)`: the ID token claim used as the
   account id, `"oid"` by default.
+- SQLAlchemy adapter schema check, on by default: on first use it checks
+  that every table and column Better Auth writes exists and that no required
+  column is one Better Auth never fills. On a mismatch it logs one report and
+  database operations fail with `SchemaMismatchError`. Turn it off with
+  `AdvancedDatabase(validate_schema=False)`.
+- `consume_one` and `increment_one` run as a single statement on PostgreSQL
+  and SQLite.
+- Custom rate-limit storages can implement `consume(key, rule)` to decide a
+  request in one atomic step.
 
 ### Changed
 
@@ -59,6 +68,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - ID token sign-in (`POST /sign-in/social` with `idToken`) no longer stores
   the `idToken.scopes` or `idToken.refreshToken` sent by the client on the
   account, as in better-auth.
+- Rate limiting decides each request in one atomic step per backend.
+  Secondary storage uses the store's `increment` and keeps a plain integer
+  counter whose expiry is set when the window opens, as better-auth 1.7 does.
+  A counter left in the older JSON format is replaced on its next request,
+  which restarts that window. Database counters use guarded updates and
+  prune expired rows when a window resets. A window now resets exactly when
+  it has elapsed.
+- A secondary storage without `increment` or `get_and_delete`, or a custom
+  rate-limit storage with only `get` and `set`, keeps working through the
+  older non-atomic path and logs a warning once.
+- `increment_one` raises `BetterAuthError` instead of `ValueError` when both
+  `increment` and `set` are empty.
 
 ### Fixed
 
@@ -78,6 +99,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   entries dropped.
 - Email OTP sign-in returns the user with `emailVerified: true` after it
   verifies a previously unverified address.
+- Custom adapters without native atomic methods no longer lose concurrent
+  `increment_one` updates: the shared fallback guards on the counter values
+  and retries up to five times.
+- A failed memory adapter transaction no longer erases writes made
+  concurrently outside it.
 
 ## [1.0.3] - 2026-09-25
 
