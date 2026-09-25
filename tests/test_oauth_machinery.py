@@ -14,6 +14,8 @@ from jwt.algorithms import RSAAlgorithm
 
 from better_auth import AccountLinking, AccountOptions, GitHub, Google
 from better_auth.adapters.base import Where
+from better_auth.config import OnAPIError
+from better_auth.oauth.flow import merge_scopes, parse_stored_scopes
 from better_auth.oauth.machinery import OAuthFetchError, oauth_fetch
 from better_auth.oauth.providers import ProviderConfig
 from better_auth.types import Ctx
@@ -514,3 +516,383 @@ async def test_verify_id_token_without_ctx_param_still_called():
         assert r.status_code == 200, r.text
         assert r.json()["user"]["email"] == SIGNUP["email"]
     assert provider.seen == ["n"]
+
+
+# ===================================================================================
+# Account identity, transactional sign-up and account.scope (TS v1.7.6)
+# ===================================================================================
+
+
+async def _seed_linked_account(auth, email, account_id="4242", **extra):
+    user = await auth.internal.create_user({"name": "U", "email": email, "emailVerified": True})
+    await auth.internal.create_account(
+        {"userId": user["id"], "providerId": "github", "accountId": account_id, **extra}
+    )
+    return user
+
+
+async def test_callback_ambiguous_account_key_issues_no_session():
+    """TS v1.7.6 db/internal-adapter.ts:1022-1026 + oauth2/link-account.ts:191-204: two
+    rows for one (providerId, accountId) fail the lookup; no session is issued and the
+    redirect goes to ``${baseURL}/error``, not to the flow's error URL."""
+    auth = gh_auth(VERIFIED)
+    async with make_client(auth) as client:
+        await _seed_linked_account(auth, "first@x.com")
+        await _seed_linked_account(auth, "second@x.com")
+        r = await client.post(
+            "/api/auth/sign-in/social",
+            json={"provider": "github", "errorCallbackURL": "/flow-error"},
+        )
+        state = parse_qs(urlsplit(r.json()["url"]).query)["state"][0]
+        r = await client.get(f"/api/auth/callback/github?code=abc&state={state}")
+        assert r.status_code == 302
+        assert r.headers["location"] == (
+            "http://testserver/api/auth/error?error=internal_server_error"
+        )
+        assert await auth.adapter.find_many("session") == []
+
+
+async def test_callback_user_lookup_failure_uses_on_api_error_url(monkeypatch):
+    """TS v1.7.6 oauth2/link-account.ts:259-268: a failed user lookup redirects to
+    ``onAPIError.errorURL`` with ``internal_server_error``."""
+    auth = gh_auth(VERIFIED, on_api_error=OnAPIError(error_url="https://app.test/oops"))
+    real_find_one = auth.adapter.find_one
+
+    async def failing_find_one(model, *args, **kwargs):
+        if model == "user":
+            raise RuntimeError("database down")
+        return await real_find_one(model, *args, **kwargs)
+
+    monkeypatch.setattr(auth.adapter, "find_one", failing_find_one)
+    async with make_client(auth) as client:
+        r = await start_and_callback(client)
+        assert r.headers["location"] == "https://app.test/oops?error=internal_server_error"
+        assert await auth.adapter.find_many("session") == []
+
+
+async def test_callback_orphaned_account_does_not_fall_back_to_email():
+    """TS v1.7.6 oauth2/link-account.ts:205-214: an account whose user row is missing
+    is refused with ``unable_to_link_account``, never re-bound by email."""
+    auth = gh_auth(VERIFIED)
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await auth.adapter.update(
+            "user", [Where("id", signup["user"]["id"])], {"emailVerified": True}
+        )
+        await auth.internal.create_account(
+            {"userId": "missing-owner", "providerId": "github", "accountId": "4242"}
+        )
+        client.cookies.clear()
+        sessions_before = len(await auth.adapter.find_many("session"))
+        r = await start_and_callback(client)
+        assert "error=unable_to_link_account" in r.headers["location"]
+        assert len(await auth.adapter.find_many("session")) == sessions_before
+        assert len(await auth.adapter.find_many("account", [Where("providerId", "github")])) == 1
+
+
+async def test_callback_rolls_back_user_when_account_create_fails():
+    """TS v1.7.6 oauth2/link-account.ts:542-588 (a83152e2e): user and first account are
+    created in one transaction; a failed account insert leaves no user row."""
+
+    def refuse(data, ctx=None):
+        raise RuntimeError("account insert failed")
+
+    auth = gh_auth(VERIFIED, database_hooks={"account": {"create": {"before": refuse}}})
+    async with make_client(auth) as client:
+        r = await start_and_callback(client)
+        assert "error=unable_to_create_user" in r.headers["location"]
+        assert await auth.adapter.find_many("user") == []
+        assert await auth.adapter.find_many("session") == []
+
+
+async def test_override_user_info_keeps_user_when_update_returns_none(caplog):
+    """TS v1.7.6 oauth2/link-account.ts:493-508 (06daf7011): a user update that yields
+    nothing keeps the resolved user for the session and logs a warning."""
+    auth = make_auth(
+        social_providers={
+            "github": GitHub(
+                client_id="cid", client_secret="csecret", override_user_info_on_sign_in=True
+            )
+        },
+        http_client=github_http(VERIFIED),
+        database_hooks={"user": {"update": {"before": lambda data, ctx=None: False}}},
+    )
+    async with make_client(auth) as client:
+        await start_and_callback(client)
+        client.cookies.clear()
+        r = await start_and_callback(client)
+        assert "error" not in r.headers["location"]
+        session = await client.get("/api/auth/get-session")
+        assert session.json()["user"]["email"] == SIGNUP["email"]
+    assert "preserving existing user for session" in caplog.text
+
+
+async def test_register_stores_scope_comma_joined():
+    """TS v1.7.6 api/routes/callback.ts:262-266: ``scope: tokens.scopes?.join(",")``."""
+    auth = gh_auth(VERIFIED, token_response={"access_token": "t", "scope": "read:user repo"})
+    async with make_client(auth) as client:
+        await start_and_callback(client)
+    [account] = await auth.adapter.find_many("account", [Where("providerId", "github")])
+    assert account["scope"] == "read:user,repo"
+
+
+async def test_reauth_keeps_stored_scope_and_refresh_token():
+    """TS v1.7.6 oauth2/link-account.ts:392-412 (97903c9cc): sign-in re-auth never
+    writes ``scope`` and skips token fields the provider did not return."""
+    auth = gh_auth(VERIFIED, token_response={"access_token": "t2", "scope": "read:user"})
+    async with make_client(auth) as client:
+        await _seed_linked_account(
+            auth, SIGNUP["email"], scope="read:user,repo", refreshToken="r1", accessToken="t1"
+        )
+        await start_and_callback(client)
+    [account] = await auth.adapter.find_many("account", [Where("providerId", "github")])
+    assert account["scope"] == "read:user,repo"
+    assert account["refreshToken"] == "r1"
+    assert account["accessToken"] == "t2"
+
+
+async def _link_callback(client, emails_user=None):
+    start = await client.post(
+        "/api/auth/link-social", json={"provider": "github", "callbackURL": "/settings"}
+    )
+    state = parse_qs(urlsplit(start.json()["url"]).query)["state"][0]
+    return await client.get(f"/api/auth/callback/github?code=abc&state={state}")
+
+
+async def test_link_social_callback_merges_scopes_on_existing_account():
+    """TS v1.7.6 oauth2/link-account.ts:117-138: re-linking the same account merges the
+    stored and granted scopes (core oauth2/utils.ts:71 ``mergeScopes``)."""
+    auth = gh_auth(VERIFIED, token_response={"access_token": "t2", "scope": "repo read:user"})
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await auth.internal.create_account(
+            {
+                "userId": signup["user"]["id"],
+                "providerId": "github",
+                "accountId": "4242",
+                "scope": "read:user, gist",
+            }
+        )
+        r = await _link_callback(client)
+        assert r.headers["location"] == "http://testserver/settings"
+    [account] = await auth.adapter.find_many("account", [Where("providerId", "github")])
+    assert account["scope"] == "read:user,gist,repo"
+    assert account["accessToken"] == "t2"
+
+
+async def test_link_social_callback_new_account_stores_granted_scopes():
+    auth = gh_auth(VERIFIED, token_response={"access_token": "t", "scope": "repo"})
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await _link_callback(client)
+    [account] = await auth.adapter.find_many("account", [Where("providerId", "github")])
+    assert account["scope"] == "repo"
+
+
+async def test_link_social_callback_untrusted_unverified_is_unable_to_link():
+    """TS v1.7.6 oauth2/link-account.ts:92-103 + oauth2/errors.ts:19."""
+    auth = gh_auth(UNVERIFIED)
+    async with make_client(auth) as client:
+        await sign_up(client)
+        r = await _link_callback(client)
+        assert "error=unable_to_link_account" in r.headers["location"]
+
+
+async def test_link_social_callback_email_mismatch():
+    """TS v1.7.6 oauth2/link-account.ts:105-112 + oauth2/errors.ts:20."""
+    other = [{"email": "other@example.com", "primary": True, "verified": True}]
+    auth = gh_auth(other)
+    async with make_client(auth) as client:
+        await sign_up(client)
+        r = await _link_callback(client)
+        assert "error=email_does_not_match" in r.headers["location"]
+
+
+async def test_link_social_callback_account_owned_by_another_user():
+    """TS v1.7.6 oauth2/link-account.ts:114-122."""
+    auth = gh_auth(VERIFIED)
+    async with make_client(auth) as client:
+        await _seed_linked_account(auth, "owner@x.com")
+        await sign_up(client)
+        r = await _link_callback(client)
+        assert "error=account_already_linked_to_different_user" in r.headers["location"]
+
+
+async def test_refresh_token_keeps_stored_scope():
+    """TS v1.7.6 api/routes/account.ts:909-940 (97903c9cc): a narrower refresh response
+    does not shrink ``account.scope``; the response echoes the stored grant."""
+    auth = gh_auth(VERIFIED, refresh_response={"access_token": "fresh", "scope": "read:user"})
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await _make_account(auth, signup["user"]["id"], scope="read:user,repo")
+        r = await client.post("/api/auth/refresh-token", json={"providerId": "github"})
+        assert r.status_code == 200, r.text
+        assert r.json()["scope"] == "read:user,repo"
+    account = await auth.adapter.find_one("account", [Where("id", "acc1")])
+    assert account["scope"] == "read:user,repo"
+
+
+def test_stored_scopes_read_legacy_space_separated_rows():
+    """Rows written by the 1.0 port hold the raw space-separated scope string. A scope
+    token never contains a space (RFC 6749 section 3.3), so whitespace is read as a
+    separator too; comma-joined rows (the TS format) parse exactly as TS does."""
+    assert parse_stored_scopes("openid email profile") == ["openid", "email", "profile"]
+    assert parse_stored_scopes("read:user,repo") == ["read:user", "repo"]
+    assert merge_scopes("openid email", ["email", "offline_access"]) == (
+        "openid,email,offline_access"
+    )
+
+
+async def test_stored_scopes_are_trimmed_on_read():
+    """TS v1.7.6 api/routes/account.ts:37-43 ``parseStoredScopes`` (list-accounts and
+    get-access-token)."""
+    auth = gh_auth(VERIFIED)
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await _make_account(
+            auth,
+            signup["user"]["id"],
+            scope="read:user, repo,,",
+            accessTokenExpiresAt=None,
+        )
+        listed = await client.get("/api/auth/list-accounts")
+        github = next(a for a in listed.json() if a["providerId"] == "github")
+        assert github["scopes"] == ["read:user", "repo"]
+        token = await client.post("/api/auth/get-access-token", json={"providerId": "github"})
+        assert token.json()["scopes"] == ["read:user", "repo"]
+
+
+async def test_link_social_id_token_refuses_account_of_another_user():
+    """TS v1.7.6 api/routes/account.ts:327-364: the key lookup is global, so an account
+    owned by someone else is a 409 instead of a silent success or a duplicate row."""
+    provider = _CtxProvider(client_id="cid", client_secret="s")
+    auth = make_auth(social_providers={"ctxp": provider})
+    async with make_client(auth) as client:
+        await _seed_linked_account(auth, "owner@x.com", providerId="ctxp", accountId="cx-1")
+        await sign_up(client)
+        r = await client.post(
+            "/api/auth/link-social", json={"provider": "ctxp", "idToken": {"token": "tok"}}
+        )
+        assert r.status_code == 409
+        assert r.json() == {
+            "code": "SOCIAL_ACCOUNT_ALREADY_LINKED",
+            "message": "Social account already linked",
+        }
+    assert len(await auth.adapter.find_many("account", [Where("providerId", "ctxp")])) == 1
+
+
+async def test_link_social_id_token_updates_tokens_of_own_account():
+    """TS v1.7.6 api/routes/account.ts:330-358: relinking your own account refreshes its
+    tokens and leaves ``scope`` alone."""
+    provider = _CtxProvider(client_id="cid", client_secret="s")
+    auth = make_auth(social_providers={"ctxp": provider})
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await auth.internal.create_account(
+            {
+                "userId": signup["user"]["id"],
+                "providerId": "ctxp",
+                "accountId": "cx-1",
+                "scope": "openid",
+                "accessToken": "old",
+            }
+        )
+        r = await client.post(
+            "/api/auth/link-social",
+            json={
+                "provider": "ctxp",
+                "idToken": {"token": "tok", "accessToken": "new", "scopes": ["email"]},
+            },
+        )
+        assert r.status_code == 200, r.text
+    [account] = await auth.adapter.find_many("account", [Where("providerId", "ctxp")])
+    assert account["accessToken"] == "new"
+    assert account["idToken"] == "tok"
+    assert account["scope"] == "openid"
+
+
+@dataclass
+class _NoSubjectProvider(ProviderConfig):
+    """id-token provider whose claims carry no account subject."""
+
+    provider_id: str = "nosub"
+    jwks_url: str = "https://nosub.test/jwks"
+
+    async def verify_id_token(self, http, token, nonce=None, ctx=None):
+        return {"email": SIGNUP["email"], "email_verified": True}
+
+
+async def test_id_token_sign_in_without_account_subject_is_rejected():
+    """TS v1.7.6 oauth2/account-key.ts:29-37 + 50-62: an empty subject is
+    FAILED_TO_GET_USER_INFO (401), never an account with an empty accountId."""
+    auth = make_auth(social_providers={"nosub": _NoSubjectProvider(client_id="c")})
+    async with make_client(auth) as client:
+        r = await client.post(
+            "/api/auth/sign-in/social", json={"provider": "nosub", "idToken": {"token": "t"}}
+        )
+        assert r.status_code == 401
+        assert r.json()["code"] == "FAILED_TO_GET_USER_INFO"
+    assert await auth.adapter.find_many("account") == []
+
+
+async def test_callback_without_account_subject_is_unable_to_get_user_info():
+    """TS v1.7.6 api/routes/callback.ts:240-255."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "t"})
+        if request.url.path == "/user":
+            return httpx.Response(200, json={**PROFILE, "id": ""})
+        return httpx.Response(200, json=VERIFIED)
+
+    auth = gh_auth(VERIFIED, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    async with make_client(auth) as client:
+        r = await start_and_callback(client)
+        assert "error=unable_to_get_user_info" in r.headers["location"]
+    assert await auth.adapter.find_many("account") == []
+
+
+async def test_link_social_id_token_different_email_message():
+    """TS v1.6.29 and v1.7.6 api/routes/account.ts (v1.7.6:380-388): exact message."""
+    provider = _CtxProvider(client_id="cid", client_secret="s")
+    auth = make_auth(social_providers={"ctxp": provider})
+    async with make_client(auth) as client:
+        await sign_up(client, email="someone-else@example.com")
+        r = await client.post(
+            "/api/auth/link-social", json={"provider": "ctxp", "idToken": {"token": "tok"}}
+        )
+        assert r.status_code == 401
+        assert r.json() == {
+            "code": "LINKING_DIFFERENT_EMAILS_NOT_ALLOWED",
+            "message": "Account not linked - different emails not allowed",
+        }
+
+
+async def test_id_token_sign_in_does_not_store_scope():
+    """TS v1.7.6 api/routes/sign-in.ts:322-345: the idToken account data carries no
+    ``scope``, so the body's ``idToken.scopes`` is not stored."""
+    provider = _CtxProvider(client_id="cid", client_secret="s")
+    auth = make_auth(social_providers={"ctxp": provider})
+    async with make_client(auth) as client:
+        r = await client.post(
+            "/api/auth/sign-in/social",
+            json={"provider": "ctxp", "idToken": {"token": "tok", "scopes": ["openid", "email"]}},
+        )
+        assert r.status_code == 200, r.text
+    [account] = await auth.adapter.find_many("account", [Where("providerId", "ctxp")])
+    assert account.get("scope") is None
+
+
+async def test_id_token_sign_in_does_not_store_refresh_token():
+    """TS v1.7.6 api/routes/sign-in.ts:336-340 (and v1.6.29): the idToken account data is
+    the key, ``accessToken`` and ``idToken``; a body ``idToken.refreshToken`` is not stored."""
+    provider = _CtxProvider(client_id="cid", client_secret="s")
+    auth = make_auth(social_providers={"ctxp": provider})
+    async with make_client(auth) as client:
+        r = await client.post(
+            "/api/auth/sign-in/social",
+            json={"provider": "ctxp", "idToken": {"token": "tok", "refreshToken": "rt"}},
+        )
+        assert r.status_code == 200, r.text
+    [account] = await auth.adapter.find_many("account", [Where("providerId", "ctxp")])
+    assert account.get("refreshToken") is None

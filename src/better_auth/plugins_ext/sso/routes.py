@@ -633,7 +633,9 @@ async def handle_oidc_callback(
             override_user_info=bool(config.get("overrideUserInfo")),
         )
     except OAuthLinkError as error:
-        return _with_state_cleared(ctx, _redirect_error(error_url, error.code.replace(" ", "_")))
+        return _with_state_cleared(
+            ctx, _redirect_error(error.error_url or error_url, error.code.replace(" ", "_"))
+        )
     except APIError as error:
         return _with_state_cleared(ctx, _redirect_error(error_url, error.code, error.message))
 

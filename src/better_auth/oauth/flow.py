@@ -12,6 +12,8 @@ matching the pre-refactor Python port; the stateless ``"cookie"`` strategy is no
 from __future__ import annotations
 
 import json
+import logging
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -33,21 +35,29 @@ from .machinery import OAuthFetchError
 from .models import OAuthTokens, OAuthUserInfo
 from .providers import ProviderConfig, call_verify_id_token
 
+logger = logging.getLogger("better_auth")
+
 STATE_EXPIRES_IN = 600  # seconds
 STATE_COOKIE = "state"
 
 
 class OAuthLinkError(Exception):
-    """A sign-in/link decision failure with a stable error code (redirect or APIError)."""
+    """A sign-in/link decision failure with a stable error code (redirect or APIError).
 
-    def __init__(self, code: str):
+    ``error_url`` set means the redirect target is fixed (TS redirects database failures
+    to ``onAPIError.errorURL``); redirecting callers prefer it over their own error URL.
+    """
+
+    def __init__(self, code: str, error_url: str | None = None):
         self.code = code
+        self.error_url = error_url
         super().__init__(code)
 
 
 class _CallbackError(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, error_url: str | None = None):
         self.code = code
+        self.error_url = error_url
         super().__init__(code)
 
 
@@ -73,8 +83,32 @@ def _token_fields(ctx: Ctx, tokens: OAuthTokens) -> dict[str, Any]:
         "idToken": tokens.id_token,
         "accessTokenExpiresAt": tokens.access_token_expires_at,
         "refreshTokenExpiresAt": tokens.refresh_token_expires_at,
-        "scope": tokens.scope,
+        # TS callback.ts:262-266 stores ``tokens.scopes?.join(",")``
+        "scope": ",".join(tokens.scopes) if tokens.scopes else tokens.scope,
     }
+
+
+def _fresh_token_fields(ctx: Ctx, tokens: OAuthTokens) -> dict[str, Any]:
+    """Token columns for updating an existing account: ``scope`` left out (it only grows,
+    through link-social) and fields the provider did not return keep their stored
+    value (TS v1.7.6 link-account.ts:392-412 filters ``undefined``)."""
+    fields = _token_fields(ctx, tokens)
+    del fields["scope"]
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def parse_stored_scopes(scope: str | None) -> list[str]:
+    """TS v1.7.6 api/routes/account.ts:37 ``parseStoredScopes`` (comma-joined). Whitespace
+    also separates, so rows the 1.0 port wrote space-separated still parse; a scope token
+    never contains a space (RFC 6749 section 3.3), so TS-written rows parse identically."""
+    return [part for part in re.split(r"[,\s]+", scope or "") if part]
+
+
+def merge_scopes(stored: str | None, incoming: list[str] | None) -> str:
+    """Union of stored and incoming scopes in stored order, no duplicates (TS v1.7.6
+    core/oauth2/utils.ts:71 ``mergeScopes``)."""
+    scopes = parse_stored_scopes(stored) + [s.strip() for s in incoming or [] if s.strip()]
+    return ",".join(dict.fromkeys(scopes))
 
 
 # --- helpers ------------------------------------------------------------------------------
@@ -207,13 +241,11 @@ async def _id_token_sign_in(
     info = provider.user_info_from_id_token(claims)
     if not info.email:
         raise APIError(401, "USER_EMAIL_NOT_FOUND", "Provider did not return an email")
+    _require_account_subject(info)
 
-    tokens = OAuthTokens(
-        access_token=id_token.get("accessToken"),
-        refresh_token=id_token.get("refreshToken"),
-        id_token=token,
-        scope=",".join(id_token["scopes"]) if id_token.get("scopes") else None,
-    )
+    # TS v1.7.6 sign-in.ts:336-340: the account data is the key, accessToken and idToken
+    # (no scope, no refreshToken).
+    tokens = OAuthTokens(access_token=id_token.get("accessToken"), id_token=token)
     disable_sign_up = (
         provider.disable_implicit_sign_up and not body.get("requestSignUp")
     ) or provider.disable_sign_up
@@ -240,6 +272,21 @@ async def _id_token_sign_in(
 # --- the find/register/link decision core (handleOAuthUserInfo) ---------------------------
 
 
+def _database_error(ctx: Ctx) -> OAuthLinkError:
+    """TS v1.7.6 link-account.ts:196-204 and :259-268: a failed lookup logs and redirects
+    to ``onAPIError.errorURL || ${baseURL}/error`` with ``internal_server_error``."""
+    logger.exception("Better auth was unable to query your database.")
+    error_url = ctx.auth.on_api_error.error_url or f"{ctx.auth.base_url}{ctx.auth.base_path}/error"
+    return OAuthLinkError("internal_server_error", error_url)
+
+
+def _require_account_subject(info: OAuthUserInfo) -> None:
+    """An empty provider subject never becomes an account id (TS v1.7.6
+    oauth2/account-key.ts:29-37, surfaced by ``resolveOAuthAccountKeyForAPI``)."""
+    if not info.id:
+        raise APIError(401, "FAILED_TO_GET_USER_INFO", "Failed to get user info")
+
+
 async def handle_oauth_user_info(
     ctx: Ctx,
     provider: ProviderConfig,
@@ -254,8 +301,12 @@ async def handle_oauth_user_info(
     """Find/register/link decision tree (``link-account.ts``). Returns (user_id, is_register).
 
     Raises :class:`OAuthLinkError` with a stable code (``account_not_linked``,
-    ``signup_disabled``) on a refused link/register — callers map it to a redirect
+    ``signup_disabled``, ``unable_to_link_account``, ``unable_to_create_user``,
+    ``internal_server_error``) on a refused link/register; callers map it to a redirect
     (callback) or an APIError (idToken sign-in).
+
+    The provider account is found by its exact ``(providerId, accountId)`` key only
+    (TS v1.7.6 link-account.ts:191-268); email is consulted only when no account matches.
 
     Trust flags (extension for the SSO plugin; defaults preserve social/generic-oauth
     behavior, one shared change so all callers route through the same gate):
@@ -275,41 +326,72 @@ async def handle_oauth_user_info(
         provider.override_user_info_on_sign_in if override_user_info is None else override_user_info
     )
     email = (info.email or "").lower()
-    token_fields = _token_fields(ctx, tokens)
     linking = ctx.auth.account.account_linking
 
-    account = await ctx.adapter.find_one(
-        "account",
-        [Where("providerId", provider.provider_id), Where("accountId", info.id)],
-    )
-    if account is not None:
-        user = await ctx.adapter.find_one("user", [Where("id", account["userId"])])
+    try:
+        owner = await ctx.internal.find_account_owner_by_key(provider.provider_id, info.id)
+    except Exception:
+        raise _database_error(ctx) from None
+
+    if owner is not None:
+        account, user = owner
+        if user is None:
+            logger.error(
+                "OAuth account references a missing user. Repair the account before "
+                "retrying authentication."
+            )
+            raise OAuthLinkError("unable_to_link_account")
         if ctx.auth.account.update_account_on_sign_in:
+            fresh = _fresh_token_fields(ctx, tokens)
             await ctx.internal.update(
-                "account", [Where("id", account["id"])], {**token_fields, "updatedAt": now}, ctx=ctx
+                "account", [Where("id", account["id"])], {**fresh, "updatedAt": now}, ctx=ctx
             )
         user = await _maybe_promote_verified(ctx, user, info, email, now)
         if override and user is not None:
             user = await _override_user_info(ctx, user, info, email, now)
         return account["userId"], False
 
-    user = await ctx.adapter.find_one("user", [Where("email", email)]) if email else None
+    try:
+        user = await ctx.adapter.find_one("user", [Where("email", email)]) if email else None
+    except Exception:
+        raise _database_error(ctx) from None
 
     if user is None:  # register
         if disable_sign_up:
             raise OAuthLinkError("signup_disabled")
-        user = {
-            "id": generate_id(),
-            "name": info.name or email,
-            "email": email,
-            "emailVerified": info.email_verified,
-            "image": info.image,
-            "createdAt": now,
-            "updatedAt": now,
-        }
-        await ctx.internal.create("user", user, ctx=ctx)
-        await _create_account(ctx, provider, info, token_fields, user["id"], now)
-        return user["id"], True
+        token_fields = _token_fields(ctx, tokens)
+
+        async def register(tx: Any) -> dict[str, Any]:
+            created = await tx.create(
+                "user",
+                {
+                    "id": generate_id(),
+                    "name": info.name or email,
+                    "email": email,
+                    "emailVerified": info.email_verified,
+                    "image": info.image,
+                    "createdAt": now,
+                    "updatedAt": now,
+                },
+                ctx=ctx,
+            )
+            if created is None:
+                raise RuntimeError("user creation was aborted")
+            await _create_account(
+                ctx, provider, info, token_fields, created["id"], now, internal=tx
+            )
+            return created
+
+        # TS v1.7.6 link-account.ts:542-588 (a83152e2e): user + first account commit
+        # together; after-hooks run once the transaction commits.
+        try:
+            created = await ctx.internal.transaction(register)
+        except APIError:
+            raise
+        except Exception:
+            logger.exception("Unable to create OAuth user")
+            raise OAuthLinkError("unable_to_create_user") from None
+        return created["id"], True
 
     # user exists, this provider account is not yet linked → implicit-linking gate
     if is_trusted_provider:
@@ -326,7 +408,18 @@ async def handle_oauth_user_info(
     ):
         raise OAuthLinkError("account_not_linked")
 
-    await _create_account(ctx, provider, info, token_fields, user["id"], now)
+    # TS v1.7.6 link-account.ts:317-359: a link that fails or is vetoed is refused.
+    try:
+        linked = await _create_account(
+            ctx, provider, info, _token_fields(ctx, tokens), user["id"], now
+        )
+    except APIError:
+        raise
+    except Exception:
+        logger.exception("Unable to link account")
+        linked = None
+    if linked is None:
+        raise OAuthLinkError("unable_to_link_account")
     user = await _maybe_promote_verified(ctx, user, info, email, now) or user
     if linking.update_user_info_on_link and user is not None:
         user = await _apply_update_user_info_on_link(ctx, user, info, now)
@@ -342,8 +435,11 @@ async def _create_account(
     token_fields: dict[str, Any],
     user_id: str,
     now: Any,
-) -> None:
-    await ctx.internal.create(
+    *,
+    internal: Any = None,
+) -> dict[str, Any] | None:
+    """``internal`` is the transaction-bound adapter when called inside one."""
+    return await (internal or ctx.internal).create(
         "account",
         {
             "id": generate_id(),
@@ -406,7 +502,13 @@ async def _override_user_info(
         "updatedAt": now,
     }
     updated = await ctx.internal.update("user", [Where("id", user["id"])], updates, ctx=ctx)
-    return updated or {**user, **updates}
+    if updated is None:
+        # TS v1.7.6 link-account.ts:493-508 (06daf7011)
+        logger.warning(
+            "Could not update user info during OAuth sign in; preserving existing user for session."
+        )
+        return user
+    return updated
 
 
 # --- GET|POST /callback/:provider ---------------------------------------------------------
@@ -493,6 +595,8 @@ async def oauth_callback(ctx: Ctx) -> AuthResponse:
             info = await provider.fetch_user(tokens, ctx.auth.http)
         except (httpx.HTTPError, OAuthFetchError):
             raise _CallbackError("unable_to_get_user_info") from None
+        if not info.id:  # TS v1.7.6 callback.ts:240-255: no account subject
+            raise _CallbackError("unable_to_get_user_info")
         if not info.email:
             raise _CallbackError("email_not_found")
 
@@ -503,9 +607,9 @@ async def oauth_callback(ctx: Ctx) -> AuthResponse:
         try:
             user_id, is_new_user = await handle_oauth_user_info(ctx, provider, info, tokens)
         except OAuthLinkError as err:
-            raise _CallbackError(err.code) from None
+            raise _CallbackError(err.code, err.error_url) from None
     except _CallbackError as err:
-        response = _error_redirect(ctx, err.code, error_url)
+        response = _error_redirect(ctx, err.code, err.error_url or error_url)
         response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
         return response
 
@@ -531,42 +635,60 @@ async def _callback_link(
 ) -> AuthResponse:
     """Callback linking branch (state carries ``link``): attach the provider to the already
     signed-in user, no new session. Redirects to callbackURL (or ?error= on refusal)."""
-    now = utcnow()
     callback_url = data.get("callbackURL") or "/"
-    error_url = data.get("errorURL") or callback_url
+    error = await link_oauth_account(ctx, provider, info, tokens, link)
+    if error is not None:
+        response = _error_redirect(ctx, error, data.get("errorURL") or callback_url)
+    else:
+        response = AuthResponse(redirect_to=_absolute_url(ctx, callback_url))
+    response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
+    return response
+
+
+async def link_oauth_account(
+    ctx: Ctx,
+    provider: ProviderConfig,
+    info: OAuthUserInfo,
+    tokens: OAuthTokens,
+    link: dict[str, str],
+) -> str | None:
+    """Link the provider account to ``link["userId"]`` (TS v1.7.6 link-account.ts:67
+    ``linkOAuthAccount``, the explicit link-social rules). Returns None once linked,
+    else the callback error code."""
+    now = utcnow()
     linking = ctx.auth.account.account_linking
-
-    def fail(code: str) -> AuthResponse:
-        response = _error_redirect(ctx, code, error_url)
-        response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
-        return response
-
-    trusted = await _resolve_trusted_providers(ctx)
-    is_trusted = provider.provider_id in trusted
-    if (not is_trusted and not info.email_verified) or linking.enabled is False:
-        return fail("account_not_linked")
+    trusted = provider.provider_id in (await _resolve_trusted_providers(ctx))
+    if (not trusted and not info.email_verified) or linking.enabled is False:
+        logger.error("Unable to link account - untrusted provider")
+        return "unable_to_link_account"
     if (info.email or "").lower() != (link.get("email") or "").lower() and not (
         linking.allow_different_emails
     ):
-        return fail("email_doesnt_match")
+        return "email_does_not_match"
 
-    existing = await ctx.adapter.find_one(
-        "account",
-        [Where("providerId", provider.provider_id), Where("accountId", info.id)],
-    )
-    if existing is not None and existing["userId"] != link["userId"]:
-        return fail("account_already_linked_to_different_user")
-    if existing is None:
-        await _create_account(ctx, provider, info, _token_fields(ctx, tokens), link["userId"], now)
+    existing = await ctx.internal.find_account_by_key(provider.provider_id, info.id)
+    if existing is not None:
+        if existing["userId"] != link["userId"]:
+            return "account_already_linked_to_different_user"
+        fields = {**_fresh_token_fields(ctx, tokens), "providerId": provider.provider_id}
+        merged = merge_scopes(existing.get("scope"), tokens.scopes)
+        if merged:
+            fields["scope"] = merged
+        await ctx.internal.update(
+            "account", [Where("id", existing["id"])], {**fields, "updatedAt": now}, ctx=ctx
+        )
+    else:
+        created = await _create_account(
+            ctx, provider, info, _token_fields(ctx, tokens), link["userId"], now
+        )
+        if created is None:
+            return "unable_to_link_account"
 
     if linking.update_user_info_on_link:
         user = await ctx.adapter.find_one("user", [Where("id", link["userId"])])
         if user is not None:
             await _apply_update_user_info_on_link(ctx, user, info, now)
-
-    response = AuthResponse(redirect_to=_absolute_url(ctx, callback_url))
-    response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
-    return response
+    return None
 
 
 # --- POST /link-social --------------------------------------------------------------------
@@ -625,14 +747,27 @@ async def _link_social_id_token(
     info = provider.user_info_from_id_token(claims)
     if not info.email:
         raise APIError(401, "USER_EMAIL_NOT_FOUND", "Provider did not return an email")
+    _require_account_subject(info)
 
     now = utcnow()
-    existing = await ctx.adapter.find_one(
-        "account",
-        [Where("providerId", provider.provider_id), Where("accountId", info.id)],
+    tokens = OAuthTokens(
+        access_token=id_token.get("accessToken"),
+        refresh_token=id_token.get("refreshToken"),
+        id_token=token,
     )
-    if existing is not None:  # idempotent success
+    # TS v1.7.6 api/routes/account.ts:327-364: the key lookup is global. Relinking your
+    # own account refreshes its tokens (never ``scope``); someone else's is a conflict.
+    existing = await ctx.internal.find_account_by_key(provider.provider_id, info.id)
+    if existing is not None and existing["userId"] == session_user["id"]:
+        fields = {**_fresh_token_fields(ctx, tokens), "providerId": provider.provider_id}
+        await ctx.internal.update(
+            "account", [Where("id", existing["id"])], {**fields, "updatedAt": now}, ctx=ctx
+        )
+        if ctx.auth.account.account_linking.update_user_info_on_link:
+            await _apply_update_user_info_on_link(ctx, session_user, info, now)
         return AuthResponse(body={"url": "", "status": True, "redirect": False})
+    if existing is not None:
+        raise APIError(409, "SOCIAL_ACCOUNT_ALREADY_LINKED", "Social account already linked")
 
     linking = ctx.auth.account.account_linking
     trusted = await _resolve_trusted_providers(ctx)
@@ -642,16 +777,14 @@ async def _link_social_id_token(
     if (info.email or "").lower() != (session_user["email"] or "").lower() and not (
         linking.allow_different_emails
     ):
+        # TS v1.6.29 account.ts:322, v1.7.6 account.ts:387
         raise APIError(
-            401, "LINKING_DIFFERENT_EMAILS_NOT_ALLOWED", "Account not linked - different emails"
+            401,
+            "LINKING_DIFFERENT_EMAILS_NOT_ALLOWED",
+            "Account not linked - different emails not allowed",
         )
 
-    tokens = OAuthTokens(
-        access_token=id_token.get("accessToken"),
-        refresh_token=id_token.get("refreshToken"),
-        id_token=token,
-        scope=",".join(id_token["scopes"]) if id_token.get("scopes") else None,
-    )
+    # TS v1.7.6 account.ts:390-408 creates the linked account without ``scope``.
     await _create_account(ctx, provider, info, _token_fields(ctx, tokens), session_user["id"], now)
     if linking.update_user_info_on_link:
         await _apply_update_user_info_on_link(ctx, session_user, info, now)
@@ -706,8 +839,9 @@ async def refresh_token(ctx: Ctx) -> AuthResponse:
         ) from None
 
     new_refresh = _encrypt(ctx, tokens.refresh_token) if tokens.refresh_token else refresh
-    scope = ",".join(tokens.scopes) if tokens.scopes else account.get("scope")
-    await ctx.internal.update(
+    # TS v1.7.6 account.ts:909-934 (97903c9cc): ``scope`` is not written, a refresh
+    # response may be narrower than the grant; the response echoes the stored scope.
+    updated = await ctx.internal.update(
         "account",
         [Where("id", account["id"])],
         {
@@ -716,12 +850,14 @@ async def refresh_token(ctx: Ctx) -> AuthResponse:
             "accessTokenExpiresAt": tokens.access_token_expires_at,
             "refreshTokenExpiresAt": tokens.refresh_token_expires_at
             or account.get("refreshTokenExpiresAt"),
-            "scope": scope,
             "idToken": tokens.id_token or account.get("idToken"),
             "updatedAt": utcnow(),
         },
         ctx=ctx,
     )
+    scope = (updated or {}).get("scope")
+    if scope is None:
+        scope = account.get("scope")
     return AuthResponse(
         body={
             "accessToken": tokens.access_token,
@@ -771,7 +907,7 @@ async def _valid_access_token(ctx: Ctx, account: dict[str, Any], provider: Provi
         "accessTokenExpiresAt": new_tokens.access_token_expires_at
         if new_tokens
         else account.get("accessTokenExpiresAt"),
-        "scopes": account["scope"].split(",") if account.get("scope") else [],
+        "scopes": parse_stored_scopes(account.get("scope")),
         "idToken": (new_tokens.id_token if new_tokens else None) or account.get("idToken"),
     }
 

@@ -7,6 +7,78 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- `InternalAdapter.reserve_verification_value`: a first-writer-wins insert
+  keyed by an id derived from the identifier (the same id as better-auth).
+  It backs the lock used by the unverified-account cleanup.
+- `MicrosoftEntraId(account_id_claim=...)`: the ID token claim used as the
+  account id, `"oid"` by default.
+
+### Changed
+
+- Microsoft Entra ID accounts are identified by the `oid` claim instead of
+  `sub`, as in better-auth 1.7. Existing `account` rows for the `microsoft`
+  provider hold `sub` values and no longer match, so a returning user is
+  treated as a new sign-in (implicit linking by email, or a refusal). Migrate
+  those rows to `oid` before upgrading, or pass
+  `MicrosoftEntraId(account_id_claim="sub")` to keep the old ids. A token
+  without a usable claim is refused with `unable_to_get_user_info`.
+- OAuth sign-in resolves an account only by its exact
+  `(providerId, accountId)` pair. When two `account` rows share that pair,
+  sign-in is refused and no session is issued. Before, the first row found
+  won. This failure, like a failed user lookup during OAuth sign-in,
+  redirects to `on_api_error.error_url` (default `<base path>/error`) with
+  `error=internal_server_error`, not to the flow's error callback URL.
+  Remove the duplicate rows to restore sign-in for that account. `InternalAdapter.find_account_by_key` raises
+  `BetterAuthError` for the same case.
+- An OAuth account whose user row no longer exists is refused with
+  `unable_to_link_account` instead of signing in a missing user. Repair or
+  delete the orphaned `account` row.
+- The link-social callback reports `unable_to_link_account` (was
+  `account_not_linked`) for an untrusted provider with an unverified email,
+  and `email_does_not_match` (was `email_doesnt_match`) for a different
+  email, matching better-auth. Relinking an account the user already owns
+  now refreshes its tokens.
+- Linking with an ID token (`POST /link-social` with `idToken`) returns
+  `409 SOCIAL_ACCOUNT_ALREADY_LINKED` when the provider account belongs to
+  another user. Before, it answered success without linking. Relinking your
+  own account refreshes its tokens. The new account row no longer stores the
+  `scopes` sent with the ID token, as in better-auth 1.7.
+- Magic-link and email OTP sign-in to an unverified user now delete every
+  account linked to that user (OAuth links too, not only the password) and
+  its sessions, then mark the email verified. The cleanup runs under a lock
+  stored as a verification row. `InternalAdapter.revoke_unproven_account_access`
+  returns the updated user, and callers no longer update `emailVerified`
+  themselves.
+- `account.scope` holds the granted scopes as a comma-separated list, as
+  better-auth stores it. Sign-in after the first one no longer rewrites it,
+  `/refresh-token` no longer rewrites it and returns the stored value, and
+  the link-social callback adds new scopes to the stored ones. Rows written
+  space-separated by earlier releases are still read correctly.
+- ID token sign-in (`POST /sign-in/social` with `idToken`) no longer stores
+  the `idToken.scopes` or `idToken.refreshToken` sent by the client on the
+  account, as in better-auth.
+
+### Fixed
+
+- Linking with an ID token and a different email now answers with the
+  better-auth message `Account not linked - different emails not allowed`.
+- A new OAuth user and its first account are created in one transaction. If
+  the account insert fails, no user row is left behind and the callback
+  redirects with `unable_to_create_user`.
+- Signing in again with a provider that omits a token (for example no
+  refresh token) keeps the stored value instead of clearing it.
+- With `override_user_info_on_sign_in`, a user update that returns nothing
+  keeps the existing user for the session and logs a warning.
+- A provider response with an empty account id is refused
+  (`unable_to_get_user_info` on the callback, `401 FAILED_TO_GET_USER_INFO`
+  for ID token sign-in) instead of creating an account with an empty id.
+- `scopes` in `/list-accounts` and `/get-access-token` are trimmed and empty
+  entries dropped.
+- Email OTP sign-in returns the user with `emailVerified: true` after it
+  verifies a previously unverified address.
+
 ## [1.0.3] - 2026-09-25
 
 ### Fixed

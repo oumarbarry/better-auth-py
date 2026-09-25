@@ -232,6 +232,47 @@ async def test_adopt_unverified_clears_credential_password():
         assert signup.json()["user"]["emailVerified"] is False
 
 
+async def test_adopt_unverified_strips_oauth_links():
+    """TS v1.7.6 db/revoke-unproven-account-access.ts:76-79 (f1c3232bd): an OAuth link
+    added before the mailbox proof does not survive it."""
+    holder: dict[str, Any] = {}
+    auth = _auth(holder)
+    async with make_client(auth) as client:
+        await client.post(
+            "/api/auth/sign-up/email",
+            json={"email": "link@test.com", "name": "U", "password": "s3cret-password"},
+        )
+        [user] = await auth.adapter.find_many("user", [Where("email", "link@test.com")])
+        await auth.internal.create_account(
+            {"userId": user["id"], "providerId": "google", "accountId": "attacker-google"}
+        )
+        await _sign_in(client, "link@test.com")
+        r = await _verify(client, holder["token"])
+        assert r.json()["user"]["emailVerified"] is True
+        assert await auth.adapter.find_many("account", [Where("userId", user["id"])]) == []
+
+
+async def test_verify_redirects_user_not_found_when_promotion_finds_no_user(monkeypatch):
+    """TS v1.7.6 plugins/magic-link/index.ts:436-444: no promoted user ->
+    ``error=user_not_found``."""
+    holder: dict[str, Any] = {}
+    auth = _auth(holder)
+
+    async def vanished(user_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(auth.internal, "revoke_unproven_account_access", vanished)
+    async with make_client(auth) as client:
+        await client.post(
+            "/api/auth/sign-up/email",
+            json={"email": "gone@test.com", "name": "U", "password": "s3cret-password"},
+        )
+        await _sign_in(client, "gone@test.com")
+        r = await _verify(client, holder["token"], callbackURL="/done")
+        assert r.status_code == 302
+        assert "error=user_not_found" in r.headers["location"]
+
+
 async def test_disable_sign_up_new_user_errors():
     holder: dict[str, Any] = {}
     async with make_client(_auth(holder, disable_sign_up=True)) as client:

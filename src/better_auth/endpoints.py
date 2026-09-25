@@ -27,7 +27,7 @@ from .oauth import (
     refresh_token,
     sign_in_social,
 )
-from .oauth.flow import _valid_access_token
+from .oauth.flow import _valid_access_token, parse_stored_scopes
 from .session import clear_cookie, create_session, get_session, refresh_session_cookie, utcnow
 from .types import APIError, AuthResponse, Ctx
 
@@ -932,7 +932,7 @@ async def list_accounts(ctx: Ctx) -> AuthResponse:
         # list-accounts additionally replaces the `scope` string with a `scopes` array.
         item = ctx.auth.parse_account_output(account)
         scope = item.pop("scope", None)
-        item["scopes"] = scope.split(",") if scope else []
+        item["scopes"] = parse_stored_scopes(scope)
         sanitized.append(item)
     return AuthResponse(body=sanitized)
 

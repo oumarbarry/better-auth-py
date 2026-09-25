@@ -471,8 +471,12 @@ class EmailOTPPlugin(Plugin):
             return await self._session_response(new_user, ctx)
 
         if not user["emailVerified"]:
-            await self.auth.internal.revoke_unproven_account_access(user["id"])
-            await self.auth.internal.update_user(user["id"], {"emailVerified": True})
+            # TS v1.7.6 email-otp/routes.ts:692-701: the cleanup helper flips
+            # emailVerified itself and returns the user the session is minted from.
+            promoted = await self.auth.internal.revoke_unproven_account_access(user["id"])
+            if promoted is None:
+                raise APIError(400, "INVALID_OTP", ERROR_CODES["INVALID_OTP"])
+            user = promoted
         return await self._session_response(user, ctx)
 
     async def _session_response(self, user: dict[str, Any], ctx: Ctx) -> AuthResponse:

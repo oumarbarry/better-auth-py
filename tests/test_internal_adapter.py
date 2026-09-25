@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -13,6 +13,7 @@ from better_auth.adapters.memory import MemoryAdapter
 from better_auth.internal_adapter import InternalAdapter, _js_iso
 from better_auth.schema import CORE_SCHEMA
 from better_auth.secondary_storage import MemorySecondaryStorage
+from better_auth.types import BetterAuthError
 
 
 def _row(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -563,3 +564,190 @@ async def test_delete_sessions_plain_deletes_no_get_absent_key_included():
     assert ss.gets == []
     assert sorted(ss.deletes) == sorted([session["token"], "absent-token"])
     assert await ss.get(session["token"]) is None
+
+
+# --- account identity by (providerId, accountId) (TS v1.7.6) -------------------
+
+
+async def test_find_account_by_key_rejects_duplicate_identity():
+    """TS v1.7.6 db/internal-adapter.ts:1192-1215 ``findAccountByKey``: two rows for
+    the same key are refused instead of picking one."""
+    ia = InternalAdapter(_adapter())
+    for email in ("a@x.com", "b@x.com"):
+        user = await _user(ia, email=email)
+        await ia.create_account({"userId": user["id"], "providerId": "google", "accountId": "s"})
+    with pytest.raises(BetterAuthError) as excinfo:
+        await ia.find_account_by_key("google", "s")
+    assert str(excinfo.value) == (
+        'Multiple accounts match the same accountId for provider "google". '
+        "Resolve duplicate account identities before continuing."
+    )
+
+
+async def test_find_account_by_key_is_exact():
+    ia = InternalAdapter(_adapter())
+    user = await _user(ia)
+    await ia.create_account({"userId": user["id"], "providerId": "google", "accountId": "s"})
+    assert await ia.find_account_by_key("github", "s") is None
+    assert _row(await ia.find_account_by_key("google", "s"))["userId"] == user["id"]
+
+
+async def test_find_account_owner_by_key_reports_orphaned_account():
+    """TS v1.7.6 db/internal-adapter.ts:1002-1033: an account whose user row is gone
+    comes back without an owner (``kind: "orphaned"``)."""
+    ia = InternalAdapter(_adapter())
+    user = await _user(ia)
+    await ia.create_account({"userId": user["id"], "providerId": "google", "accountId": "s"})
+    await ia.create_account({"userId": "missing", "providerId": "github", "accountId": "o"})
+
+    owned = await ia.find_account_owner_by_key("google", "s")
+    assert owned is not None and _row(owned[1])["id"] == user["id"]
+    orphaned = await ia.find_account_owner_by_key("github", "o")
+    assert orphaned is not None and orphaned[1] is None
+    assert await ia.find_account_owner_by_key("github", "none") is None
+
+
+# --- reserve_verification_value (TS v1.7.6 db/internal-adapter.ts:1505-1597) ----
+
+
+def _pk_adapter() -> MemoryAdapter:
+    """Memory adapter that rejects a duplicate primary key, like every real database."""
+
+    class _PKMemoryAdapter(MemoryAdapter):
+        async def create(self, model: str, data: dict[str, Any], **kwargs: Any) -> Any:
+            if "id" in data and await self.find_one(model, [Where("id", data["id"])]):
+                raise RuntimeError("duplicate primary key")
+            return await super().create(model, data, **kwargs)
+
+    a = _PKMemoryAdapter()
+    a.init(CORE_SCHEMA)
+    return a
+
+
+async def test_reserve_verification_value_uses_deterministic_id():
+    # Cross-runtime vector: base64url(SHA-256("reserve:" + identifier)), no padding,
+    # computed with node:crypto.
+    adapter = _adapter()
+    ia = InternalAdapter(adapter)
+    expires = datetime.now().astimezone() + timedelta(seconds=5)
+    assert await ia.reserve_verification_value(
+        "revoke-unproven-account-access:user-1", "user-1", expires
+    )
+    [row] = await adapter.find_many("verification", [])
+    assert row["id"] == "arw4BNOoho9O7Pd8xXAPf51RF1Wd5ZtjVapO8ms-ZiU"
+    assert row["identifier"] == "revoke-unproven-account-access:user-1"
+    assert row["value"] == "user-1"
+
+
+async def test_reserve_verification_value_first_writer_wins():
+    ia = InternalAdapter(_pk_adapter())
+    expires = datetime.now().astimezone() + timedelta(seconds=5)
+    assert await ia.reserve_verification_value("lock:a", "1", expires) is True
+    assert await ia.reserve_verification_value("lock:a", "2", expires) is False
+    assert await ia.reserve_verification_value("lock:b", "3", expires) is True
+
+
+async def test_reserve_verification_value_reraises_real_create_errors():
+    class _Broken(MemoryAdapter):
+        async def create(self, model: str, data: dict[str, Any], **kwargs: Any) -> Any:
+            raise RuntimeError("database down")
+
+    adapter = _Broken()
+    adapter.init(CORE_SCHEMA)
+    ia = InternalAdapter(adapter)
+    with pytest.raises(RuntimeError, match="database down"):
+        await ia.reserve_verification_value(
+            "lock:a", "1", datetime.now().astimezone() + timedelta(seconds=5)
+        )
+
+
+async def test_reserve_verification_value_requires_database_storage():
+    ia = InternalAdapter(_adapter(), secondary_storage=MemorySecondaryStorage())
+    with pytest.raises(BetterAuthError, match="requires database-backed verification storage"):
+        await ia.reserve_verification_value(
+            "lock:a", "1", datetime.now().astimezone() + timedelta(seconds=5)
+        )
+
+
+async def test_reserve_verification_value_mirrors_row_to_secondary_storage():
+    ss = MemorySecondaryStorage()
+    ia = InternalAdapter(_adapter(), secondary_storage=ss, verification_store_in_database=True)
+    assert await ia.reserve_verification_value(
+        "lock:a", "1", datetime.now().astimezone() + timedelta(seconds=60)
+    )
+    cached = json.loads(_raw(await ss.get("verification:lock:a")))
+    assert cached["identifier"] == "lock:a" and cached["value"] == "1"
+
+
+# --- revoke_unproven_account_access (TS v1.7.6 db/revoke-unproven-account-access.ts) ---
+
+
+async def _unproven_user(ia: InternalAdapter) -> dict[str, Any]:
+    user = await _user(ia, emailVerified=False)
+    await ia.create_account(
+        {"userId": user["id"], "providerId": "credential", "accountId": user["id"]}
+    )
+    await ia.create_account({"userId": user["id"], "providerId": "google", "accountId": "g"})
+    await ia.create_session(user["id"])
+    return user
+
+
+async def test_revoke_unproven_strips_every_account_and_returns_verified_user():
+    """TS v1.7.6 revoke-unproven-account-access.ts:76-84 (f1c3232bd): every pre-proof
+    account goes, not only the credential one, and the helper flips emailVerified."""
+    adapter = _adapter()
+    ia = InternalAdapter(adapter)
+    user = await _unproven_user(ia)
+
+    promoted = await ia.revoke_unproven_account_access(user["id"])
+
+    assert _row(promoted)["emailVerified"] is True
+    assert await adapter.count("account", [Where("userId", user["id"])]) == 0
+    assert await adapter.count("session", [Where("userId", user["id"])]) == 0
+    stored = _row(await adapter.find_one("user", [Where("id", user["id"])]))
+    assert stored["emailVerified"] is True
+    assert await adapter.find_many("verification", []) == []  # lock released
+
+
+async def test_revoke_unproven_returns_current_user_when_already_verified():
+    adapter = _adapter()
+    ia = InternalAdapter(adapter)
+    user = await _unproven_user(ia)
+    await ia.update_user(user["id"], {"emailVerified": True})
+
+    current = await ia.revoke_unproven_account_access(user["id"])
+
+    assert _row(current)["emailVerified"] is True
+    assert await adapter.count("account", [Where("userId", user["id"])]) == 2
+
+
+async def test_revoke_unproven_waits_for_a_held_lock_then_rereads(monkeypatch):
+    """TS v1.7.6 revoke-unproven-account-access.ts:49-68: the loser of the lock waits
+    for the winner and returns the re-read user without stripping anything."""
+    import better_auth.internal_adapter as module
+
+    monkeypatch.setattr(module, "_CLEANUP_LOCK_POLL_S", 0.01)
+    adapter = _pk_adapter()
+    ia = InternalAdapter(adapter)
+    user = await _unproven_user(ia)
+    lock = f"revoke-unproven-account-access:{user['id']}"
+    assert await ia.reserve_verification_value(
+        lock, user["id"], datetime.now().astimezone() - timedelta(seconds=1)
+    )
+
+    current = await ia.revoke_unproven_account_access(user["id"])
+
+    assert _row(current)["emailVerified"] is False  # the lock holder owns the promotion
+    assert await adapter.count("account", [Where("userId", user["id"])]) == 2
+    assert await ia.find_verification_value(lock) is None  # expired lock cleared
+
+
+async def test_revoke_unproven_runs_without_lock_on_secondary_only_storage():
+    """TS v1.7.6 revoke-unproven-account-access.ts:56-64: secondary-storage-only
+    verification cannot hold the lock, so cleanup proceeds unlocked."""
+    adapter = _adapter()
+    ia = InternalAdapter(adapter, secondary_storage=MemorySecondaryStorage())
+    user = await _unproven_user(ia)
+    promoted = await ia.revoke_unproven_account_access(user["id"])
+    assert _row(promoted)["emailVerified"] is True
+    assert await adapter.count("account", [Where("userId", user["id"])]) == 0

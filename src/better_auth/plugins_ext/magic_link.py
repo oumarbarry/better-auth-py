@@ -218,9 +218,12 @@ class MagicLinkPlugin(Plugin):
                 return _redirect_with_error(error_callback_url, "failed_to_create_user")
 
         if not user.get("emailVerified"):
-            # order matters: strip the unproven credential/sessions BEFORE marking verified
-            await ctx.internal.revoke_unproven_account_access(user["id"])
-            user = await ctx.internal.update_user(user["id"], {"emailVerified": True}) or user
+            # TS v1.7.6 magic-link/index.ts:436-444: the cleanup helper strips the
+            # unproven accounts/sessions, flips emailVerified and returns the user.
+            promoted = await ctx.internal.revoke_unproven_account_access(user["id"])
+            if promoted is None:
+                return _redirect_with_error(error_callback_url, "user_not_found")
+            user = promoted
 
         session, cookies = await create_session(
             ctx.auth, user["id"], ctx.request, user=user, ctx=ctx

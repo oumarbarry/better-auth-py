@@ -36,6 +36,11 @@ class APIError(Exception):
         super().__init__(self.message)
 
 
+class BetterAuthError(Exception):
+    """Server-side invariant failure (TS ``BetterAuthError``): not an API response,
+    surfaces as a 500 unless a caller maps it."""
+
+
 def json_default(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat().replace("+00:00", "Z")

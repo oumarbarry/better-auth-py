@@ -29,7 +29,7 @@ from .oauth import (
 from .plugins import Plugin
 from .schema import CORE_SCHEMA, Field, Reference, Schema, rate_limit_model
 from .secondary_storage import MemorySecondaryStorage, SecondaryStorage
-from .types import APIError, AuthRequest, AuthResponse, Ctx
+from .types import APIError, AuthRequest, AuthResponse, BetterAuthError, Ctx
 
 # Single-sourced from package metadata so it can never drift from pyproject again
 # (it sat at "0.1.0" through two releases).
@@ -50,6 +50,7 @@ __all__ = [
     "AuthResponse",
     "BaseAdapter",
     "BetterAuth",
+    "BetterAuthError",
     "Ctx",
     "Discord",
     "DynamicBaseURL",

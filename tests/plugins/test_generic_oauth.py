@@ -321,6 +321,27 @@ async def test_full_flow_existing_user_signs_in_and_redirects_callback():
     assert any(h.lower() == "set-cookie" for h, _ in callback.headers.multi_items())
 
 
+async def test_ambiguous_account_redirects_to_default_error_page():
+    """TS v1.7.6 oauth2/link-account.ts:191-204: handleOAuthUserInfo sends a failed
+    account lookup to ``${baseURL}/error``, not to the flow's errorCallbackURL."""
+    auth = plugin_auth(
+        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
+        http_client=oidc_http(userinfo=VERIFIED_PROFILE),
+    )
+    for email in ("one@test.com", "two@test.com"):
+        user = await auth.internal.create_user({"name": "U", "email": email})
+        assert user is not None
+        await auth.internal.create_account(
+            {"userId": user["id"], "providerId": "acme", "accountId": "generic-1"}
+        )
+    _signin, callback, _client = await run_flow(
+        auth, "acme", errorCallbackURL="http://testserver/flow-error"
+    )
+    assert callback.headers["location"] == (
+        "http://testserver/api/auth/error?error=internal_server_error"
+    )
+
+
 async def test_full_flow_new_user_redirects_new_user_url():
     auth = plugin_auth(
         [

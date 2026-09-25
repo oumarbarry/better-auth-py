@@ -15,6 +15,8 @@ Endpoints, ``session.py``, and the OAuth flow write through this seam (via ``ctx
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import inspect
 import json
 import logging
@@ -24,12 +26,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .adapters.base import BaseAdapter, Where
-from .crypto import default_key_hasher, generate_id
+from .crypto import b64url_encode_nopad, default_key_hasher, generate_id
 from .secondary_storage import SecondaryStorage
+from .types import BetterAuthError
 
 logger = logging.getLogger("better_auth")
 
 DAY = 60 * 60 * 24
+
+# TS v1.7.6 db/revoke-unproven-account-access.ts:5-7 (milliseconds there).
+_CLEANUP_LOCK_EXPIRES_S = 5.0
+_CLEANUP_LOCK_WAIT_S = 2.0
+_CLEANUP_LOCK_POLL_S = 0.25
 
 # A single database-hook entry: {model: {op: {"before"|"after": callable}}}.
 DatabaseHooks = dict[str, Any]
@@ -463,6 +471,34 @@ class InternalAdapter:
     async def delete_account(self, account_id: str) -> None:
         await self._delete("account", [Where("id", account_id)])
 
+    async def find_account_by_key(self, provider_id: str, account_id: str) -> dict[str, Any] | None:
+        """The account for the exact ``(providerId, accountId)`` key (TS v1.7.6
+        ``findAccountByKey``, db/internal-adapter.ts:1192). Duplicate rows for one key
+        raise instead of picking one: the owner would be ambiguous."""
+        rows = await self.adapter.find_many(
+            "account",
+            [Where("providerId", provider_id), Where("accountId", account_id)],
+            limit=2,
+        )
+        if len(rows) > 1:
+            raise BetterAuthError(
+                "Multiple accounts match the same accountId for provider "
+                f"{json.dumps(provider_id)}. Resolve duplicate account identities "
+                "before continuing."
+            )
+        return rows[0] if rows else None
+
+    async def find_account_owner_by_key(
+        self, provider_id: str, account_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+        """``(account, user)`` for the key, ``user`` None when the row is orphaned; None
+        when no account matches (TS v1.7.6 ``findAccountOwnerByKey``,
+        db/internal-adapter.ts:1002, which joins the user in the same query)."""
+        account = await self.find_account_by_key(provider_id, account_id)
+        if account is None:
+            return None
+        return account, await self.adapter.find_one("user", [Where("id", account["userId"])])
+
     async def update_password(self, user_id: str, password: str) -> None:
         """Set the password on a user's credential account (TS
         ``internalAdapter.updatePassword``, db/internal-adapter.ts:1023) — backs the
@@ -684,23 +720,110 @@ class InternalAdapter:
         if not self.secondary_storage or self.verification_store_in_database:
             await self._delete_many("verification", [Where("identifier", stored)])
 
-    async def revoke_unproven_account_access(self, user_id: str) -> None:
-        """Strip every credential and session accrued before control of an email was
-        proven (TS ``revokeUnprovenAccountAccess``, db/revoke-unproven-account-access.ts).
+    async def reserve_verification_value(
+        self, identifier: str, value: str, expires_at: datetime
+    ) -> bool:
+        """First-writer-wins create keyed by a primary key derived from ``identifier``;
+        True when this caller created the row (TS v1.7.6 ``reserveVerificationValue``,
+        db/internal-adapter.ts:1530).
 
-        Called by email-primary proofs (magic-link verify, email-otp sign-in) before
-        flipping ``emailVerified`` and minting the owner's session, so a verified owner
-        inherits no password or session that predates the proof. Re-reads the user so
-        the strip sees current state; no-ops if a concurrent flow already verified it.
+        The id is base64url(SHA-256("reserve:" + identifier)) without padding, so the
+        primary key is the gate. A create error is confirmed as a duplicate by re-reading
+        the row. The memory adapter does not enforce primary keys, so there the
+        reservation is best-effort (same as TS).
         """
-        user = await self.adapter.find_one("user", [Where("id", user_id)])
-        if user is None or user.get("emailVerified"):
-            return
-        accounts = await self.adapter.find_many("account", [Where("userId", user_id)])
-        for account in accounts:
-            if account.get("providerId") == "credential":
-                await self._delete("account", [Where("id", account["id"])])
-        await self.delete_user_sessions(user_id)
+        reservation_id = b64url_encode_nopad(
+            hashlib.sha256(("reserve:" + identifier).encode()).digest()
+        )
+        _, stored = await self._stored_identifier(identifier)
+        if self.secondary_storage and not self.verification_store_in_database:
+            raise BetterAuthError(
+                "reserveVerificationValue requires database-backed verification storage. "
+                "Set verification.storeInDatabase to true for flows that reserve "
+                "verification values."
+            )
+        now = _now()
+        try:
+            await self.adapter.create(
+                "verification",
+                {
+                    "id": reservation_id,
+                    "identifier": stored,
+                    "value": value,
+                    "expiresAt": expires_at,
+                    "createdAt": now,
+                    "updatedAt": now,
+                },
+                force_allow_id=True,
+            )
+        except Exception:
+            if await self.adapter.find_one("verification", [Where("id", reservation_id)]):
+                return False
+            raise
+        if self.secondary_storage:
+            ttl = _ttl_seconds(_dt_ms(expires_at), _now_ms())
+            if ttl > 0:
+                await self.secondary_storage.set(
+                    f"verification:{stored}",
+                    _dumps(
+                        {
+                            "id": reservation_id,
+                            "identifier": stored,
+                            "value": value,
+                            "expiresAt": expires_at,
+                        }
+                    ),
+                    ttl,
+                )
+        return True
+
+    async def revoke_unproven_account_access(self, user_id: str) -> dict[str, Any] | None:
+        """Strip every account link and session a not-yet-verified user accrued before
+        control of its email was proven, flip ``emailVerified`` and return the current
+        user (TS v1.7.6 ``revokeUnprovenAccountAccess``,
+        db/revoke-unproven-account-access.ts:45).
+
+        Called by email-primary proofs (magic-link verify, email-otp sign-in); callers
+        mint the session from the returned user. Runs under a verification-value lock;
+        a caller that loses the lock waits for the winner and returns the re-read user.
+        """
+        lock = f"revoke-unproven-account-access:{user_id}"
+        try:
+            acquired = await self.reserve_verification_value(
+                lock, user_id, _now() + timedelta(seconds=_CLEANUP_LOCK_EXPIRES_S)
+            )
+        except BetterAuthError as error:
+            if "requires database-backed verification storage" not in str(error):
+                raise
+            acquired = True
+        if not acquired:
+            await self._wait_for_cleanup_lock(lock)
+            return await self.adapter.find_one("user", [Where("id", user_id)])
+        try:
+            # Re-read so the strip sees current state, not the caller's earlier check.
+            user = await self.adapter.find_one("user", [Where("id", user_id)])
+            if user is None or user.get("emailVerified"):
+                return user
+            for account in await self.adapter.find_many("account", [Where("userId", user_id)]):
+                await self.delete_account(account["id"])
+            await self.delete_user_sessions(user_id)
+            return await self.update_user(user_id, {"emailVerified": True})
+        finally:
+            with contextlib.suppress(Exception):
+                await self.delete_verification_by_identifier(lock)
+
+    async def _wait_for_cleanup_lock(self, identifier: str) -> None:
+        """TS v1.7.6 revoke-unproven-account-access.ts:12 ``waitForCleanupLock``."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CLEANUP_LOCK_WAIT_S
+        while loop.time() < deadline:
+            held = await self.find_verification_value(identifier)
+            if held is None:
+                return
+            if held["expiresAt"] <= _now():
+                await self.delete_verification_by_identifier(identifier)
+                return
+            await asyncio.sleep(_CLEANUP_LOCK_POLL_S)
 
     # --- session (secondary-storage aware) ---------------------------------------------
 

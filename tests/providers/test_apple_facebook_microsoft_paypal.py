@@ -519,6 +519,7 @@ async def test_microsoft_consumers_requires_consumer_tenant():
 async def test_microsoft_fetch_user_email_verified_fallback():
     claims = {
         "sub": "ms-1",
+        "oid": "oid-1",
         "name": "Verified User",
         "email": "v@x.com",
         "verified_primary_email": ["v@x.com"],
@@ -527,9 +528,35 @@ async def test_microsoft_fetch_user_email_verified_fallback():
     provider = MicrosoftEntraId(client_id="msapp", disable_profile_photo=True)
     http = _mock_http(lambda r: httpx.Response(404))
     info = await provider.fetch_user(OAuthTokens(id_token=token), http)
-    assert info.id == "ms-1"
+    assert info.id == "oid-1"
     # no email_verified claim, but email is in verified_primary_email -> True
     assert info.email_verified is True
+
+
+async def test_microsoft_account_id_is_oid():
+    """TS v1.7.6 social-providers/microsoft-entra-id.ts:190 (0683a5f36): the account id
+    is the tenant-stable ``oid``, not the per-app pairwise ``sub``."""
+    provider = MicrosoftEntraId(client_id="msapp", disable_profile_photo=True)
+    claims = {"sub": "pairwise-sub", "oid": "object-id", "email": "u@x.com"}
+    assert provider.user_info_from_id_token(claims).id == "object-id"
+    token = _sign(claims, _rsa_key(), "RS256")
+    http = _mock_http(lambda r: httpx.Response(404))
+    assert (await provider.fetch_user(OAuthTokens(id_token=token), http)).id == "object-id"
+
+
+async def test_microsoft_missing_oid_yields_no_account_id(caplog):
+    """TS v1.7.6 microsoft-entra-id.ts:281-286: a token without a usable ``oid`` gives
+    no account identity (the flow then refuses it)."""
+    provider = MicrosoftEntraId(client_id="msapp", disable_profile_photo=True)
+    assert provider.user_info_from_id_token({"sub": "s", "oid": "  "}).id == ""
+    assert "did not include a valid oid claim" in caplog.text
+
+
+def test_microsoft_account_id_claim_option_keeps_sub():
+    """Port option, not in TS: ``account_id_claim="sub"`` keeps pre-1.1 account ids so
+    existing rows match until they are migrated to ``oid``."""
+    provider = MicrosoftEntraId(client_id="msapp", account_id_claim="sub")
+    assert provider.user_info_from_id_token({"sub": "s", "oid": "o"}).id == "s"
 
 
 # ===================================================================================

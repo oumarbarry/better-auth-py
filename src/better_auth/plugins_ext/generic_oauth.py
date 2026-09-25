@@ -559,7 +559,8 @@ class GenericOAuthPlugin(Plugin):
             _session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
         except OAuthLinkError as err:
             return _with_state_cleared(
-                ctx, _redirect_error(resolved_error_url, err.code.replace(" ", "_"))
+                ctx,
+                _redirect_error(err.error_url or resolved_error_url, err.code.replace(" ", "_")),
             )
         except APIError as err:
             return _with_state_cleared(

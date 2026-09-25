@@ -482,7 +482,7 @@ class OAuthProxyPlugin(Plugin):
                 ctx, provider, info, tokens, disable_sign_up=bool(payload.get("disableSignUp"))
             )
         except OAuthLinkError as err:
-            return _error_redirect(ctx, err.code, error_url)
+            return _error_redirect(ctx, err.code, err.error_url or error_url)
 
         _session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
         final = (

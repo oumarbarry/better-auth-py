@@ -236,6 +236,39 @@ async def test_sign_in_clears_unverified_account_password():
         assert account is None  # credential revoked
 
 
+async def test_sign_in_returns_promoted_user_and_strips_oauth_links():
+    """TS v1.7.6 plugins/email-otp/routes.ts:692-712 (f1c3232bd): every pre-proof account
+    goes, and the session and response use the user the cleanup helper returned."""
+    auth, box, _ = otp_auth()
+    async with make_client(auth) as client:
+        await signup(client, "stale@e.com")
+        user = await user_by_email(auth, "stale@e.com")
+        await auth.internal.create_account(
+            {"userId": user["id"], "providerId": "google", "accountId": "attacker-google"}
+        )
+        await send_otp(client, "stale@e.com", "sign-in")
+        signed_in = await signin_otp(client, "stale@e.com", box["otp"])
+        assert signed_in.status_code == 200, signed_in.text
+        assert signed_in.json()["user"]["emailVerified"] is True
+        assert await auth.adapter.find_many("account", [Where("userId", user["id"])]) == []
+
+
+async def test_sign_in_rejects_when_promotion_finds_no_user(monkeypatch):
+    """TS v1.7.6 plugins/email-otp/routes.ts:698-700: no promoted user -> INVALID_OTP."""
+    auth, box, _ = otp_auth()
+
+    async def vanished(user_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(auth.internal, "revoke_unproven_account_access", vanished)
+    async with make_client(auth) as client:
+        await signup(client, "gone@e.com")
+        await send_otp(client, "gone@e.com", "sign-in")
+        res = await signin_otp(client, "gone@e.com", box["otp"])
+        assert res.status_code == 400
+        assert res.json()["code"] == "INVALID_OTP"
+
+
 # ------------------------------------------------------- generateOTP type on sign-up
 # TS 5a811f1b4: the sign-up after-hook used to forward `ctx.body.type` (undefined for a
 # plain /sign-up/email body) to a custom `generateOTP`, instead of the hardcoded

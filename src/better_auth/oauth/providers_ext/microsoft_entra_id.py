@@ -12,11 +12,14 @@ Quirks vs. the generic :class:`ProviderConfig`:
   * Profile photo is fetched from Microsoft Graph and inlined as a ``data:`` URI.
   * ``email_verified`` is defaulted from ``verified_primary_email`` /
     ``verified_secondary_email`` when the optional claim is absent.
+  * The account id is the ``oid`` claim (TS v1.7.6, 0683a5f36). ``account_id_claim``
+    is a port-only option: ``"sub"`` keeps the pre-1.1 ids for unmigrated rows.
 """
 
 from __future__ import annotations
 
 import base64
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -34,6 +37,8 @@ if TYPE_CHECKING:
 
     from ...types import Ctx
     from ..models import OAuthTokens
+
+logger = logging.getLogger("better_auth")
 
 #: Fixed ``tid`` carried by every personal (consumer) Microsoft account token.
 _CONSUMER_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad"
@@ -72,6 +77,9 @@ class MicrosoftEntraId(ProviderConfig):
     disable_profile_photo: bool = False
     prompt: str | None = None
     disable_id_token_sign_in: bool = False
+    #: Claim used as ``account.accountId``. ``"oid"`` matches TS v1.7.6; ``"sub"`` keeps
+    #: the ids stored before 1.1 until they are migrated.
+    account_id_claim: str = "oid"
 
     def __post_init__(self) -> None:
         self._tenant = self.tenant_id or "common"
@@ -134,8 +142,17 @@ class MicrosoftEntraId(ProviderConfig):
         return claims
 
     def _map(self, user: dict[str, Any]) -> OAuthUserInfo:
+        # TS v1.7.6 microsoft-entra-id.ts:281-286: no usable oid, no account identity.
+        account_id = user.get(self.account_id_claim)
+        if not isinstance(account_id, str) or not account_id.strip():
+            logger.error(
+                "Microsoft Entra ID token did not include a valid %s claim; unable to "
+                "resolve a stable account identifier.",
+                self.account_id_claim,
+            )
+            account_id = ""
         return OAuthUserInfo(
-            id=str(user.get("sub") or ""),
+            id=account_id,
             email=user.get("email"),
             name=user.get("name") or "",
             image=user.get("picture"),
