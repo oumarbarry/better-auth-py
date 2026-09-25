@@ -14,6 +14,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   It backs the lock used by the unverified-account cleanup.
 - `MicrosoftEntraId(account_id_claim=...)`: the ID token claim used as the
   account id, `"oid"` by default.
+- Generic OAuth providers work as regular social providers through
+  `/sign-in/social`, `/callback/<id>` and `/link-social`. New provider
+  options: `account_subject`, `end_session_endpoint`,
+  `post_logout_redirect_uri`, `disable_provider_logout`,
+  `token_endpoint_auth`, `refresh_token_params`,
+  `require_email_verification`, `allow_idp_initiated`,
+  `require_id_token_verification` and `disable_id_token_nonce_binding`.
+- Generic OAuth presets for Slack, LINE, HubSpot, Gumroad, Patreon, Yandex
+  and Microsoft Entra ID.
+- `GenericOAuthPlugin(legacy_routes=True)` keeps the 1.0 routes
+  `/sign-in/oauth2`, `/oauth2/callback/<id>` and `/oauth2/link`.
+- `UserOptions.validate_user_info` lets the app refuse an OAuth sign-up,
+  account link or returning sign-in.
+- Per-provider `require_email_verification`: an unverified email gets no
+  session and a verification email is sent.
+- Social sign-in and account linking accept `additionalParams` and
+  `loginHint`.
+- Token endpoint authentication with `private_key_jwt`, `none` or a custom
+  request hook (`TokenEndpointAuth`); Microsoft Entra ID `client_assertion`.
+- Google `include_granted_scopes` and `hd`, Cognito `identity_provider`,
+  Discord `prompt` and `permissions`, and a Cloudflare provider.
+- Providers can accept IdP-initiated callbacks (`allow_idp_initiated`).
+- `add_oauth_server_context` and `get_oauth_state` carry server-trusted data
+  across the provider redirect.
 
 ### Changed
 
@@ -59,6 +83,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - ID token sign-in (`POST /sign-in/social` with `idToken`) no longer stores
   the `idToken.scopes` or `idToken.refreshToken` sent by the client on the
   account, as in better-auth.
+- Generic OAuth: the `/sign-in/oauth2`, `/oauth2/callback/<id>` and
+  `/oauth2/link` routes are replaced by the social routes, and the default
+  redirect URI is `<base>/callback/<id>`. Update the redirect URI registered
+  with each provider, or set `legacy_routes=True`. PKCE is on by default
+  (`pkce=False` restores the old default), discovery ID tokens are verified
+  with a nonce, and `map_profile_to_user` can no longer change the account
+  id (use `account_subject`).
+- Generic OAuth callback error codes follow better-auth: `invalid_code`,
+  `unable_to_get_user_info`, `email_not_found`, `email_does_not_match`.
+- The OAuth callback answers a missing state with `state_not_found` and
+  every other state failure with `state_mismatch`, and redirects to the error
+  page unless the flow set an error callback URL.
+- ID tokens go through one shared verifier. Google accepts RS256 only,
+  tries every key with the token's `kid`, reads the callback profile from the
+  ID token and no longer sends a nonce.
+- Placeholder emails use the `<id>@<provider>.placeholder.invalid` form for
+  new users of providers that return no email.
+- `/refresh-token` returns the account row id as `accountId`.
+- One Tap rejects a token without an email with a 400.
+- Reserved OAuth parameters can no longer be overridden through extra
+  authorization or refresh parameters, and Basic client credentials are form
+  encoded as RFC 6749 requires.
+- PayPal ID token sign-in is off by default (`legacy_id_token_sign_in=True`
+  restores it).
 
 ### Fixed
 
@@ -78,6 +126,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   entries dropped.
 - Email OTP sign-in returns the user with `emailVerified: true` after it
   verifies a previously unverified address.
+- Provider sign-up restrictions (`disable_sign_up`,
+  `disable_implicit_sign_up`) now apply on the redirect callback.
+- Errors raised by database or session hooks during an OAuth callback
+  redirect with their own code and message.
+- The account-link branch of the callback runs before the email check, as
+  in better-auth.
+- `/account-info` answers `FAILED_TO_GET_USER_INFO` instead of a server
+  error when the provider returns no profile.
 
 ## [1.0.3] - 2026-09-25
 
