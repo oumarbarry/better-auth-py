@@ -339,7 +339,7 @@ async def _provider_logout_url(ctx: Ctx, user_id: str, body: dict[str, Any]) -> 
         if account["providerId"] in seen:
             continue
         seen.add(account["providerId"])
-        create = providers[account["providerId"]].create_end_session_url  # ty: ignore[unresolved-attribute]
+        create = providers[account["providerId"]].create_end_session_url
         try:
             url = create(
                 id_token=account.get("idToken"),

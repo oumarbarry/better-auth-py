@@ -194,7 +194,9 @@ class _LogoutProvider(GitHub):
 
     calls: list[dict] = []
 
-    async def create_end_session_url(self, *, id_token, post_logout_redirect_uri, state):
+    async def create_end_session_url(
+        self, *, id_token=None, post_logout_redirect_uri=None, state=None
+    ):
         self.calls.append({"id_token": id_token, "post": post_logout_redirect_uri, "state": state})
         return f"https://idp.example/logout?id_token_hint={id_token}"
 

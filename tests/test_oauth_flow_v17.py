@@ -410,7 +410,8 @@ async def test_refresh_token_response_account_id_is_the_row_id():
     async with make_client(auth) as client:
         url = await start(client)
         await client.get(f"/api/auth/callback/acme?code=abc&state={state_of(url)}")
-        r = await client.post("/api/auth/refresh-token", json={"providerId": "acme"})
+        account = await auth.adapter.find_one("account", [Where("providerId", "acme")])
+        assert account is not None
+        r = await client.post("/api/auth/refresh-token", json={"accountId": account["id"]})
         assert r.status_code == 200, r.text
-    account = await auth.adapter.find_one("account", [Where("providerId", "acme")])
     assert r.json()["accountId"] == account["id"]

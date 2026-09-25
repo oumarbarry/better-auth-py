@@ -458,8 +458,10 @@ async def test_refresh_token_params_static_and_per_request():
     async with make_client(auth) as client:
         started = await sign_in(client)
         await client.get(f"/api/auth/callback/acme?code=c&state={query_of(started)['state'][0]}")
+        account = await auth.adapter.find_one("account", [Where("providerId", "acme")])
+        assert account is not None
         r = await client.post(
-            "/api/auth/refresh-token", json={"providerId": "acme"}, headers={"x-org": "9"}
+            "/api/auth/refresh-token", json={"accountId": account["id"]}, headers={"x-org": "9"}
         )
         assert r.status_code == 200, r.text
     refresh = parse_qs([r for r in record if r.url.path == "/token"][-1].content.decode())
