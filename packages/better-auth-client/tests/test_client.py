@@ -579,8 +579,11 @@ async def test_oauth_provider_dcr_consent_token_userinfo(
     accepted = await res(client.oauth2.consent(accept=True, oauth_query=urlsplit(location).query))
     code = parse_qs(urlsplit(accepted["url"]).query)["code"][0]
 
+    # The relying party calls the token endpoints without the user's session bearer: a Bearer
+    # header next to client_secret is two authentication methods (server utils/index.ts:603).
+    rp = client_factory()
     tokens = await res(
-        client.oauth2.token(
+        rp.oauth2.token(
             grant_type="authorization_code",
             code=code,
             redirect_uri=CB,
@@ -598,19 +601,19 @@ async def test_oauth_provider_dcr_consent_token_userinfo(
     assert userinfo["sub"]
 
     active = await res(
-        client.oauth2.introspect(
+        rp.oauth2.introspect(
             token=tokens["access_token"], client_id=client_id, client_secret=client_secret
         )
     )
     assert active["active"] is True
 
     await res(
-        client.oauth2.revoke(
+        rp.oauth2.revoke(
             token=tokens["access_token"], client_id=client_id, client_secret=client_secret
         )
     )
     revoked = await res(
-        client.oauth2.introspect(
+        rp.oauth2.introspect(
             token=tokens["access_token"], client_id=client_id, client_secret=client_secret
         )
     )

@@ -103,6 +103,9 @@ class OAuthProviderPlugin(Plugin):
         m2m_access_token_expires_in: int = 3600,
         id_token_expires_in: int = 36000,
         refresh_token_expires_in: int = 2592000,
+        refresh_token_reuse_interval: int = 0,
+        assertion_max_lifetime: int = 300,
+        bind_client_auth_method: bool = True,
         scope_expirations: dict[str, int] | None = None,
         allow_dynamic_client_registration: bool = False,
         allow_unauthenticated_client_registration: bool = False,
@@ -198,6 +201,13 @@ class OAuthProviderPlugin(Plugin):
         self.m2m_access_token_expires_in = m2m_access_token_expires_in
         self.id_token_expires_in = id_token_expires_in
         self.refresh_token_expires_in = refresh_token_expires_in
+        # Seconds a rotated refresh token may be replayed for the same response (TS 5838df2f4).
+        self.refresh_token_reuse_interval = refresh_token_reuse_interval
+        # Max seconds between now and a private_key_jwt assertion's exp / iat (TS types:697).
+        self.assertion_max_lifetime = assertion_max_lifetime
+        # Port-only: False lets client_secret_basic and client_secret_post stand in for each
+        # other, as in 1.0. TS always binds a client to its registered method (3ca2c08dc).
+        self.bind_client_auth_method = bind_client_auth_method
         self.scope_expirations = scope_expirations
         self.allow_dynamic_client_registration = allow_dynamic_client_registration
         self.allow_unauthenticated_client_registration = allow_unauthenticated_client_registration

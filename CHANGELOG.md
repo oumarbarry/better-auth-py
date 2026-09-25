@@ -34,6 +34,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - oauth-proxy: social account linking through `/link-social`.
 - SIWE: `accept_legacy_wallet_fields=True` accepts and ignores the
   `walletAddress`, `address` and `chainId` fields older clients send.
+- OAuth provider: `private_key_jwt` client authentication (RFC 7523). Keys
+  come from the client's `jwks` or `jwksUri`; each assertion `jti` works once,
+  tracked in the new `oauthClientAssertion` table.
+- OAuth provider: `refresh_token_reuse_interval` lets a client retry a
+  refresh with the previous token for a few seconds and get the same response.
+- OAuth provider: ID tokens carry `at_hash`; JWT access tokens carry
+  `typ: at+jwt`, `client_id` and `jti`. Discovery lists `private_key_jwt` and
+  its signing algorithms.
+- OAuth provider: new columns `oauthRefreshToken.authorizationCodeId`,
+  `rotatedAt`, `rotationReplayResponse`, `rotationReplayExpiresAt`,
+  `oauthAccessToken.authorizationCodeId` and
+  `oauthClient.clientCredentialsScopes`, and the `oauthClientAssertion`
+  table. Run your migrations.
 
 ### Changed
 
@@ -110,6 +123,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - last-login-method records `"email-otp"` for email OTP sign-ins.
 - Have I Been Pwned: an empty password is checked too, and a failed lookup
   reports the HTTP status.
+- OAuth provider: a client must authenticate with the method it registered
+  (default `client_secret_basic`). `bind_client_auth_method=False` keeps the
+  old leniency between Basic and post.
+- OAuth provider: the `client_credentials` grant uses the client's
+  `clientCredentialsScopes`. With `client_credential_grant_default_scopes`
+  configured, clients without them keep the previous rules.
+- OAuth provider: token, introspection and revocation errors match
+  better-auth 1.7.6. For example an invalid authorization code is a 400
+  `invalid_grant`, a failed Basic login gets a `WWW-Authenticate: Basic`
+  challenge, and sending two client authentication methods is refused.
+- OAuth provider: offline access no longer needs PKCE when an OpenID request
+  sends a nonce.
+- OAuth provider: introspection reports tokens of an ended session as
+  inactive and adds `token_type`.
 
 ### Fixed
 
@@ -143,6 +170,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Have I Been Pwned: padded zero-count entries no longer flag a password.
 - Magic link: a refused user creation redirects to the error URL with the
   error code.
+- OAuth provider: reusing an authorization code revokes the tokens already
+  issued for it.
+- OAuth provider: revoking a JWT access token reports
+  `unsupported_token_type` instead of a silent success.
+- OAuth provider: UserInfo answers an invalid token with a 401
+  `invalid_token` Bearer challenge.
+- OAuth provider: HTTP Basic client credentials are URL-decoded and the
+  scheme name is case-insensitive.
 
 ## [1.0.3] - 2026-09-25
 

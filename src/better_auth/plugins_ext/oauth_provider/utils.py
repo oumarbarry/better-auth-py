@@ -11,10 +11,11 @@ from __future__ import annotations
 import inspect
 import ipaddress
 import json
+import re
 import weakref
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote_plus, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote_plus, unquote_plus, urlencode, urlsplit
 
 import jwt as pyjwt
 
@@ -185,29 +186,200 @@ def verify_oauth_query_params(oauth_query: str, secret: str) -> bool:
     )
 
 
-# --- HTTP Basic client credentials (item 6) ------------------------------------------
+# --- client authentication parameters (utils/index.ts:500-965) ----------------------
+
+CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+
+#: TS core ``PRIVATE_KEY_JWT_SIGNING_ALGORITHMS`` (oauth2/client-assertion.ts:6).
+PRIVATE_KEY_JWT_SIGNING_ALGORITHMS = (
+    "RS256",
+    "RS384",
+    "RS512",
+    "PS256",
+    "PS384",
+    "PS512",
+    "ES256",
+    "ES384",
+    "ES512",
+    "EdDSA",
+)
+
+#: RFC 7235 §2.1: the scheme is case-insensitive and followed by one or more SP.
+_BASIC_SCHEME_PREFIX = re.compile(r"^Basic +", re.IGNORECASE)
+_BASIC_AUTHORIZATION = re.compile(r"^Basic +(.*)$", re.IGNORECASE)
+_AUTH_SCHEME_TOKEN = re.compile(r"^([!#$%&'*+\-.^_`|~0-9A-Za-z]+)(?=\s|$)")
+_CLIENT_AUTHENTICATION_FIELDS = ("client_secret", "client_assertion", "client_assertion_type")
+
+
+def _decode_basic_credentials(authorization: str) -> tuple[str, str]:
+    """TS core ``decodeBasicCredentials`` (oauth2/basic-credentials.ts:60): split on the first
+    ``:``, both halves non-empty, each half form-url-decoded (RFC 6749 §2.3.1)."""
+    import base64
+
+    match = _BASIC_AUTHORIZATION.match(authorization)
+    if not match:
+        raise ValueError("Authorization header is not a Basic credential")
+    decoded = base64.b64decode(match.group(1) + "===").decode("utf-8", "replace")
+    client_id, sep, client_secret = decoded.partition(":")
+    if not sep or not client_id or not client_secret:
+        raise ValueError("Basic credential client id and secret must both be non-empty")
+    return unquote_plus(client_id), unquote_plus(client_secret)
 
 
 def basic_to_client_credentials(authorization: str) -> dict[str, str] | None:
     """Decode an HTTP Basic ``id:secret`` header — TS ``basicToClientCredentials``
-    (``utils/index.ts:391``). Returns ``None`` when the header is not Basic; raises
-    :class:`OAuthError` on a malformed pair."""
-    if not authorization.startswith("Basic "):
+    (utils/index.ts:621). ``None`` when the header is not Basic; a malformed pair is a 401
+    ``invalid_client`` challenged with ``WWW-Authenticate: Basic``."""
+    if not _BASIC_SCHEME_PREFIX.match(authorization):
         return None
-    import base64
-
-    encoded = authorization[len("Basic ") :]
     try:
-        decoded = base64.b64decode(encoded).decode()
+        client_id, client_secret = _decode_basic_credentials(authorization)
     except Exception:
-        raise OAuthError(400, "invalid_client", "invalid authorization header format") from None
-    sep = decoded.find(":")
-    if sep == -1:
-        raise OAuthError(400, "invalid_client", "invalid authorization header format")
-    client_id, client_secret = decoded[:sep], decoded[sep + 1 :]
-    if not client_id or not client_secret:
-        raise OAuthError(400, "invalid_client", "invalid authorization header format")
+        raise OAuthError(
+            401,
+            "invalid_client",
+            "invalid authorization header format",
+            headers=[("WWW-Authenticate", "Basic")],
+        ) from None
     return {"client_id": client_id, "client_secret": client_secret}
+
+
+def throw_invalid_client(
+    description: str, *, method: str | None = None, scheme: str | None = None
+) -> OAuthError:
+    """TS ``throwInvalidClient`` (utils/index.ts:688): a 401 challenge when the caller tried
+    HTTP authentication (Basic or another scheme), otherwise a plain 400. Returned so callers
+    ``raise`` it (keeps type checkers aware the branch ends)."""
+    challenge = scheme or ("Basic" if method == "client_secret_basic" else None)
+    if challenge:
+        return OAuthError(
+            401, "invalid_client", description, headers=[("WWW-Authenticate", challenge)]
+        )
+    return OAuthError(400, "invalid_client", description)
+
+
+def _form_pairs(ctx: Ctx) -> list[tuple[str, str]] | None:
+    ctype = (ctx.request.headers.get("content-type") or "").lower()
+    if "application/x-www-form-urlencoded" not in ctype:
+        return None
+    return parse_qsl(ctx.request.body.decode("utf-8", "replace"), keep_blank_values=True)
+
+
+def normalize_client_authentication_parameters(ctx: Ctx, body: dict[str, Any]) -> None:
+    """Enforce RFC 6749 §2.3 credential cardinality in place, TS
+    ``normalizeClientAuthenticationParameters`` (utils/index.ts:545). Empty values are dropped,
+    repeated credentials and mixed authentication methods are ``invalid_request``."""
+
+    def fail(description: str) -> OAuthError:
+        return OAuthError(400, "invalid_request", description)
+
+    client_id = body.get("client_id")
+    if client_id == "":
+        client_id = None
+    if client_id is not None and not isinstance(client_id, str):
+        raise fail("client_id must be a string")
+    fields: dict[str, str] = {}
+    for field in _CLIENT_AUTHENTICATION_FIELDS:
+        value = body.get(field)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str):
+            raise fail(f"{field} must be a string")
+        fields[field] = value
+
+    has_authorization = bool(ctx.request.headers.get("authorization"))
+    pairs = _form_pairs(ctx)
+    if pairs is not None:
+        ids = [v for k, v in pairs if k == "client_id" and v]
+        if len(ids) > 1:
+            raise fail("client_id must not be repeated")
+        client_id = ids[0] if ids else None
+        for field in _CLIENT_AUTHENTICATION_FIELDS:
+            values = [v for k, v in pairs if k == field and v]
+            if len(values) > 1:
+                raise fail(f"{field} must not be repeated")
+            if values:
+                fields[field] = values[0]
+
+    has_secret = "client_secret" in fields
+    has_assertion = "client_assertion" in fields or "client_assertion_type" in fields
+    if (has_authorization and (has_secret or has_assertion)) or (has_secret and has_assertion):
+        raise fail("A request must use only one client authentication method")
+    body["client_id"] = client_id
+    for field in _CLIENT_AUTHENTICATION_FIELDS:
+        body[field] = fields.get(field)
+
+
+async def extract_client_credentials(
+    ctx: Ctx, opts: Any, body: dict[str, Any], expected_audience: str
+) -> dict[str, Any] | None:
+    """Resolve how the client authenticates, TS ``extractClientCredentials``
+    (utils/index.ts:861). Returns ``{kind, method, clientId[, clientSecret]}`` for
+    ``private_key_jwt`` (``pre_verified``), Basic, post, or public ``none``; ``None`` when
+    the request names no client.
+
+    ponytail: extension client-authentication strategies (TS ``extensions.ts``) are not
+    ported; only the built-in ``private_key_jwt`` assertion type is recognized."""
+    body = dict(body)
+    normalize_client_authentication_parameters(ctx, body)
+    authorization = ctx.request.headers.get("authorization")
+
+    if body.get("client_assertion_type") or body.get("client_assertion"):
+        if not body.get("client_assertion") or not body.get("client_assertion_type"):
+            raise OAuthError(
+                400,
+                "invalid_client",
+                "client_assertion and client_assertion_type must both be provided",
+            )
+        from .client_assertion import verify_client_assertion
+
+        client_id = await verify_client_assertion(
+            ctx,
+            opts,
+            body["client_assertion"],
+            body["client_assertion_type"],
+            body.get("client_id"),
+            expected_audience,
+        )
+        return {"kind": "pre_verified", "method": "private_key_jwt", "clientId": client_id}
+
+    if authorization and not _BASIC_SCHEME_PREFIX.match(authorization):
+        match = _AUTH_SCHEME_TOKEN.match(authorization)
+        if not match:
+            raise OAuthError(400, "invalid_request", "Invalid authorization header format")
+        raise throw_invalid_client("unsupported authorization scheme", scheme=match.group(1))
+
+    if authorization:
+        creds = basic_to_client_credentials(authorization)
+        if creds:
+            return {
+                "kind": "client_secret",
+                "method": "client_secret_basic",
+                "clientId": creds["client_id"],
+                "clientSecret": creds["client_secret"],
+            }
+
+    if body.get("client_id") and body.get("client_secret"):
+        return {
+            "kind": "client_secret",
+            "method": "client_secret_post",
+            "clientId": body["client_id"],
+            "clientSecret": body["client_secret"],
+        }
+    if body.get("client_id"):
+        return {"kind": "public", "method": "none", "clientId": body["client_id"]}
+    return None
+
+
+def destructure_credentials(credentials: dict[str, Any] | None) -> dict[str, Any]:
+    """TS ``destructureCredentials`` (utils/index.ts:839)."""
+    creds = credentials or {}
+    return {
+        "client_id": creds.get("clientId"),
+        "client_secret": creds.get("clientSecret"),
+        "pre_verified": creds.get("kind") == "pre_verified",
+        "auth_method": creds.get("method"),
+    }
 
 
 # --- SafeUrl scheme policy (item 4) --------------------------------------------------
@@ -234,21 +406,26 @@ def is_loopback_host(netloc: str) -> bool:
     return host == "127.0.0.1" or host.startswith("127.")
 
 
-def is_safe_url(value: str) -> bool:
-    """Port of ``SafeUrlSchema`` — rejects ``javascript:``/``data:``/``vbscript:``, rejects a
-    fragment component, and requires HTTPS except for loopback hosts. Custom app schemes
-    (``myapp://cb``) pass."""
-    if not isinstance(value, str):
-        return False
-    parts = urlsplit(value)
+def safe_url_issue(value: str) -> str | None:
+    """The first ``SafeUrlSchema`` issue message for ``value`` (core utils/redirect-uri.ts:39),
+    or ``None`` when it passes: an absolute URL, no ``javascript:``/``data:``/``vbscript:``, no
+    fragment, and HTTPS except for loopback hosts. Custom app schemes (``myapp://cb``) pass."""
+    parts = urlsplit(value.strip())
     if not parts.scheme:
-        return False  # z.url() rejects relative URLs
+        return "Invalid URL"  # z.url() rejects relative URLs
     scheme = parts.scheme.lower() + ":"
     if scheme in DANGEROUS_URL_SCHEMES:
-        return False
+        return "URL cannot use javascript:, data:, or vbscript: scheme"
     if "#" in value:
-        return False
-    return not (scheme == "http:" and not is_loopback_host(parts.netloc))
+        return "Redirect URI must not contain a fragment component"
+    if scheme == "http:" and not is_loopback_host(parts.netloc):
+        return "Redirect URI must use HTTPS (HTTP allowed only for loopback hosts)"
+    return None
+
+
+def is_safe_url(value: str) -> bool:
+    """Port of ``SafeUrlSchema`` as a predicate (see :func:`safe_url_issue`)."""
+    return isinstance(value, str) and safe_url_issue(value) is None
 
 
 # --- jwt plugin lookup (item 2) ------------------------------------------------------
@@ -469,13 +646,19 @@ def client_allows_grant(client: dict[str, Any], grant_type: str) -> bool:
 
 #: TS ``PKCERequirementErrors`` messages (surfaced as the ``invalid_request`` reason).
 PKCE_PUBLIC_CLIENT = "pkce is required for public clients"
-PKCE_OFFLINE_ACCESS = "pkce is required when requesting offline_access scope"
+PKCE_OFFLINE_ACCESS = "pkce or OIDC nonce is required when requesting offline_access scope"
 PKCE_CLIENT_REQUIRE = "pkce is required for this client"
 
 
-def is_pkce_required(client: dict[str, Any], requested_scopes: list[str] | None) -> str | None:
-    """Return the reason PKCE is required, or ``None`` if not — TS ``isPKCERequired``.
-    Public clients, ``offline_access`` scope, and ``requirePKCE ?? True`` each force it."""
+def is_pkce_required(
+    client: dict[str, Any], requested_scopes: list[str] | None, nonce: str | None = None
+) -> str | None:
+    """Return the reason PKCE is required, or ``None`` if not, TS ``isPKCERequired``
+    (utils/index.ts:1107). Public clients always need it; ``offline_access`` needs it unless an
+    OIDC request (``openid``) carries a ``nonce`` (dd42701af); ``requirePKCE ?? True`` last.
+
+    ponytail: public detection still honors the legacy ``type``/``public`` columns; TS 1.7 keys
+    on ``tokenEndpointAuthMethod == "none"`` only, which lands with the client-model package."""
     is_public = (
         client.get("tokenEndpointAuthMethod") == "none"
         or client.get("type") in ("native", "user-agent-based")
@@ -483,7 +666,9 @@ def is_pkce_required(client: dict[str, Any], requested_scopes: list[str] | None)
     )
     if is_public:
         return PKCE_PUBLIC_CLIENT
-    if requested_scopes and "offline_access" in requested_scopes:
+    scopes = requested_scopes or []
+    has_oidc_nonce = "openid" in scopes and isinstance(nonce, str) and len(nonce) > 0
+    if "offline_access" in scopes and not has_oidc_nonce:
         return PKCE_OFFLINE_ACCESS
     require = client.get("requirePKCE")
     if require is None or require is True:
@@ -537,6 +722,38 @@ def resolve_subject_identifier(client: dict[str, Any], opts: Any, user_id: str) 
 # --- server-side JWT-access-token verify (item 5) ------------------------------------
 
 
+_ACCESS_TOKEN_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*)\s+(.+)$")
+
+
+def strip_access_token_authorization_scheme(token: str) -> str:
+    """Drop a leading ``Bearer``/``DPoP`` scheme from a presented token, TS core
+    ``stripAccessTokenAuthorizationScheme`` (oauth2/dpop.ts:175)."""
+    match = _ACCESS_TOKEN_SCHEME.match(token)
+    if match and match.group(1).lower() in ("bearer", "dpop"):
+        return match.group(2).strip()
+    return token
+
+
+#: TS ``MAX_AUD_VALUES`` (resources.ts:58).
+_MAX_AUD_VALUES = 64
+
+
+def audience_allowed(ctx: Ctx, opts: Any, aud: Any) -> bool:
+    """Every ``aud`` value must be a known target, TS ``isAudienceClaimAllowed``
+    (resources.ts:283) with the ``/oauth2/userinfo`` implicit audience. No ``aud`` passes.
+
+    ponytail: known targets are ``valid_audiences`` (default: the base URL) until the
+    ``oauthResource`` model is ported; then this becomes the resource-row lookup."""
+    if aud is None:
+        return True
+    values = aud if isinstance(aud, list) else [aud]
+    if len(values) > _MAX_AUD_VALUES:
+        return False
+    base = f"{ctx.auth.base_url}{ctx.auth.base_path}"
+    known = {*(getattr(opts, "valid_audiences", None) or [base]), f"{base}/oauth2/userinfo"}
+    return all(v in known for v in values)
+
+
 class JwsAccessTokenInvalid(Exception):
     """The token is not a verifiable JWS (bad structure / signature / unknown key). The caller
     falls through to opaque-token handling — TS ``JWSInvalid``/``TypeError`` path."""
@@ -570,7 +787,7 @@ async def verify_jws_access_token(
     jwt_plugin: Any,
     token: str,
     *,
-    audience: str | list[str],
+    audience: str | list[str] | None,
     issuer: str,
 ) -> dict[str, Any]:
     """Verify an OAuth JWT access token against the jwt plugin's local signing keys with OAuth
@@ -594,10 +811,16 @@ async def verify_jws_access_token(
     if public_key is None:
         raise JwsAccessTokenInvalid("unknown kid")
 
-    auds = list(audience) if isinstance(audience, (list, tuple)) else [audience]
+    # ``audience=None`` verifies signature + issuer only; the caller checks ``aud`` (TS 1.7).
+    auds = list(audience) if isinstance(audience, (list, tuple)) else audience
     try:
         return pyjwt.decode(
-            token, public_key, algorithms=[jwt_plugin._alg()], audience=auds, issuer=issuer
+            token,
+            public_key,
+            algorithms=[jwt_plugin._alg()],
+            audience=auds,
+            issuer=issuer,
+            options={"verify_aud": audience is not None},
         )
     except pyjwt.ExpiredSignatureError as exc:
         raise JwsAccessTokenExpired() from exc

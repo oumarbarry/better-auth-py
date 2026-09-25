@@ -309,6 +309,7 @@ class JWTPlugin(Plugin):
         audience: str | list[str] | None,
         expiration_time: Any,
         sign_fn: Any,
+        header: dict[str, Any] | None = None,
     ) -> str:
         now_seconds = math.floor(time.time())
         iat = payload.get("iat")
@@ -325,6 +326,8 @@ class JWTPlugin(Plugin):
         aud = aud if aud is not None else (audience if audience is not None else base_origin)
 
         # Custom/remote signing: the user function owns all headers (TS jwt.sign).
+        # ponytail: ``header`` (e.g. ``typ``) is not forwarded to ``sign_fn``; TS passes it as a
+        # second argument, add that when a caller needs it.
         if sign_fn is not None:
             full = {**payload, "iat": iat, "exp": exp, "iss": iss, "aud": aud}
             if payload.get("nbf") is not None:
@@ -340,7 +343,9 @@ class JWTPlugin(Plugin):
         claims["iss"] = iss
         claims["aud"] = aud
         claims = json.loads(dump_json(claims))  # JSON-safe (dates -> ISO, like TS JSON.stringify)
-        return pyjwt.encode(claims, priv, algorithm=self._alg(), headers={"kid": key["id"]})
+        # Caller header first so the resolved alg/kid always win (TS sign.ts:337).
+        headers = {**(header or {}), "kid": key["id"]}
+        return pyjwt.encode(claims, priv, algorithm=self._alg(), headers=headers)
 
     async def _get_jwt_token(self, session: dict[str, Any]) -> str:
         """TS ``getJwtToken`` — payload from ``definePayload`` (default ``session.user``),
@@ -424,7 +429,11 @@ class JWTPlugin(Plugin):
     # --- server-only helpers (W3 convention: not HTTP-mounted, callable directly) -----
 
     async def sign_jwt(
-        self, *, payload: dict[str, Any], override_options: dict[str, Any] | None = None
+        self,
+        *,
+        payload: dict[str, Any],
+        override_options: dict[str, Any] | None = None,
+        header: dict[str, Any] | None = None,
     ) -> str:
         """TS server-only ``signJWT`` — sign ``payload`` with the newest key. ``override_options``
         may override ``issuer``/``audience``/``expiration_time``/``sign`` for this call."""
@@ -435,6 +444,7 @@ class JWTPlugin(Plugin):
             audience=o.get("audience", self.audience),
             expiration_time=o.get("expiration_time", self.expiration_time),
             sign_fn=o.get("sign", self.sign),
+            header=header,
         )
 
     async def verify_jwt(self, token: str, issuer: str | None = None) -> dict[str, Any] | None:
