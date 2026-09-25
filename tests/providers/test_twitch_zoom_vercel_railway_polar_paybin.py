@@ -382,3 +382,48 @@ async def test_paybin_fetch_user_requires_id_token():
     p = Paybin(client_id="cid", client_secret="csecret")
     with pytest.raises(OAuthFetchError):
         await p.fetch_user(OAuthTokens(access_token="at"), http_with(lambda r: httpx.Response(404)))
+
+
+# --- per-request additionalParams (e7eb45b06) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        Twitch(client_id="cid", client_secret="cs"),  # twitch.ts:65
+        Zoom(client_id="cid", client_secret="cs"),  # zoom.ts:169
+        Vercel(client_id="cid", client_secret="cs"),  # vercel.ts:50
+        Railway(client_id="cid", client_secret="cs"),  # railway.ts:53
+        Polar(client_id="cid", client_secret="cs"),  # polar.ts:62
+        Paybin(client_id="cid", client_secret="cs"),  # paybin.ts:72
+    ],
+    ids=lambda p: p.provider_id,
+)
+def test_authorization_url_forwards_additional_params_except_reserved(provider):
+    url = provider.authorization_url(
+        state="st",
+        redirect_uri="http://cb",
+        code_verifier="v" * 43,
+        additional_params={"audience": "api", "state": "forged", "client_id": "evil"},
+    )
+    query = parse_qs(urlsplit(url).query)
+    assert query["audience"] == ["api"]
+    assert query["state"] == ["st"]
+    assert query["client_id"] == ["cid"]
+
+
+def test_zoom_authorization_url_uses_shared_builder_order():
+    # TS v1.7.6 zoom.ts:156-170: createAuthorizationURL with no scopes, PKCE when enabled
+    p = Zoom(client_id="cid", client_secret="cs")
+    url = p.authorization_url(
+        state="st", redirect_uri="http://cb", code_verifier="v" * 43, login_hint="a@b.c"
+    )
+    keys = list(parse_qs(urlsplit(url).query))
+    assert keys == [
+        "response_type",
+        "client_id",
+        "state",
+        "redirect_uri",
+        "code_challenge_method",
+        "code_challenge",
+    ]

@@ -13,11 +13,8 @@ The completion ``<script>`` is a fixed string whose sha256 is pinned in the resp
 below is reused verbatim from TS.
 
 ``ponytail`` notes:
-- The Python OAuth layer has no ``setOAuthState``/``generateGenericState``; state is a
-  verification row + signed CSRF cookie (``oauth.flow``). ``/oauth-popup/start`` writes
-  that row directly (it needs ``requestSignUp`` + INTERNAL_STATE_KEYS stripping) and sets
-  the shared ``_state_cookie`` so the normal ``/callback`` and ``/oauth2/callback`` routes
-  consume it unchanged.
+- State is the shared ``oauth.flow`` verification row + signed CSRF cookie, so the normal
+  ``/callback`` route consumes it unchanged (generic-oauth providers included).
 - ``additionalData`` is stored NESTED under ``additionalData`` (this port's convention,
   matching generic-oauth) with INTERNAL_STATE_KEYS stripped — nesting already keeps an
   injected ``link``/``callbackURL`` out of the keys the callback reads.
@@ -28,15 +25,21 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from ..crypto import generate_id, generate_random_string, sign_value, unsign_value
-from ..oauth.flow import STATE_EXPIRES_IN, _absolute_url, _state_cookie
-from ..oauth.machinery import build_authorization_url
+from ..crypto import sign_value, unsign_value
+from ..oauth.flow import (
+    _absolute_url,
+    _authorization_url,
+    _create_state,
+    _mint_id_token_nonce,
+    _redirect_uri,
+    _state_cookie,
+    get_provider,
+)
 from ..plugins import HookSet, Plugin, PluginHook, Route
-from ..session import build_cookie, clear_cookie, cookie_name, utcnow
+from ..session import build_cookie, clear_cookie, cookie_name
 from ..types import APIError, AuthResponse, Ctx
 
 logger = logging.getLogger("better_auth")
@@ -73,6 +76,8 @@ INTERNAL_STATE_KEYS = frozenset(
         "oauthState",
         "link",
         "requestSignUp",
+        "idTokenNonce",
+        "serverContext",
     }
 )
 
@@ -243,16 +248,14 @@ class OAuthPopupPlugin(Plugin):
             return invalid
 
         # Built-in social AND generic-oauth providers both register into social_providers.
-        provider = ctx.auth.social_providers.get(query.get("provider") or "")
+        provider = await get_provider(ctx, query.get("provider"))
         if provider is None:
             return fail("provider_not_found", f"Unknown provider: {query.get('provider')}")
 
         callback_url = query.get("callbackURL") or ctx.auth.base_url
 
         try:
-            code_verifier = generate_random_string(128)
-            state = await self._store_state(ctx, callback_url, code_verifier, query)
-            url = await self._authorization_url(ctx, provider, state, code_verifier, query)
+            state, url = await self._start_flow(ctx, provider, callback_url, query)
         except Exception as error:
             logger.error("OAuth popup failed to start: %s", error)
             return fail("popup_sign_in_failed", "Failed to start the OAuth flow.")
@@ -267,11 +270,11 @@ class OAuthPopupPlugin(Plugin):
         response.set_cookie(build_cookie(ctx.auth, marker, 10 * 60, POPUP_MARKER_COOKIE))
         return response
 
-    async def _store_state(
-        self, ctx: Ctx, callback_url: str, code_verifier: str, query: dict[str, str]
-    ) -> str:
-        """Write the CSRF state row (verification table) and return the ``state`` token. Shape
-        matches what ``/callback`` and ``/oauth2/callback`` read (``oauth.flow``)."""
+    async def _start_flow(
+        self, ctx: Ctx, provider: Any, callback_url: str, query: dict[str, str]
+    ) -> tuple[str, str]:
+        """Write the state (shared ``oauth.flow`` state row, id-token nonce included, TS
+        v1.7.6 oauth-popup/index.ts:217-259) and build the provider authorization URL."""
         raw_additional = query.get("additionalData")
         parsed: dict[str, Any] = {}
         if raw_additional:
@@ -282,74 +285,25 @@ class OAuthPopupPlugin(Plugin):
             except ValueError:
                 parsed = {}
         additional_data = {k: v for k, v in parsed.items() if k not in INTERNAL_STATE_KEYS}
-
-        state = generate_random_string(32)
-        now = utcnow()
-        value: dict[str, Any] = {
-            "callbackURL": callback_url,
-            "codeVerifier": code_verifier,
-            "errorURL": query.get("errorCallbackURL"),
-            "newUserURL": query.get("newUserCallbackURL"),
-            "expiresAt": int(now.timestamp() * 1000) + 10 * 60 * 1000,
-        }
-        if query.get("requestSignUp") == "true":
-            value["requestSignUp"] = True
-        if additional_data:
-            value["additionalData"] = additional_data
-        await ctx.adapter.create(
-            "verification",
-            {
-                "id": generate_id(),
-                "identifier": state,
-                "value": json.dumps(value),
-                "expiresAt": now + timedelta(seconds=STATE_EXPIRES_IN),
-                "createdAt": now,
-                "updatedAt": now,
-            },
+        nonce = _mint_id_token_nonce(provider)
+        state, code_verifier = await _create_state(
+            ctx,
+            callback_url=callback_url,
+            error_url=query.get("errorCallbackURL"),
+            new_user_url=query.get("newUserCallbackURL"),
+            additional_data=additional_data or None,
+            id_token_nonce=nonce,
+            request_sign_up=True if query.get("requestSignUp") == "true" else None,
         )
-        return state
-
-    async def _authorization_url(
-        self, ctx: Ctx, provider: Any, state: str, code_verifier: str, query: dict[str, str]
-    ) -> str:
-        """Provider authorization URL. Generic-oauth providers resolve their endpoint via
-        discovery and callback under ``/oauth2/callback`` (their registered provider carries a
-        ``generic`` config but no ``authorization_endpoint``); built-in social providers build
-        it themselves and callback under ``/callback``."""
-        base = f"{ctx.auth.base_url}{ctx.auth.base_path}"
-        scopes = query["scopes"].split(",") if query.get("scopes") else None
-        generic = getattr(provider, "generic", None)
-        if generic is not None:
-            auth_endpoint = generic.authorization_url
-            if not auth_endpoint and generic.discovery_url:
-                from .generic_oauth import _discover
-
-                doc = await _discover(
-                    ctx.auth.http, generic.discovery_url, generic.discovery_headers
-                )
-                auth_endpoint = doc.get("authorization_endpoint")
-            if not auth_endpoint:
-                raise APIError(400, "INVALID_OAUTH_CONFIGURATION", "Invalid OAuth configuration")
-            merged = [*(scopes or []), *(generic.scopes or [])]
-            return build_authorization_url(
-                authorization_endpoint=auth_endpoint,
-                client_id=generic.client_id,
-                state=state,
-                redirect_uri=generic.redirect_uri
-                or f"{base}/oauth2/callback/{provider.provider_id}",
-                scopes=list(dict.fromkeys(merged)) or None,
-                response_type=generic.response_type or "code",
-                code_verifier=code_verifier if generic.pkce else None,
-                prompt=generic.prompt,
-                access_type=generic.access_type,
-                response_mode=generic.response_mode,
-            )
-        return provider.authorization_url(
+        url = _authorization_url(
+            provider,
             state=state,
-            redirect_uri=provider.redirect_uri or f"{base}/callback/{provider.provider_id}",
+            redirect_uri=_redirect_uri(ctx, provider),
             code_verifier=code_verifier,
-            extra_scopes=scopes,
+            extra_scopes=query["scopes"].split(",") if query.get("scopes") else None,
+            nonce=nonce,
         )
+        return state, url
 
     # --- after /callback/* and /oauth2/callback/* ----------------------------------------
 

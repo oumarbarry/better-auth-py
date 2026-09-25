@@ -75,6 +75,7 @@ class Paybin(ProviderConfig):
         extra_scopes: list[str] | None = None,
         login_hint: str | None = None,
         nonce: str | None = None,
+        additional_params: dict[str, str] | None = None,
     ) -> str:
         if not self.client_id or not self.client_secret:
             raise ValueError("CLIENT_ID_AND_SECRET_REQUIRED")
@@ -87,6 +88,7 @@ class Paybin(ProviderConfig):
             extra_scopes=extra_scopes,
             login_hint=login_hint,
             nonce=nonce,
+            additional_params=additional_params,
         )
 
     async def fetch_user(self, tokens: OAuthTokens, http: httpx.AsyncClient) -> OAuthUserInfo:

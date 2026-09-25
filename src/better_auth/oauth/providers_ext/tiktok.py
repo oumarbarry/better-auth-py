@@ -5,16 +5,24 @@ Quirks vs. the OAuth2 norm:
   TikTok never uses ``client_id``.
 - Authorize URL is hand-built with non-standard param ordering and **comma**-joined
   scopes (not the shared builder).
-- Refresh sends ``client_key`` as an extra POST param.
+- Exchange and refresh authenticate through a custom strategy that puts ``client_key``
+  and ``client_secret`` in the body.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-from urllib.parse import quote
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
-from ..machinery import exchange_code, oauth_fetch, refresh_access_token
+from ..machinery import (
+    RESERVED_AUTHORIZATION_PARAMS,
+    TokenEndpointAuth,
+    create_placeholder_email,
+    exchange_code,
+    oauth_fetch,
+    refresh_access_token,
+)
 from ..models import OAuthUserInfo
 from ..providers import ProviderConfig
 
@@ -45,15 +53,22 @@ class TikTok(ProviderConfig):
         extra_scopes: list[str] | None = None,
         login_hint: str | None = None,
         nonce: str | None = None,
+        additional_params: dict[str, str] | None = None,
     ) -> str:
         scopes = [] if self.disable_default_scope else list(self.scopes)
         scopes += list(extra_scopes or [])
-        scope = self.scope_joiner.join(dict.fromkeys(scopes))
-        return (
-            f"{self.authorization_endpoint}?scope={scope}"
-            f"&response_type=code&client_key={self.client_key}"
-            f"&redirect_uri={quote(redirect_uri, safe='')}&state={state}"
-        )
+        params = {
+            "scope": self.scope_joiner.join(dict.fromkeys(scopes)),
+            "response_type": "code",
+            "client_key": self.client_key,
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }
+        # tiktok.ts:163-169 (e7eb45b06): extras never replace a reserved key or client_key
+        for key, value in {**self.authorize_params, **(additional_params or {})}.items():
+            if key not in RESERVED_AUTHORIZATION_PARAMS and key != "client_key":
+                params[key] = value
+        return f"{self.authorization_endpoint}?{urlencode(params)}"
 
     async def exchange(
         self,
@@ -69,9 +84,9 @@ class TikTok(ProviderConfig):
             code=code,
             redirect_uri=redirect_uri,
             client_id="",
-            client_secret=self.client_secret,
-            client_key=self.client_key,
-            authentication="post",
+            client_secret="",
+            code_verifier=code_verifier,  # tiktok.ts:173-177 forwards it
+            token_endpoint_auth=self._token_endpoint_auth(),
         )
 
     async def refresh(self, http: httpx.AsyncClient, refresh_token: str) -> OAuthTokens:
@@ -80,10 +95,19 @@ class TikTok(ProviderConfig):
             token_endpoint=self.token_endpoint,
             refresh_token=refresh_token,
             client_id="",
-            client_secret=self.client_secret,
-            authentication="post",
-            extra_params={"client_key": self.client_key},
+            client_secret="",
+            token_endpoint_auth=self._token_endpoint_auth(),
         )
+
+    def _token_endpoint_auth(self) -> TokenEndpointAuth:
+        """TS v1.7.6 tiktok.ts:141-147 (baa08f4ee): every token request carries
+        ``client_key`` + ``client_secret`` in the body through a custom strategy."""
+
+        def customize(request: dict[str, Any]) -> None:
+            request["body"]["client_key"] = self.client_key
+            request["body"]["client_secret"] = self.client_secret
+
+        return TokenEndpointAuth(method="custom", customize_request=customize)
 
     async def fetch_user(self, tokens: OAuthTokens, http: httpx.AsyncClient) -> OAuthUserInfo:
         fields = ["open_id", "avatar_large_url", "display_name", "username"]
@@ -98,7 +122,9 @@ class TikTok(ProviderConfig):
         user = profile["data"]["user"]
         return OAuthUserInfo(
             id=str(user["open_id"]),
-            email=user.get("email") or user.get("username"),
+            # tiktok.ts:219-224 (b4ad5a110)
+            email=user.get("email")
+            or create_placeholder_email(identifier=str(user["open_id"]), namespace="tiktok"),
             name=user.get("display_name") or user.get("username") or "",
             image=user.get("avatar_large_url"),
             email_verified=False,

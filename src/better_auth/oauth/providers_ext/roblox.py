@@ -7,8 +7,9 @@ the shared builder instead since the *values* are identical — the base builder
 and the non-default ``prompt`` param is just the generic ``authorize_params`` passthrough.
 No functional divergence, less code (ladder rung 2 — reuse what's already here).
 
-Roblox never returns an email/``email_verified`` claim; TS maps ``email`` to the
-username (``preferred_username``) as a placeholder and hardcodes ``emailVerified: false``.
+Roblox never returns an email/``email_verified`` claim; TS maps ``email`` to a stable
+``{sub}@roblox.placeholder.invalid`` placeholder (roblox.ts:105-108, b4ad5a110) and
+hardcodes ``emailVerified: false``.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..machinery import create_placeholder_email
 from ..models import OAuthUserInfo
 from ..providers import ProviderConfig
 
@@ -34,7 +36,7 @@ class Roblox(ProviderConfig):
     def map_profile(self, profile: dict[str, Any]) -> OAuthUserInfo:
         return OAuthUserInfo(
             id=str(profile["sub"]),
-            email=profile.get("preferred_username"),
+            email=create_placeholder_email(identifier=str(profile["sub"]), namespace="roblox"),
             name=profile.get("nickname") or profile.get("preferred_username") or "",
             image=profile.get("picture"),
             email_verified=False,

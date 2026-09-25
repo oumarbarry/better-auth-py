@@ -163,7 +163,9 @@ async def test_google_uses_pkce_github_does_not():
         gg_q = parse_qs(urlsplit(gg.json()["url"]).query)
         assert gg_q["code_challenge_method"] == ["S256"]
         assert "code_challenge" in gg_q
-        assert "nonce" in gg_q  # google uses OIDC nonce
+        # TS v1.7.6 google.ts:177-196 sends no nonce: only providers that set
+        # requiresIdTokenNonce (generic-oauth discovery) bind one to the redirect
+        assert "nonce" not in gg_q
 
 
 # --- SSRF guard ---------------------------------------------------------------------------

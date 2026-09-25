@@ -17,7 +17,7 @@ def _map(p: dict[str, Any]) -> OAuthUserInfo:
     account = p.get("kakao_account") or {}
     profile = account.get("profile") or {}
     return OAuthUserInfo(
-        id=str(p.get("id")),
+        id="" if p.get("id") is None else str(p["id"]),
         name=profile.get("nickname") or account.get("name") or "",
         email=account.get("email"),
         image=profile.get("profile_image_url") or profile.get("thumbnail_image_url"),

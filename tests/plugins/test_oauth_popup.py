@@ -60,6 +60,8 @@ def popup_http(*, userinfo: dict[str, Any] | None = None) -> httpx.AsyncClient:
         "authorization_endpoint": f"{IDP}/authorize",
         "token_endpoint": f"{IDP}/token",
         "userinfo_endpoint": f"{IDP}/userinfo",
+        # OIDC discovery: the account subject is `sub` (generic-oauth index.ts:311-313)
+        "id_token_signing_alg_values_supported": ["RS256"],
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -116,7 +118,7 @@ async def run_popup_flow(client: httpx.AsyncClient) -> tuple[httpx.Response, htt
     assert start.status_code == 302, start.text
     state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
     callback = await client.get(
-        f"/api/auth/oauth2/callback/{PROVIDER}?code=the-code&state={state}",
+        f"/api/auth/callback/{PROVIDER}?code=the-code&state={state}",
         follow_redirects=False,
     )
     return start, callback
@@ -275,13 +277,13 @@ async def test_keeps_redirect_when_not_a_popup_flow():
     # its redirect untouched.
     async with make_client(popup_auth()) as client:
         signin = await client.post(
-            "/api/auth/sign-in/oauth2",
-            json={"providerId": PROVIDER, "callbackURL": f"{POPUP_ORIGIN}/dashboard"},
+            "/api/auth/sign-in/social",
+            json={"provider": PROVIDER, "callbackURL": f"{POPUP_ORIGIN}/dashboard"},
         )
         assert signin.status_code == 200, signin.text
         state = parse_qs(urlsplit(signin.json()["url"]).query)["state"][0]
         callback = await client.get(
-            f"/api/auth/oauth2/callback/{PROVIDER}?code=the-code&state={state}",
+            f"/api/auth/callback/{PROVIDER}?code=the-code&state={state}",
             follow_redirects=False,
         )
     assert callback.status_code == 302
@@ -293,7 +295,7 @@ async def test_relays_oauth_error_to_opener():
         start = await client.get(start_url(), follow_redirects=False)
         state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
         callback = await client.get(
-            f"/api/auth/oauth2/callback/{PROVIDER}?state={state}&error=access_denied",
+            f"/api/auth/callback/{PROVIDER}?state={state}&error=access_denied",
             follow_redirects=False,
         )
     assert callback.status_code == 200

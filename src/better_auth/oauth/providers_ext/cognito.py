@@ -47,6 +47,8 @@ class Cognito(ProviderConfig):
     user_pool_id: str = ""
     require_client_secret: bool = False
     disable_id_token_sign_in: bool = False
+    #: preselects the hosted-UI identity provider (TS ``identityProvider``)
+    identity_provider: str | None = None
     scopes: list[str] = field(default_factory=lambda: ["openid", "profile", "email"])
     use_pkce: bool = True
 
@@ -71,8 +73,13 @@ class Cognito(ProviderConfig):
     def supports_id_token(self) -> bool:
         return bool(self.jwks_url) and not self.disable_id_token_sign_in
 
-    def authorization_url(self, **kwargs: Any) -> str:
-        url = super().authorization_url(**kwargs)
+    def authorization_url(
+        self, *, additional_params: dict[str, str] | None = None, **kwargs: Any
+    ) -> str:
+        # TS v1.7.6 cognito.ts:114-119: the configured IdP, then the request extras win.
+        extras = {"identity_provider": self.identity_provider} if self.identity_provider else {}
+        extras.update(additional_params or {})
+        url = super().authorization_url(additional_params=extras, **kwargs)
         # AWS Cognito requires scopes encoded with %20, but urlencode emits '+'. Re-encode
         # every param (harmless — %20 is valid everywhere) so scope comes out %20-joined.
         parts = urlsplit(url)

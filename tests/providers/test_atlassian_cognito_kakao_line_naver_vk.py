@@ -491,3 +491,59 @@ async def test_cognito_verify_id_token_max_age_1h():
 def test_cognito_disable_id_token_sign_in():
     assert cognito().supports_id_token is True
     assert cognito(disable_id_token_sign_in=True).supports_id_token is False
+
+
+# --- v1.7.6: per-request additionalParams (e7eb45b06) and account subjects -----------------
+
+
+def test_atlassian_additional_params_cannot_override_audience():
+    # TS v1.7.6 atlassian.ts:68-70 spreads the request extras first: `audience` wins.
+    q = authz_query(
+        Atlassian(client_id="c", client_secret="s"),
+        additional_params={"audience": "evil", "foo": "bar"},
+    )
+    assert q["audience"] == ["api.atlassian.com"]
+    assert q["foo"] == ["bar"]
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [Kakao(client_id="c"), Naver(client_id="c"), VK(client_id="c"), Line(client_id="c")],
+)
+def test_additional_params_forwarded(provider):
+    # TS v1.7.6 kakao.ts:123, naver.ts:59, vk.ts:54, line.ts:76 forward additionalParams.
+    assert authz_query(provider, additional_params={"foo": "bar"})["foo"] == ["bar"]
+
+
+def test_cognito_identity_provider_option():
+    # TS v1.7.6 cognito.ts:114-119: `identity_provider` from the option, request extras win.
+    p = Cognito(
+        client_id="cog-id",
+        domain="myapp.auth.us-east-1.amazoncognito.com",
+        region="us-east-1",
+        user_pool_id="us-east-1_ABC123",
+        identity_provider="Google",
+    )
+    assert authz_query(p)["identity_provider"] == ["Google"]
+    q = authz_query(p, additional_params={"identity_provider": "COGNITO"})
+    assert q["identity_provider"] == ["COGNITO"]
+
+
+def test_kakao_missing_id_is_not_an_account_subject():
+    # TS v1.7.6 kakao.ts:109 accountSubject is `profile.id`; a missing id must not
+    # stringify to "None" and pass account-key.ts validation.
+    assert Kakao(client_id="c").map_profile({"kakao_account": {}}).id == ""
+
+
+async def test_line_maps_only_oidc_fields():
+    # TS v1.7.6 line.ts:53 accountSubject `profile.sub`, :149-151 name/picture only
+    # (the `userId`/`displayName`/`pictureUrl` fallbacks are gone).
+    def handler(request):
+        return httpx.Response(
+            200, json={"userId": "u1", "displayName": "D", "pictureUrl": "http://p"}
+        )
+
+    info = await Line(client_id="lc").fetch_user(OAuthTokens(access_token="a"), mock_http(handler))
+    assert info.id == ""
+    assert info.name == ""
+    assert info.image is None

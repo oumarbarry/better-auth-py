@@ -237,7 +237,8 @@ async def test_missing_sub_rejected():
 # --- email handling ----------------------------------------------------------------------
 
 
-async def test_missing_email_returns_200_with_error_body():
+async def test_missing_email_is_a_400():
+    # TS v1.7.6 one-tap/index.ts:156-160 (ad35eadd1): a missing email throws BAD_REQUEST
     jwks, sign = _rsa_jwks_and_signer()
     payload = default_payload()
     del payload["email"]
@@ -245,8 +246,62 @@ async def test_missing_email_returns_200_with_error_body():
     auth = one_tap_auth(jwks=jwks)
     async with make_client(auth) as client:
         r = await call_one_tap(client, token)
-        assert r.status_code == 200
-        assert r.json() == {"error": "Email not available in token"}
+        assert r.status_code == 400
+        assert r.json()["message"] == "Email not available in token"
+
+
+async def test_non_string_sub_is_rejected():
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = one_tap_auth(jwks=jwks)
+    async with make_client(auth) as client:
+        r = await call_one_tap(client, sign(default_payload(sub=123)))
+        assert r.status_code == 400
+        assert r.json()["message"] == "invalid id token"
+
+
+async def test_non_rs256_token_is_rejected():
+    # google.ts:74-86: Google id tokens are pinned to RS256
+    jwks, _sign = _rsa_jwks_and_signer()
+    token = jwt.encode(default_payload(), "s" * 32, algorithm="HS256", headers={"kid": "x"})
+    async with make_client(one_tap_auth(jwks=jwks)) as client:
+        assert (await call_one_tap(client, token)).status_code == 400
+
+
+async def test_google_hd_option_is_enforced():
+    jwks, sign = _rsa_jwks_and_signer()
+    token = sign(default_payload(hd="other.com"))
+    auth = one_tap_auth(jwks=jwks, google_kwargs={"hd": "company.com"})
+    async with make_client(auth) as client:
+        assert (await call_one_tap(client, token)).status_code == 400
+
+
+async def test_require_email_verification_is_email_not_verified():
+    jwks, sign = _rsa_jwks_and_signer()
+    token = sign(default_payload(email_verified=False))
+    auth = one_tap_auth(jwks=jwks, google_kwargs={"require_email_verification": True})
+    async with make_client(auth) as client:
+        r = await call_one_tap(client, token)
+        assert r.status_code == 403
+        assert r.json()["code"] == "EMAIL_NOT_VERIFIED"
+
+
+async def test_validate_user_info_gets_google_source_and_claims():
+    from better_auth.config import UserOptions
+
+    calls: list = []
+
+    def validate(data, ctx):
+        calls.append(data)
+        return {"error": "no_google"}
+
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = one_tap_auth(jwks=jwks, user=UserOptions(validate_user_info=validate))
+    async with make_client(auth) as client:
+        r = await call_one_tap(client, sign(default_payload()))
+        assert r.status_code == 403
+        assert r.json()["code"] == "no_google"
+    assert calls[0]["source"]["oauth"]["providerId"] == "google"
+    assert calls[0]["source"]["oauth"]["profile"]["sub"] == "google-sub-1"
 
 
 async def test_email_is_lowercased():
@@ -459,7 +514,7 @@ async def test_google_provider_disable_sign_up_blocks_one_tap_signup():
     async with make_client(auth) as client:
         r = await call_one_tap(client, token)
         assert r.status_code == 401
-        assert r.json()["message"] == "signup_disabled"
+        assert r.json()["message"] == "signup disabled"
         assert len(await auth.adapter.find_many("user")) == 0
 
 
@@ -474,4 +529,4 @@ async def test_plugin_disable_signup_false_does_not_re_enable_provider_signup():
     async with make_client(auth) as client:
         r = await call_one_tap(client, token)
         assert r.status_code == 401
-        assert r.json()["message"] == "signup_disabled"
+        assert r.json()["message"] == "signup disabled"

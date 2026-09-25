@@ -16,6 +16,7 @@ import logging
 import re
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -24,6 +25,7 @@ from ..crypto import (
     generate_id,
     generate_random_string,
     is_likely_encrypted,
+    sign_email_verification_token,
     sign_value,
     symmetric_decrypt,
     symmetric_encrypt,
@@ -31,9 +33,15 @@ from ..crypto import (
 )
 from ..session import build_cookie, clear_cookie, cookie_name, create_session, utcnow
 from ..types import APIError, AuthResponse, Ctx
-from .machinery import OAuthFetchError
+from .machinery import RESERVED_AUTHORIZATION_PARAMS, OAuthFetchError
 from .models import OAuthTokens, OAuthUserInfo
-from .providers import ProviderConfig, call_verify_id_token
+from .providers import (
+    ProviderConfig,
+    call_refresh,
+    call_verify_id_token,
+    is_valid_account_subject,
+)
+from .validate_user_info import assert_valid_user_info
 
 logger = logging.getLogger("better_auth")
 
@@ -55,9 +63,10 @@ class OAuthLinkError(Exception):
 
 
 class _CallbackError(Exception):
-    def __init__(self, code: str, error_url: str | None = None):
+    def __init__(self, code: str, error_url: str | None = None, *, description: str | None = None):
         self.code = code
         self.error_url = error_url
+        self.description = description
         super().__init__(code)
 
 
@@ -115,14 +124,31 @@ def merge_scopes(stored: str | None, incoming: list[str] | None) -> str:
 
 
 def _redirect_uri(ctx: Ctx, provider: ProviderConfig) -> str:
-    return (
-        provider.redirect_uri
-        or f"{ctx.auth.base_url}{ctx.auth.base_path}/callback/{provider.provider_id}"
-    )
+    """``provider.redirect_uri`` or ``{baseURL}/callback/{id}`` from the per-request base
+    URL (TS v1.7.6 oauth2/utils.ts:39-49 ``getOAuthCallbackPath``, 7c7313c81)."""
+    path = provider.callback_path or f"/callback/{provider.provider_id}"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return provider.redirect_uri or f"{ctx.auth.base_url}{ctx.auth.base_path}{path}"
 
 
 def _absolute_url(ctx: Ctx, url: str) -> str:
     return f"{ctx.auth.base_url}{url}" if url.startswith("/") else url
+
+
+def _default_error_url(ctx: Ctx) -> str:
+    return ctx.auth.on_api_error.error_url or f"{ctx.auth.base_url}{ctx.auth.base_path}/error"
+
+
+def append_query_params(url: str, params: dict[str, str]) -> str:
+    """TS v1.7.6 core/utils/url.ts:61-92 ``appendQueryParams``: the query goes before any
+    ``#fragment`` (79904f0be) and existing query text is kept verbatim."""
+    query = urlencode(params)
+    if not query:
+        return url
+    base, hash_sign, fragment = url.partition("#")
+    joiner = "?" if "?" not in base else "" if base.endswith(("?", "&")) else "&"
+    return f"{base}{joiner}{query}{hash_sign}{fragment}"
 
 
 async def _resolve_trusted_providers(ctx: Ctx) -> list[str]:
@@ -133,6 +159,86 @@ async def _resolve_trusted_providers(ctx: Ctx) -> list[str]:
     return [str(p) for p in (trusted or [])]
 
 
+async def get_provider(ctx: Ctx, provider_id: str | None) -> ProviderConfig | None:
+    """The registered provider for ``provider_id``, or None. A provider exposing an async
+    ``ensure_ready(http) -> bool`` (generic-oauth discovery) is skipped while it cannot
+    resolve its endpoints (TS v1.7.6 generic-oauth/index.ts:214-256, 5fe5bc21d)."""
+    provider = ctx.auth.social_providers.get(provider_id or "")
+    if provider is None:
+        return None
+    ensure_ready = getattr(provider, "ensure_ready", None)
+    if ensure_ready is not None and not await ensure_ready(ctx.auth.http):
+        return None
+    return provider
+
+
+def _authorization_url(provider: ProviderConfig, **kwargs: Any) -> str:
+    """Call ``provider.authorization_url``; ``additional_params`` is only passed when the
+    request carries some, so provider overrides written before e7eb45b06 keep working."""
+    if not kwargs.get("additional_params"):
+        kwargs.pop("additional_params", None)
+    return provider.authorization_url(**kwargs)
+
+
+def _additional_params(body: dict[str, Any]) -> dict[str, str] | None:
+    """Validate the body's ``additionalParams`` (TS v1.7.6 authorization-params.ts:13-28):
+    a record of strings that may not name a reserved OAuth parameter."""
+    params = body.get("additionalParams")
+    if params is None:
+        return None
+    if not isinstance(params, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in params.items()
+    ):
+        raise APIError(400, "VALIDATION_ERROR", "[body.additionalParams] Invalid input")
+    if any(key in RESERVED_AUTHORIZATION_PARAMS for key in params):
+        reserved = ", ".join(
+            [
+                "state",
+                "client_id",
+                "redirect_uri",
+                "response_type",
+                "code_challenge",
+                "code_challenge_method",
+                "nonce",
+                "scope",
+            ]
+        )
+        raise APIError(
+            400,
+            "VALIDATION_ERROR",
+            "[body.additionalParams] additionalParams cannot include reserved OAuth "
+            f"parameters: {reserved}",
+        )
+    return params
+
+
+def _mint_id_token_nonce(provider: ProviderConfig) -> str | None:
+    """TS v1.7.6 oauth2/state.ts:16-20 ``generateIdTokenNonce``."""
+    return generate_random_string(32) if provider.binds_id_token_nonce else None
+
+
+# --- request-scoped OAuth state (TS v1.7.6 api/state/oauth.ts, 0cbaf81be) ---------------
+
+_STATE_ATTR = "_oauth_state"
+_SERVER_CONTEXT_ATTR = "_oauth_server_context"
+
+
+async def add_oauth_server_context(ctx: Ctx, values: dict[str, Any]) -> None:
+    """Attach server-trusted data to the OAuth flow started by this request (call it from a
+    before-hook on ``/sign-in/social`` or ``/link-social``). The values ride the state row
+    under ``serverContext`` and are readable on the callback through
+    :func:`get_oauth_state`; the request body can never set them."""
+    current = getattr(ctx, _SERVER_CONTEXT_ATTR, None) or {}
+    setattr(ctx, _SERVER_CONTEXT_ATTR, {**current, **values})
+
+
+def get_oauth_state(ctx: Ctx) -> dict[str, Any] | None:
+    """The OAuth state of this request: the state just written during sign-in, or the one
+    parsed on the callback. Only ``serverContext`` is server-trusted; ``additionalData``
+    comes from the client."""
+    return getattr(ctx, _STATE_ATTR, None)
+
+
 async def _create_state(
     ctx: Ctx,
     *,
@@ -141,12 +247,15 @@ async def _create_state(
     new_user_url: str | None,
     link: dict[str, str] | None = None,
     additional_data: dict[str, Any] | None = None,
-    nonce: str | None = None,
+    id_token_nonce: str | None = None,
+    request_sign_up: bool | None = None,
 ) -> tuple[str, str]:
     """Write the state row (verification table) + return (state, code_verifier).
 
     ``code_verifier`` is always generated (cheap; lets a provider's PKCE-ness change
     without touching the state layer). A separately signed CSRF cookie is set by the caller.
+    ``serverContext`` is written after ``additionalData`` so a client cannot smuggle one
+    in (TS v1.7.6 oauth2/state.ts:56-69).
     """
     state = generate_random_string(32)
     code_verifier = generate_random_string(128)
@@ -160,10 +269,18 @@ async def _create_state(
     }
     if link is not None:
         payload["link"] = link
-    if nonce is not None:
-        payload["nonce"] = nonce
+    server_context = getattr(ctx, _SERVER_CONTEXT_ATTR, None)
+    if server_context:
+        payload["serverContext"] = dict(server_context)
+    if request_sign_up is not None:
+        payload["requestSignUp"] = request_sign_up
+    if id_token_nonce:
+        payload["idTokenNonce"] = id_token_nonce
     if additional_data:
         payload["additionalData"] = additional_data
+    # ponytail: raw adapter row, not the verification storage (secondary storage, hashed
+    # identifiers) TS uses; SSO and oauth-proxy read these rows directly. Move all three to
+    # ``ctx.internal`` verification values together.
     await ctx.adapter.create(
         "verification",
         {
@@ -175,6 +292,7 @@ async def _create_state(
             "updatedAt": now,
         },
     )
+    setattr(ctx, _STATE_ATTR, payload)
     return state, code_verifier
 
 
@@ -187,7 +305,7 @@ def _state_cookie(ctx: Ctx, state: str) -> str:
 
 async def sign_in_social(ctx: Ctx) -> AuthResponse:
     body = ctx.body()
-    provider = ctx.auth.social_providers.get(body.get("provider") or "")
+    provider = await get_provider(ctx, body.get("provider"))
     if provider is None:
         raise APIError(404, "PROVIDER_NOT_FOUND", "Provider not found")
 
@@ -203,28 +321,67 @@ async def sign_in_social(ctx: Ctx) -> AuthResponse:
     new_user_url = body.get("newUserCallbackURL")
     if new_user_url:
         ctx.auth.ensure_trusted_url(new_user_url)
+    additional_params = _additional_params(body)
 
-    nonce = generate_random_string(32) if provider.use_nonce else None
+    nonce = _mint_id_token_nonce(provider)
     state, code_verifier = await _create_state(
         ctx,
         callback_url=callback_url,
         error_url=error_url,
         new_user_url=new_user_url,
         additional_data=body.get("additionalData"),
-        nonce=nonce,
+        id_token_nonce=nonce,
+        request_sign_up=body.get("requestSignUp"),
     )
-    url = provider.authorization_url(
+    # TS v1.7.6 sign-in.ts:375-388
+    url = _authorization_url(
+        provider,
         state=state,
         redirect_uri=_redirect_uri(ctx, provider),
         code_verifier=code_verifier,
         extra_scopes=body.get("scopes"),
         login_hint=body.get("loginHint"),
         nonce=nonce,
+        additional_params=additional_params,
     )
     disable_redirect = bool(body.get("disableRedirect"))
     response = AuthResponse(body={"url": url, "redirect": not disable_redirect})
     response.set_cookie(_state_cookie(ctx, state))
     return response
+
+
+async def _id_token_user_info(
+    ctx: Ctx, provider: ProviderConfig, claims: dict[str, Any], id_token: dict[str, Any]
+) -> OAuthUserInfo:
+    """Profile for a client-submitted id token. A provider exposing an async
+    ``id_token_user_info(tokens, http)`` resolves it like its callback profile (TS
+    sign-in.ts:296-310 calls ``getUserInfo``); others map the verified claims."""
+    resolve = getattr(provider, "id_token_user_info", None)
+    if resolve is None:
+        return provider.user_info_from_id_token(claims)
+    tokens = OAuthTokens(
+        id_token=id_token.get("token"),
+        access_token=id_token.get("accessToken"),
+        refresh_token=id_token.get("refreshToken"),
+        user=id_token.get("user"),
+    )
+    try:
+        return await resolve(tokens, ctx.auth.http)
+    except (OAuthFetchError, httpx.HTTPError, ValueError):
+        raise APIError(401, "FAILED_TO_GET_USER_INFO", "Failed to get user info") from None
+
+
+def _oauth_source(provider: ProviderConfig, info: OAuthUserInfo) -> dict[str, Any]:
+    """The provisioning source handed to ``validateUserInfo`` (callback.ts:301-304)."""
+    return {"method": "oauth", "oauth": {"providerId": provider.provider_id, "profile": info.raw}}
+
+
+def _link_error_api(err: OAuthLinkError) -> APIError:
+    """TS v1.7.6 sign-in.ts:350-361: an unverified email is a 403 EMAIL_NOT_VERIFIED; any
+    other refusal is a 401 OAUTH_LINK_ERROR whose message is the space-separated reason."""
+    if err.code == "email_not_verified":
+        return APIError(403, "EMAIL_NOT_VERIFIED", "Email not verified")
+    return APIError(401, "OAUTH_LINK_ERROR", err.code.replace("_", " "))
 
 
 async def _id_token_sign_in(
@@ -238,7 +395,7 @@ async def _id_token_sign_in(
     claims = await call_verify_id_token(provider, ctx.auth.http, token, id_token.get("nonce"), ctx)
     if claims is None:
         raise APIError(401, "INVALID_TOKEN", "Invalid id token")
-    info = provider.user_info_from_id_token(claims)
+    info = await _id_token_user_info(ctx, provider, claims, id_token)
     if not info.email:
         raise APIError(401, "USER_EMAIL_NOT_FOUND", "Provider did not return an email")
     _require_account_subject(info)
@@ -251,10 +408,16 @@ async def _id_token_sign_in(
     ) or provider.disable_sign_up
     try:
         user_id, _is_new = await handle_oauth_user_info(
-            ctx, provider, info, tokens, disable_sign_up=disable_sign_up
+            ctx,
+            provider,
+            info,
+            tokens,
+            disable_sign_up=disable_sign_up,
+            source=_oauth_source(provider, info),
+            callback_url=body.get("callbackURL"),
         )
     except OAuthLinkError as err:
-        raise APIError(401, "OAUTH_LINK_ERROR", err.code) from None
+        raise _link_error_api(err) from None
     session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
     user = await ctx.adapter.find_one("user", [Where("id", user_id)])
     response = AuthResponse(
@@ -281,10 +444,20 @@ def _database_error(ctx: Ctx) -> OAuthLinkError:
 
 
 def _require_account_subject(info: OAuthUserInfo) -> None:
-    """An empty provider subject never becomes an account id (TS v1.7.6
-    oauth2/account-key.ts:29-37, surfaced by ``resolveOAuthAccountKeyForAPI``)."""
-    if not info.id:
+    """An invalid provider subject never becomes an account id (TS v1.7.6
+    oauth2/account-key.ts:28-62, surfaced by ``resolveOAuthAccountKeyForAPI``)."""
+    if not is_valid_account_subject(info.id):
         raise APIError(401, "FAILED_TO_GET_USER_INFO", "Failed to get user info")
+
+
+def _profile_fields(info: OAuthUserInfo, email: str) -> dict[str, Any]:
+    """The provider profile ``validateUserInfo`` receives (mapped user fields)."""
+    return {
+        "name": info.name,
+        "email": email,
+        "emailVerified": info.email_verified,
+        "image": info.image,
+    }
 
 
 async def handle_oauth_user_info(
@@ -297,13 +470,17 @@ async def handle_oauth_user_info(
     is_trusted_provider: bool | None = None,
     trust_provider_by_name: bool = True,
     override_user_info: bool | None = None,
+    source: dict[str, Any] | None = None,
+    callback_url: str | None = None,
 ) -> tuple[str, bool]:
     """Find/register/link decision tree (``link-account.ts``). Returns (user_id, is_register).
 
     Raises :class:`OAuthLinkError` with a stable code (``account_not_linked``,
     ``signup_disabled``, ``unable_to_link_account``, ``unable_to_create_user``,
-    ``internal_server_error``) on a refused link/register; callers map it to a redirect
-    (callback) or an APIError (idToken sign-in).
+    ``internal_server_error``, ``email_not_verified``) on a refused link/register; callers
+    map it to a redirect (callback) or an APIError (idToken sign-in). A ``validateUserInfo``
+    refusal raises its ``403`` :class:`APIError` (``source`` names the flow; the default is
+    ``{"method": "oauth", "oauth": {"providerId": ...}}``).
 
     The provider account is found by its exact ``(providerId, accountId)`` key only
     (TS v1.7.6 link-account.ts:191-268); email is consulted only when no account matches.
@@ -327,6 +504,7 @@ async def handle_oauth_user_info(
     )
     email = (info.email or "").lower()
     linking = ctx.auth.account.account_linking
+    source = source or {"method": "oauth", "oauth": {"providerId": provider.provider_id}}
 
     try:
         owner = await ctx.internal.find_account_owner_by_key(provider.provider_id, info.id)
@@ -341,6 +519,11 @@ async def handle_oauth_user_info(
                 "retrying authentication."
             )
             raise OAuthLinkError("unable_to_link_account")
+        # TS v1.7.6 link-account.ts:382-390: a returning user is re-validated with the
+        # fresh provider profile.
+        await assert_valid_user_info(
+            ctx, {**_profile_fields(info, email), "id": user["id"]}, {**source, "action": "sign-in"}
+        )
         if ctx.auth.account.update_account_on_sign_in:
             fresh = _fresh_token_fields(ctx, tokens)
             await ctx.internal.update(
@@ -349,6 +532,7 @@ async def handle_oauth_user_info(
         user = await _maybe_promote_verified(ctx, user, info, email, now)
         if override and user is not None:
             user = await _override_user_info(ctx, user, info, email, now)
+        await _require_email_verification(ctx, provider, user, False, callback_url)
         return account["userId"], False
 
     try:
@@ -360,21 +544,19 @@ async def handle_oauth_user_info(
         if disable_sign_up:
             raise OAuthLinkError("signup_disabled")
         token_fields = _token_fields(ctx, tokens)
+        user_data = {
+            "name": info.name or email,
+            "email": email,
+            "emailVerified": info.email_verified,
+            "image": info.image,
+            "createdAt": now,
+            "updatedAt": now,
+        }
 
         async def register(tx: Any) -> dict[str, Any]:
-            created = await tx.create(
-                "user",
-                {
-                    "id": generate_id(),
-                    "name": info.name or email,
-                    "email": email,
-                    "emailVerified": info.email_verified,
-                    "image": info.image,
-                    "createdAt": now,
-                    "updatedAt": now,
-                },
-                ctx=ctx,
-            )
+            # TS v1.7.6 internal-adapter.ts:282-306: createUser runs the gate first.
+            await assert_valid_user_info(ctx, user_data, {**source, "action": "create-user"})
+            created = await tx.create("user", {"id": generate_id(), **user_data}, ctx=ctx)
             if created is None:
                 raise RuntimeError("user creation was aborted")
             await _create_account(
@@ -391,6 +573,7 @@ async def handle_oauth_user_info(
         except Exception:
             logger.exception("Unable to create OAuth user")
             raise OAuthLinkError("unable_to_create_user") from None
+        await _require_email_verification(ctx, provider, created, True, callback_url)
         return created["id"], True
 
     # user exists, this provider account is not yet linked → implicit-linking gate
@@ -408,6 +591,12 @@ async def handle_oauth_user_info(
     ):
         raise OAuthLinkError("account_not_linked")
 
+    # TS v1.7.6 link-account.ts:307-316: the gate runs before the implicit link.
+    await assert_valid_user_info(
+        ctx,
+        {**_profile_fields(info, email), "id": user["id"]},
+        {**source, "action": "link-account"},
+    )
     # TS v1.7.6 link-account.ts:317-359: a link that fails or is vetoed is refused.
     try:
         linked = await _create_account(
@@ -425,7 +614,54 @@ async def handle_oauth_user_info(
         user = await _apply_update_user_info_on_link(ctx, user, info, now)
     if override and user is not None:
         user = await _override_user_info(ctx, user, info, email, now)
+    await _require_email_verification(ctx, provider, user, False, callback_url)
     return user["id"], False
+
+
+async def _require_email_verification(
+    ctx: Ctx,
+    provider: ProviderConfig,
+    user: dict[str, Any] | None,
+    is_register: bool,
+    callback_url: str | None,
+) -> None:
+    """Per-provider ``requireEmailVerification`` (TS v1.7.6 link-account.ts:598-630,
+    91f235f86): a verification email goes out on sign-up (``sendOnSignUp`` falling back to
+    the provider flag) and, when required, on sign-in with ``sendOnSignIn``; an unverified
+    user then gets no session (``email_not_verified``). The flag is read from the
+    registered provider with this id, as TS does."""
+    if user is None or user.get("emailVerified"):
+        return
+    registered = ctx.auth.social_providers.get(provider.provider_id)
+    required = bool(registered is not None and registered.require_email_verification)
+    cfg = ctx.auth.email_verification
+    send_on_sign_up = cfg.send_on_sign_up if cfg.send_on_sign_up is not None else required
+    if is_register and send_on_sign_up:
+        await _dispatch_verification_email(ctx, user, callback_url)
+    if required:
+        if not is_register and cfg.send_on_sign_in:
+            await _dispatch_verification_email(ctx, user, callback_url)
+        raise OAuthLinkError("email_not_verified")
+
+
+async def _dispatch_verification_email(
+    ctx: Ctx, user: dict[str, Any], callback_url: str | None
+) -> None:
+    """TS v1.7.6 link-account.ts:667-708: a failed send is logged, never fatal."""
+    cfg = ctx.auth.email_verification
+    if cfg.send_verification_email is None:
+        return
+    try:
+        token = sign_email_verification_token(
+            ctx.auth.secret, user["email"], expires_in=cfg.expires_in
+        )
+        url = (
+            f"{ctx.auth.base_url}{ctx.auth.base_path}/verify-email"
+            f"?token={token}&callbackURL={quote(callback_url or '/', safe='')}"
+        )
+        await cfg.send_verification_email(user, url, token)
+    except Exception:
+        logger.exception("Failed to send OAuth verification email")
 
 
 async def _create_account(
@@ -515,14 +751,15 @@ async def _override_user_info(
 
 
 def _error_redirect(
-    ctx: Ctx, error: str, error_url: str | None, description: str = ""
+    ctx: Ctx, error: str, error_url: str | None, description: str | None = ""
 ) -> AuthResponse:
-    target = error_url or f"{ctx.auth.base_url}{ctx.auth.base_path}/error"
-    separator = "&" if "?" in target else "?"
-    query = f"error={error}"
+    """TS ``redirectOnError`` (oauth2/errors.ts:39-50): ``?error=`` plus an optional
+    ``error_description``, URL-encoded, before any fragment."""
+    params = {"error": error}
     if description:
-        query += f"&error_description={description}"
-    return AuthResponse(redirect_to=f"{target}{separator}{query}")
+        params["error_description"] = description
+    target = error_url or _default_error_url(ctx)
+    return AuthResponse(redirect_to=append_query_params(target, params))
 
 
 def _callback_params(ctx: Ctx) -> dict[str, str]:
@@ -552,75 +789,164 @@ def _parse_callback_user(raw: str | None) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-async def oauth_callback(ctx: Ctx) -> AuthResponse:
-    provider = ctx.auth.social_providers.get(ctx.params.get("provider", ""))
-    if provider is None:
-        return _error_redirect(ctx, "oauth_provider_not_found", None)
+class _StateError(Exception):
+    def __init__(self, code: str, error_url: str, *, cookie_expired: bool = False):
+        self.code = code
+        self.error_url = error_url
+        self.cookie_expired = cookie_expired
+        super().__init__(code)
 
-    params = _callback_params(ctx)
-    state = params.get("state", "")
-    row = (
-        await ctx.adapter.find_one("verification", [Where("identifier", state)]) if state else None
-    )
+
+async def _parse_state(ctx: Ctx, state: str) -> dict[str, Any]:
+    """TS v1.7.6 state.ts:219-298 (database strategy) + oauth2/state.ts:84-117: every state
+    failure is ``state_mismatch``; the errorURL is the flow's own once the row is read."""
+    default_error_url = _default_error_url(ctx)
+    row = await ctx.adapter.find_one("verification", [Where("identifier", state)])
     if row is None:
-        return _error_redirect(ctx, "state_not_found", None)
-    await ctx.adapter.delete_many("verification", [Where("identifier", state)])
+        raise _StateError("state_mismatch", default_error_url)
     data = json.loads(row["value"])
-    error_url = data.get("errorURL") or data.get("callbackURL")
+    error_url = data.get("errorURL") or default_error_url
+    if not ctx.auth.skip_state_cookie_check:
+        raw = ctx.request.cookies().get(cookie_name(ctx.auth, STATE_COOKIE))
+        if raw is None or unsign_value(ctx.auth.secret, raw) != state:
+            raise _StateError("state_mismatch", error_url)
+    await ctx.adapter.delete_many("verification", [Where("identifier", state)])
+    if int(data.get("expiresAt") or 0) < int(utcnow().timestamp() * 1000):
+        raise _StateError("state_mismatch", error_url, cookie_expired=True)
+    data["errorURL"] = error_url
+    setattr(ctx, _STATE_ATTR, data)
+    return data
 
+
+async def _idp_initiated_bounce(ctx: Ctx, provider: ProviderConfig) -> AuthResponse:
+    """A stateless IdP-initiated callback restarts the flow with fresh state and PKCE
+    (TS v1.7.6 callback.ts:106-123, 03e6c94e9). The state's callbackURL is the base URL,
+    as ``generateState`` falls back to ``options.baseURL`` without a body."""
+    nonce = _mint_id_token_nonce(provider)
+    state, code_verifier = await _create_state(
+        ctx,
+        callback_url=ctx.auth.base_url,
+        error_url=None,
+        new_user_url=None,
+        id_token_nonce=nonce,
+    )
+    url = _authorization_url(
+        provider,
+        state=state,
+        redirect_uri=_redirect_uri(ctx, provider),
+        code_verifier=code_verifier,
+        nonce=nonce,
+    )
+    response = AuthResponse(redirect_to=url)
+    response.set_cookie(_state_cookie(ctx, state))
+    return response
+
+
+async def oauth_callback(ctx: Ctx) -> AuthResponse:
+    """GET|POST /callback/:id, in TS v1.7.6 callback.ts order: IdP bounce, state, provider
+    error, code, provider, RFC 9207 ``iss``, nonce binding, code exchange, profile, account
+    subject, link branch, email, sign-in/register."""
+    provider_id = ctx.params.get("provider", "")
+    params = _callback_params(ctx)
+    state = params.get("state")
+    if state is None and params.get("code"):
+        idp_provider = await get_provider(ctx, provider_id)
+        if idp_provider is not None and idp_provider.allow_idp_initiated:
+            return await _idp_initiated_bounce(ctx, idp_provider)
+    if not state:
+        return _error_redirect(ctx, "state_not_found", None)
     try:
-        if row["expiresAt"] <= utcnow():
-            raise _CallbackError("state_invalid")
-        if not ctx.auth.skip_state_cookie_check:
-            raw = ctx.request.cookies().get(cookie_name(ctx.auth, STATE_COOKIE))
-            if raw is None or unsign_value(ctx.auth.secret, raw) != state:
-                raise _CallbackError("state_mismatch")
-        if params.get("error"):
-            raise _CallbackError(params["error"])
-        code = params.get("code")
-        if not code:
-            raise _CallbackError("no_code")
-
-        try:
-            tokens = await provider.exchange(
-                ctx.auth.http,
-                code=code,
-                redirect_uri=_redirect_uri(ctx, provider),
-                code_verifier=data.get("codeVerifier"),
-            )
-        except OAuthFetchError:
-            raise _CallbackError("invalid_code") from None
-        tokens.user = _parse_callback_user(params.get("user"))
-        try:
-            info = await provider.fetch_user(tokens, ctx.auth.http)
-        except (httpx.HTTPError, OAuthFetchError):
-            raise _CallbackError("unable_to_get_user_info") from None
-        if not info.id:  # TS v1.7.6 callback.ts:240-255: no account subject
-            raise _CallbackError("unable_to_get_user_info")
-        if not info.email:
-            raise _CallbackError("email_not_found")
-
-        link = data.get("link")
-        if link is not None:
-            return await _callback_link(ctx, provider, info, tokens, link, data)
-
-        try:
-            user_id, is_new_user = await handle_oauth_user_info(ctx, provider, info, tokens)
-        except OAuthLinkError as err:
-            raise _CallbackError(err.code, err.error_url) from None
-    except _CallbackError as err:
-        response = _error_redirect(ctx, err.code, err.error_url or error_url)
-        response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
+        data = await _parse_state(ctx, state)
+    except _StateError as err:
+        response = _error_redirect(ctx, err.code, err.error_url)
+        if err.cookie_expired:
+            response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
         return response
 
-    _session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
-    target = (
-        (data.get("newUserURL") or data.get("callbackURL"))
-        if is_new_user
-        else data.get("callbackURL")
-    )
-    response = AuthResponse(redirect_to=_absolute_url(ctx, target or "/"))
-    for cookie in [*cookies, clear_cookie(ctx.auth, STATE_COOKIE)]:
+    try:
+        response = await _complete_callback(ctx, provider_id, params, data)
+    except _CallbackError as err:
+        response = _error_redirect(
+            ctx, err.code, err.error_url or data["errorURL"], err.description
+        )
+    response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
+    return response
+
+
+async def _complete_callback(
+    ctx: Ctx, provider_id: str, params: dict[str, str], data: dict[str, Any]
+) -> AuthResponse:
+    if params.get("error"):
+        raise _CallbackError(params["error"], description=params.get("error_description"))
+    code = params.get("code")
+    if not code:
+        raise _CallbackError("no_code")
+    provider = await get_provider(ctx, provider_id)
+    if provider is None:
+        raise _CallbackError("oauth_provider_not_found")
+    iss = params.get("iss")
+    if iss and provider.issuer and iss != provider.issuer:
+        logger.error("OAuth issuer mismatch: expected %s, got %s", provider.issuer, iss)
+        raise _CallbackError("issuer_mismatch")
+    # generic-oauth ``require_issuer_validation`` (deprecated 1.x option, off by default)
+    if not iss and provider.issuer and getattr(provider, "require_issuer", False):
+        raise _CallbackError("issuer_missing")
+    id_token_nonce = data.get("idTokenNonce")
+    if provider.binds_id_token_nonce and not id_token_nonce:
+        raise _CallbackError("nonce_binding_missing")
+
+    try:
+        tokens = await provider.exchange(
+            ctx.auth.http,
+            code=code,
+            redirect_uri=_redirect_uri(ctx, provider),
+            code_verifier=data.get("codeVerifier"),
+        )
+    except Exception:
+        logger.exception("OAuth code exchange failed")
+        raise _CallbackError("invalid_code") from None
+    if tokens is None:
+        raise _CallbackError("invalid_code")
+    tokens.user = _parse_callback_user(params.get("user"))
+    tokens.expected_id_token_nonce = id_token_nonce
+    try:
+        info = await provider.fetch_user(tokens, ctx.auth.http)
+    except (httpx.HTTPError, OAuthFetchError, ValueError):
+        raise _CallbackError("unable_to_get_user_info") from None
+    # TS v1.7.6 callback.ts:232-255: no profile or no valid account subject
+    if not is_valid_account_subject(info.id):
+        raise _CallbackError("unable_to_get_user_info")
+
+    link = data.get("link")
+    if link is not None:
+        return await _callback_link(ctx, provider, info, tokens, link, data)
+
+    if not info.email:
+        raise _CallbackError("email_not_found")
+    disable_sign_up = (
+        provider.disable_implicit_sign_up and not data.get("requestSignUp")
+    ) or provider.disable_sign_up
+    callback_url = data.get("callbackURL") or "/"
+    try:
+        user_id, is_new_user = await handle_oauth_user_info(
+            ctx,
+            provider,
+            info,
+            tokens,
+            disable_sign_up=disable_sign_up,
+            source=_oauth_source(provider, info),
+            callback_url=callback_url,
+        )
+        _session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
+    except OAuthLinkError as err:
+        raise _CallbackError(err.code, err.error_url) from None
+    except APIError as err:
+        # TS v1.7.6 callback.ts:306-313 (d309e5d2b): app-defined rejections keep their code.
+        raise _CallbackError(err.code, description=err.message) from None
+
+    target = (data.get("newUserURL") or callback_url) if is_new_user else callback_url
+    response = AuthResponse(redirect_to=_absolute_url(ctx, target))
+    for cookie in cookies:
         response.set_cookie(cookie)
     return response
 
@@ -634,15 +960,15 @@ async def _callback_link(
     data: dict[str, Any],
 ) -> AuthResponse:
     """Callback linking branch (state carries ``link``): attach the provider to the already
-    signed-in user, no new session. Redirects to callbackURL (or ?error= on refusal)."""
-    callback_url = data.get("callbackURL") or "/"
-    error = await link_oauth_account(ctx, provider, info, tokens, link)
+    signed-in user, no new session (TS v1.7.6 callback.ts:268-280). It runs before the
+    email check, so a provider without email fails the email match instead."""
+    try:
+        error = await link_oauth_account(ctx, provider, info, tokens, link)
+    except APIError as err:
+        raise _CallbackError(err.code, description=err.message) from None
     if error is not None:
-        response = _error_redirect(ctx, error, data.get("errorURL") or callback_url)
-    else:
-        response = AuthResponse(redirect_to=_absolute_url(ctx, callback_url))
-    response.set_cookie(clear_cookie(ctx.auth, STATE_COOKIE))
-    return response
+        raise _CallbackError(error)
+    return AuthResponse(redirect_to=_absolute_url(ctx, data.get("callbackURL") or "/"))
 
 
 async def link_oauth_account(
@@ -654,7 +980,13 @@ async def link_oauth_account(
 ) -> str | None:
     """Link the provider account to ``link["userId"]`` (TS v1.7.6 link-account.ts:67
     ``linkOAuthAccount``, the explicit link-social rules). Returns None once linked,
-    else the callback error code."""
+    else the callback error code. A ``validateUserInfo`` refusal raises its ``403``
+    :class:`APIError` (link-account.ts:71-90)."""
+    await assert_valid_user_info(
+        ctx,
+        {**_profile_fields(info, info.email or ""), "id": link["userId"]},
+        {"action": "link-account", **_oauth_source(provider, info)},
+    )
     now = utcnow()
     linking = ctx.auth.account.account_linking
     trusted = provider.provider_id in (await _resolve_trusted_providers(ctx))
@@ -698,7 +1030,7 @@ async def link_social(ctx: Ctx) -> AuthResponse:
     result = await ctx.require_session()
     session_user = result["user"]
     body = ctx.body()
-    provider = ctx.auth.social_providers.get(body.get("provider") or "")
+    provider = await get_provider(ctx, body.get("provider"))
     if provider is None:
         raise APIError(404, "PROVIDER_NOT_FOUND", "Provider not found")
 
@@ -711,23 +1043,29 @@ async def link_social(ctx: Ctx) -> AuthResponse:
     error_url = body.get("errorCallbackURL")
     if error_url:
         ctx.auth.ensure_trusted_url(error_url)
+    additional_params = _additional_params(body)
 
-    nonce = generate_random_string(32) if provider.use_nonce else None
+    nonce = _mint_id_token_nonce(provider)
     state, code_verifier = await _create_state(
         ctx,
         callback_url=callback_url,
         error_url=error_url,
-        new_user_url=None,
+        new_user_url=body.get("newUserCallbackURL"),
         link={"userId": session_user["id"], "email": session_user["email"]},
         additional_data=body.get("additionalData"),
-        nonce=nonce,
+        id_token_nonce=nonce,
+        request_sign_up=body.get("requestSignUp"),
     )
-    url = provider.authorization_url(
+    # TS v1.7.6 account.ts:423-441 (e7eb45b06, 7c7313c81)
+    url = _authorization_url(
+        provider,
         state=state,
         redirect_uri=_redirect_uri(ctx, provider),
         code_verifier=code_verifier,
         extra_scopes=body.get("scopes"),
+        login_hint=body.get("loginHint"),
         nonce=nonce,
+        additional_params=additional_params,
     )
     disable_redirect = bool(body.get("disableRedirect"))
     response = AuthResponse(body={"url": url, "redirect": not disable_redirect})
@@ -744,7 +1082,7 @@ async def _link_social_id_token(
     claims = await call_verify_id_token(provider, ctx.auth.http, token, id_token.get("nonce"), ctx)
     if claims is None:
         raise APIError(401, "INVALID_TOKEN", "Invalid id token")
-    info = provider.user_info_from_id_token(claims)
+    info = await _id_token_user_info(ctx, provider, claims, id_token)
     if not info.email:
         raise APIError(401, "USER_EMAIL_NOT_FOUND", "Provider did not return an email")
     _require_account_subject(info)
@@ -869,7 +1207,7 @@ async def refresh_token(ctx: Ctx) -> AuthResponse:
         raise APIError(400, "REFRESH_TOKEN_NOT_FOUND", "Refresh token not found")
 
     try:
-        tokens = await provider.refresh(ctx.auth.http, _decrypt(ctx, refresh) or "")
+        tokens = await call_refresh(provider, ctx.auth.http, _decrypt(ctx, refresh) or "", ctx)
     except OAuthFetchError:
         raise APIError(
             400, "FAILED_TO_REFRESH_ACCESS_TOKEN", "Failed to refresh access token"
@@ -905,7 +1243,8 @@ async def refresh_token(ctx: Ctx) -> AuthResponse:
             "scope": scope,
             "idToken": tokens.id_token or account.get("idToken"),
             "providerId": account["providerId"],
-            "accountId": account["accountId"],
+            # TS v1.7.6 account.ts:942-943: the Better Auth account row id
+            "accountId": account["id"],
         }
     )
 
@@ -917,8 +1256,8 @@ async def _valid_access_token(ctx: Ctx, account: dict[str, Any], provider: Provi
     expires_at = account.get("accessTokenExpiresAt")
     expired = expires_at is not None and (expires_at - utcnow()).total_seconds() < 5
     if account.get("refreshToken") and expired and provider.supports_refresh:
-        new_tokens = await provider.refresh(
-            ctx.auth.http, _decrypt(ctx, account["refreshToken"]) or ""
+        new_tokens = await call_refresh(
+            provider, ctx.auth.http, _decrypt(ctx, account["refreshToken"]) or "", ctx
         )
         await ctx.internal.update(
             "account",

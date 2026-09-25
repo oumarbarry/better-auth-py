@@ -1,9 +1,9 @@
 """Zoom — ports ``social-providers/zoom.ts``.
 
 Quirks vs. the generic :class:`ProviderConfig`:
-  * Hand-builds the authorize URL: ``response_type``, ``redirect_uri``, ``client_id``,
-    ``state`` — **no ``scope`` param at all**, ever (TS's ``createAuthorizationURL`` for
-    Zoom ignores ``options.scope``/per-call ``scopes`` entirely).
+  * The authorize URL goes through the shared builder with **no ``scope`` param at
+    all**, ever (TS's ``createAuthorizationURL`` for Zoom ignores ``options.scope`` and
+    per-call ``scopes`` entirely).
   * The only provider with an *optional* PKCE toggle (``options.pkce``, default
     ``True``) rather than PKCE being an unconditional per-provider fact — modeled here
     as the base ``use_pkce`` field (default ``True``), so ``Zoom(..., use_pkce=False)``
@@ -17,9 +17,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlencode
 
-from ..machinery import code_challenge, exchange_code, get_primary_client_id
+from ..machinery import build_authorization_url, exchange_code
 from ..models import OAuthUserInfo
 from ..providers import ProviderConfig
 
@@ -61,17 +60,17 @@ class Zoom(ProviderConfig):
         extra_scopes: list[str] | None = None,
         login_hint: str | None = None,
         nonce: str | None = None,
+        additional_params: dict[str, str] | None = None,
     ) -> str:
-        params = {
-            "response_type": "code",
-            "redirect_uri": redirect_uri,
-            "client_id": get_primary_client_id(self.client_id),
-            "state": state,
-        }
-        if self.use_pkce and code_verifier:
-            params["code_challenge_method"] = "S256"
-            params["code_challenge"] = code_challenge(code_verifier)
-        return f"{self.authorization_endpoint}?{urlencode(params)}"
+        # zoom.ts:156-170 (e7eb45b06): the shared builder, never a scope or login hint
+        return build_authorization_url(
+            authorization_endpoint=self.authorization_endpoint,
+            client_id=self.client_id,
+            state=state,
+            redirect_uri=redirect_uri,
+            code_verifier=code_verifier if self.use_pkce else None,
+            additional_params={**self.authorize_params, **(additional_params or {})} or None,
+        )
 
     async def exchange(
         self,

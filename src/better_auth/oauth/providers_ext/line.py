@@ -26,11 +26,12 @@ _VERIFY_ENDPOINT = "https://api.line.me/oauth2/v2.1/verify"
 
 
 def _map(p: dict[str, Any]) -> OAuthUserInfo:
+    # TS v1.7.6 line.ts:53 accountSubject `profile.sub`; :149-151 name/picture only.
     return OAuthUserInfo(
-        id=str(p.get("sub") or p.get("userId") or ""),
-        name=p.get("name") or p.get("displayName") or "",
+        id=str(p.get("sub") or ""),
+        name=p.get("name") or "",
         email=p.get("email"),
-        image=p.get("picture") or p.get("pictureUrl"),
+        image=p.get("picture"),
         email_verified=False,
         raw=p,
     )

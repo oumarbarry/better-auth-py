@@ -44,7 +44,9 @@ class EmailAndPassword:
 @dataclass
 class EmailVerification:
     send_verification_email: SendEmail | None = None
-    send_on_sign_up: bool = False
+    #: None = unset, so OAuth sign-up falls back to the provider's requireEmailVerification
+    #: (TS `sendOnSignUp ?? requireEmailVerification`, link-account.ts:602-606)
+    send_on_sign_up: bool | None = None
     #: send a verification email when an unverified user signs in (TS sendOnSignIn);
     #: read by /sign-in/email and plugin sign-ins (e.g. username)
     send_on_sign_in: bool = False
@@ -167,6 +169,11 @@ class UserOptions:
     #: extra columns merged into the `user` schema and emitted by parse_user_output
     #: (mirrors better-auth's `user.additionalFields`)
     additional_fields: dict[str, Field] = field(default_factory=dict)
+    #: provisioning gate (TS ``user.validateUserInfo``): ``(data, ctx)`` with
+    #: ``data = {"user": ..., "source": {"action", "method", "oauth"|"sso"}}``; return
+    #: ``None`` to allow or ``{"error": code, "errorDescription": text}`` to refuse (may be
+    #: async). See ``better_auth.oauth.validate_user_info``.
+    validate_user_info: Callable[..., Any] | None = None
 
 
 #: generate_id: True = default 32-char base62; False = let the DB generate; "uuid" =

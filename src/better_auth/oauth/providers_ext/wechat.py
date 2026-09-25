@@ -6,8 +6,8 @@ The most non-standard provider:
 - Token exchange **and** refresh are ``GET`` with query-string params (not POST body).
 - The userinfo endpoint needs the ``openid`` returned *alongside* the access token,
   so it is stashed on ``OAuthTokens.raw`` and read back in ``fetch_user``.
-- WeChat never returns an email; a stable ``@wechat.invalid`` placeholder is
-  synthesized so the (email-required) callback does not reject the sign-in.
+- WeChat never returns an email; a stable ``@wechat.placeholder.invalid`` placeholder
+  is synthesized so the (email-required) callback does not reject the sign-in.
 """
 
 from __future__ import annotations
@@ -18,7 +18,12 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 from ...session import utcnow
-from ..machinery import OAuthFetchError, oauth_fetch
+from ..machinery import (
+    RESERVED_AUTHORIZATION_PARAMS,
+    OAuthFetchError,
+    create_placeholder_email,
+    oauth_fetch,
+)
 from ..models import OAuthTokens, OAuthUserInfo
 from ..providers import ProviderConfig
 
@@ -44,20 +49,24 @@ class WeChat(ProviderConfig):
         extra_scopes: list[str] | None = None,
         login_hint: str | None = None,
         nonce: str | None = None,
+        additional_params: dict[str, str] | None = None,
     ) -> str:
         scopes = [] if self.disable_default_scope else list(self.scopes)
         scopes += list(extra_scopes or [])
-        params = urlencode(
-            {
-                "scope": self.scope_joiner.join(dict.fromkeys(scopes)),
-                "response_type": "code",
-                "appid": self.client_id,
-                "redirect_uri": redirect_uri,
-                "state": state,
-                "lang": self.lang,
-            }
-        )
-        return f"https://open.weixin.qq.com/connect/qrconnect?{params}#wechat_redirect"
+        params = {
+            "scope": self.scope_joiner.join(dict.fromkeys(scopes)),
+            "response_type": "code",
+            "appid": self.client_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "lang": self.lang,
+        }
+        # wechat.ts:78-85 (e7eb45b06): extras never replace a reserved key or appid
+        for key, value in {**self.authorize_params, **(additional_params or {})}.items():
+            if key not in RESERVED_AUTHORIZATION_PARAMS and key != "appid":
+                params[key] = value
+        query = urlencode(params)
+        return f"https://open.weixin.qq.com/connect/qrconnect?{query}#wechat_redirect"
 
     async def exchange(
         self,
@@ -142,10 +151,13 @@ class WeChat(ProviderConfig):
                 f"WeChat userinfo failed: {profile.get('errmsg', 'Unknown error')}"
             )
 
-        uid = profile.get("unionid") or profile.get("openid") or openid
+        # wechat.ts:63 accountSubject reads the profile only; the placeholder email also
+        # falls back to the token's openid (wechat.ts:209-218, b4ad5a110)
+        subject = profile.get("unionid") or profile.get("openid") or ""
         return OAuthUserInfo(
-            id=str(uid),
-            email=profile.get("email") or f"{uid}@wechat.invalid",
+            id=str(subject),
+            email=profile.get("email")
+            or create_placeholder_email(identifier=str(subject or openid), namespace="wechat"),
             name=profile.get("nickname") or "",
             image=profile.get("headimgurl"),
             email_verified=False,

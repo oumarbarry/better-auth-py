@@ -23,6 +23,7 @@ from .crypto import (
     verify_password,
 )
 from .oauth import (
+    OAuthFetchError,
     OAuthTokens,
     get_access_token,
     link_social,
@@ -1181,8 +1182,11 @@ async def account_info(ctx: Ctx) -> AuthResponse:
         id_token=valid["idToken"],
         scope=account.get("scope"),
     )
-    info = await provider.fetch_user(tokens, ctx.auth.http)
-    if info is None:
+    try:
+        info = await provider.fetch_user(tokens, ctx.auth.http)
+    except OAuthFetchError:
+        info = None
+    if info is None:  # TS v1.7.6 account.ts:1048-1053
         raise APIError(401, "FAILED_TO_GET_USER_INFO", "Failed to get user info")
     return AuthResponse(
         body={

@@ -25,6 +25,9 @@ class OAuthTokens:
     #: user})``, callback.ts:141-149). Only Apple's ``fetch_user`` reads it — Apple sends the
     #: user's name ONLY on first consent, via this field, never in the id token.
     user: dict[str, Any] | None = None
+    #: the redirect flow's id-token nonce recovered from state (TS ``expectedIdTokenNonce``,
+    #: 27b5d8022); a provider that binds one must check the id token against it
+    expected_id_token_nonce: str | None = None
 
 
 @dataclass

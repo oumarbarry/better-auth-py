@@ -60,6 +60,7 @@ class Twitch(ProviderConfig):
         extra_scopes: list[str] | None = None,
         login_hint: str | None = None,
         nonce: str | None = None,
+        additional_params: dict[str, str] | None = None,
     ) -> str:
         scopes = [] if self.disable_default_scope else list(self.scopes)
         scopes += list(extra_scopes or [])
@@ -75,7 +76,8 @@ class Twitch(ProviderConfig):
             code_verifier=None,
             login_hint=login_hint,
             claims=self.claims,
-            additional_params=self.authorize_params or None,
+            # twitch.ts:65 (e7eb45b06): per-request extras win over config
+            additional_params={**self.authorize_params, **(additional_params or {})} or None,
         )
 
     async def fetch_user(self, tokens: OAuthTokens, http: httpx.AsyncClient) -> OAuthUserInfo:

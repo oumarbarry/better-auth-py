@@ -106,7 +106,8 @@ async def test_state_is_single_use():
         await client.get(f"/api/auth/callback/github?code=abc&state={state}")
         replay = await client.get(f"/api/auth/callback/github?code=abc&state={state}")
         assert replay.status_code == 302
-        assert "error=state_not_found" in replay.headers["location"]
+        # TS v1.7.6 state.ts:223-229: a consumed (missing) row is `state_mismatch`
+        assert "error=state_mismatch" in replay.headers["location"]
 
 
 async def test_missing_state_cookie_is_rejected():

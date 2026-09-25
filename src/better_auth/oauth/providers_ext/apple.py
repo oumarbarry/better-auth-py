@@ -6,9 +6,9 @@ Quirks vs. the generic :class:`ProviderConfig`:
     ``clientId``/``clientSecret`` up front. It also forwards the PKCE
     ``code_challenge`` so the callback exchange's ``code_verifier`` matches
     (TS ``apple.ts`` ``createAuthorizationURL({... codeVerifier })``).
-  * ``verifyIdToken`` accepts the nonce either raw **or** as ``sha256hex(nonce)``
-    (Apple's native SDKs sometimes hash it client-side), and coerces the
-    ``email_verified``/``is_private_email`` claims to real booleans.
+  * id-token verification accepts the nonce either raw **or** as ``sha256hex(nonce)``
+    (Apple's native SDKs sometimes hash it client-side): TS v1.7.6 ``idToken`` config
+    ``nonceComparison: "exact-or-sha256"``, ``maxTokenAge: "1h"``.
   * Audience for id-token verification falls back
     ``audience`` → ``appBundleIdentifier`` → ``clientId`` (native iOS uses the
     bundle id as the token audience, not the service id).
@@ -20,7 +20,6 @@ Quirks vs. the generic :class:`ProviderConfig`:
 
 from __future__ import annotations
 
-import hashlib
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -54,19 +53,6 @@ def _decode_unverified(token: str) -> dict[str, Any]:
             "verify_iss": False,
         },
     )
-
-
-def _sha256_hex(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
-def _nonce_matches(jwt_nonce: Any, nonce: str) -> bool:
-    """Port of ``nonceMatches`` — raw match, or the token carries ``sha256hex(nonce)``."""
-    if not isinstance(jwt_nonce, str):
-        return False
-    if jwt_nonce == nonce:
-        return True
-    return jwt_nonce == _sha256_hex(nonce)
 
 
 def _email_verified(value: Any) -> bool:
@@ -111,6 +97,9 @@ class Apple(ProviderConfig):
     disable_id_token_sign_in: bool = False
     #: Apple accepts (and the callback exchange requires) an S256 PKCE challenge.
     use_pkce: bool = True
+    #: TS v1.7.6 apple.ts:125-136 ``idToken`` config
+    id_token_max_age: int | None = 3600
+    id_token_nonce_comparison: str = "exact-or-sha256"
 
     def authorization_url(
         self,
@@ -121,6 +110,7 @@ class Apple(ProviderConfig):
         extra_scopes: list[str] | None = None,
         login_hint: str | None = None,
         nonce: str | None = None,
+        additional_params: dict[str, str] | None = None,
     ) -> str:
         if not get_primary_client_id(self.client_id) or not self.client_secret:
             raise ValueError("CLIENT_ID_AND_SECRET_REQUIRED")
@@ -138,7 +128,8 @@ class Apple(ProviderConfig):
             response_mode="form_post",
             code_verifier=code_verifier if self.use_pkce else None,
             login_hint=login_hint,
-            additional_params=self.authorize_params or None,
+            # TS v1.7.6 apple.ts:112 forwards the per-request extras (e7eb45b06)
+            additional_params={**self.authorize_params, **(additional_params or {})} or None,
         )
 
     def _effective_audience(self) -> str | list[str]:
@@ -147,6 +138,10 @@ class Apple(ProviderConfig):
         if self.app_bundle_identifier:
             return self.app_bundle_identifier
         return self.client_id
+
+    @property
+    def supports_id_token(self) -> bool:
+        return not self.disable_id_token_sign_in
 
     async def verify_id_token(
         self,
@@ -157,23 +152,17 @@ class Apple(ProviderConfig):
     ) -> dict[str, Any] | None:
         if self.disable_id_token_sign_in:
             return None
-        claims = await _verify_id_token(
+        return await _verify_id_token(
             http,
             token,
             jwks_uri=self.jwks_url,
             audience=self._effective_audience(),
             issuers=self.issuers,
-            nonce=None,  # Apple's nonce needs the sha256 fallback below, not plain equality
-            max_age=3600,
+            nonce=nonce,
+            max_age=self.id_token_max_age,
+            algorithms=self.id_token_algorithms,
+            nonce_comparison=self.id_token_nonce_comparison,
         )
-        if claims is None:
-            return None
-        for field_name in ("email_verified", "is_private_email"):
-            if claims.get(field_name) is not None:
-                claims[field_name] = bool(claims[field_name])
-        if nonce and not _nonce_matches(claims.get("nonce"), nonce):
-            return None
-        return claims
 
     def user_info_from_id_token(self, claims: dict[str, Any]) -> OAuthUserInfo:
         return OAuthUserInfo(
