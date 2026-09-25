@@ -209,6 +209,31 @@ async def test_increment_one_guarded(adapter):
     assert blocked is None
 
 
+async def test_consume_one_returns_none_when_a_concurrent_caller_won(adapter, monkeypatch):
+    # TS core factory.ts:1386-1414 (v1.6.29): the fallback deletes by `where` + id and
+    # returns the row only when deleteMany removed it. Simulate another process deleting
+    # the row between our read and our delete.
+    await adapter.create("counter", {"key": "k", "count": 1})
+    real_find_many = adapter.find_many
+
+    async def find_then_lose_race(*args, **kwargs):
+        rows = await real_find_many(*args, **kwargs)
+        await adapter.delete_many("counter", [Where("key", "k")])
+        return rows
+
+    monkeypatch.setattr(adapter, "find_many", find_then_lose_race)
+    assert await adapter.consume_one("counter", [Where("key", "k")]) is None
+
+
+async def test_increment_one_updates_only_the_selected_row(adapter):
+    # TS core factory.ts incrementOne fallback (v1.6.29) pins the update to the row id.
+    await adapter.create("counter", {"key": "a", "count": 1})
+    await adapter.create("counter", {"key": "b", "count": 1})
+    row = await adapter.increment_one("counter", [Where("count", 1)], increment={"count": 1})
+    assert row is not None and row["count"] == 2
+    assert sorted(r["count"] for r in await adapter.find_many("counter")) == [1, 2]
+
+
 async def test_increment_one_requires_increment_or_set(adapter):
     await adapter.create("counter", {"key": "k", "count": 1})
     with pytest.raises(ValueError):

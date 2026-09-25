@@ -130,8 +130,11 @@ class BaseAdapter:
             if not rows:
                 return None
             row = rows[0]
-            await tx.delete(model, [Where("id", row["id"])])
-            return row
+            # TS core factory.ts:1386-1414 (v1.6.29): delete by `where` + id and hand the
+            # row out only if this call removed it, so a concurrent consumer that won the
+            # delete makes us return None instead of a second copy of the credential.
+            deleted = await tx.delete_many(model, [*where, Where("id", row["id"])])
+            return row if deleted > 0 else None
 
         return await self.transaction(_cb)
 
@@ -154,8 +157,11 @@ class BaseAdapter:
             update: dict[str, Any] = dict(set or {})
             for field_name, delta in (increment or {}).items():
                 update[field_name] = (row.get(field_name) or 0) + delta
-            # re-apply `where` (incl. guard) as compare-and-swap
-            affected = await tx.update_many(model, where, update)
+            # re-apply `where` (incl. guard) pinned to the row id, like the TS fallback
+            # (v1.6.29 factory.ts incrementOne): a non-unique `where` updates one row only.
+            # ponytail: counter values are not in the guard, so concurrent increments can
+            # still be lost; TS 1.7 adds a value-guarded CAS with retries (WP5).
+            affected = await tx.update_many(model, [*where, Where("id", row["id"])], update)
             if affected == 0:
                 return None
             return {**row, **update}
