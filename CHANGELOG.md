@@ -14,6 +14,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   It backs the lock used by the unverified-account cleanup.
 - `MicrosoftEntraId(account_id_claim=...)`: the ID token claim used as the
   account id, `"oid"` by default.
+- `session.cookie_cache.strategy="jwt"`: the session cache cookie as an
+  HS256 JWT signed with the secret, as better-auth does.
+- `JWTPlugin(session_cookie_cache=True)` signs that cookie with the plugin's
+  JWKS keys, so another service can check it with
+  `better_auth.cookie_cache.verify_session_cookie_jwt_with_jwks`.
+- Sign-out returns the provider logout URL (`url`, `redirect` and a
+  `Location` header) when a linked provider offers `create_end_session_url`.
+  The body takes `callbackURL`, `state` and `disableRedirect`.
+- `AuthRequest.url`, filled by the FastAPI, Flask, Django and Litestar
+  integrations.
+- `/account-info` also returns the selected `account` (`id`, `providerId`,
+  `accountId`).
 
 ### Changed
 
@@ -59,6 +71,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - ID token sign-in (`POST /sign-in/social` with `idToken`) no longer stores
   the `idToken.scopes` or `idToken.refreshToken` sent by the client on the
   account, as in better-auth.
+- `trusted_proxy_headers` is off by default, as in better-auth 1.7. Behind a
+  proxy that sends the public host in `X-Forwarded-Host` and
+  `X-Forwarded-Proto` (dynamic `base_url`, or forms posted with
+  `Origin: null`), set `trusted_proxy_headers=True` and make sure the proxy
+  overwrites those headers from clients.
+- `/unlink-account`, `/get-access-token`, `/refresh-token` and
+  `/account-info` pick the account by its Better Auth id (`accountId` from
+  `/list-accounts`) or `useAccountCookie: true`, as better-auth 1.7 does. A
+  `providerId` body is refused with `INVALID_BODY`, and `/unlink-account`
+  needs a fresh session. To keep the 1.0 bodies (`providerId` with an
+  optional provider `accountId`) while clients migrate, set
+  `AccountOptions(legacy_account_selection=True)`. The option is deprecated.
+- `/sign-out` answers `{"success": true}` without a session and also expires
+  the session cache cookie.
+- `/set-password` fills an existing credential account that has no
+  password, and reports `PASSWORD_ALREADY_SET` (was
+  `USER_ALREADY_HAS_PASSWORD`) when one is set.
+- The credential account is the one whose `accountId` is the user id.
+- A custom-scheme trusted origin that names a host only matches that host;
+  paths are compared after decoding and resolving `..`.
+- Relative callback URLs may carry fragments, `~` and other path characters.
+- The origin check error messages match better-auth.
 
 ### Fixed
 
@@ -78,6 +112,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   entries dropped.
 - Email OTP sign-in returns the user with `emailVerified: true` after it
   verifies a previously unverified address.
+- The session cache cookie is only used with the session cookie it was
+  issued for. A foreign, expired or tampered cache cookie is expired, a
+  leftover one is cleared when the cache is off, and invalid payloads log a
+  warning.
+- Sign-up, sign-in and other session creations write the cache cookie;
+  profile and session updates refresh it.
+- `GET /reset-password/{token}` redirects with `error=INVALID_TOKEN` for an
+  unknown or expired token instead of forwarding it.
+- Error redirects keep the fragment of the callback or error URL.
+- A form posted with `Origin: null` from the same origin is accepted when
+  Fetch Metadata confirms it.
+- Password reset for a deleted user fails with `USER_NOT_FOUND`.
+- A sign-up stopped by a database hook fails with `FAILED_TO_CREATE_USER`
+  and leaves no account row.
+- Deleting a user or its sessions no longer drops cached sessions when a
+  hook vetoes the delete, and keeps sessions created while it runs.
 
 ## [1.0.3] - 2026-09-25
 
