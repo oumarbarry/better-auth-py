@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .types import BetterAuthError
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -151,6 +153,95 @@ def merge_schema(base: Schema, *extensions: Schema) -> Schema:
             merged.setdefault(model, {})
             merged[model].update(fields)
     return merged
+
+
+# --- schema validation (TS v1.7.6 core/src/db/schema-diff.ts) -------------------------
+
+#: one problem, as data: ``{"kind": "missing-table" | "missing-column" |
+#: "unexpected-required-column", "table": str, "column"?: str}``
+SchemaFinding = dict[str, str]
+#: introspected columns per table: ``{"name": str, "nullable": bool, "has_default": bool}``
+IntrospectedSchema = dict[str, list[dict[str, Any]]]
+
+
+def diff_schema(expected: Schema, actual: IntrospectedSchema) -> list[SchemaFinding]:
+    """Compare the tables Better Auth writes with what the store holds (schema-diff.ts:88).
+
+    A table or column Better Auth writes must exist. A column it does not write must
+    accept an insert that omits it (nullable or with a default), otherwise every insert
+    into that table fails with a constraint error that says nothing about why.
+    """
+    findings: list[SchemaFinding] = []
+    for table, fields in expected.items():
+        columns = actual.get(table)
+        if columns is None:
+            findings.append({"kind": "missing-table", "table": table})
+            continue
+        present = {c["name"] for c in columns}
+        written = dict.fromkeys(["id", *fields])
+        for column in written:
+            if column not in present:
+                findings.append({"kind": "missing-column", "table": table, "column": column})
+        for c in columns:
+            if c["name"] in written or c["nullable"] or c["has_default"]:
+                continue
+            findings.append(
+                {"kind": "unexpected-required-column", "table": table, "column": c["name"]}
+            )
+    return findings
+
+
+_UPGRADE_NOTE = (
+    "  note: If this column came from Better Auth 1.7.0 through 1.7.2,\n"
+    "        follow the upgrade guide before removing it:\n"
+    "        https://www.better-auth.com/docs/guides/1-7-upgrade-guide"
+)
+
+
+def format_schema_mismatch(findings: list[SchemaFinding]) -> str:
+    """The report TS prints (schema-diff.ts:185), with Python migration hints."""
+    tables = [f["table"] for f in findings if f["kind"] == "missing-table"]
+    columns = [f"{f['table']}.{f['column']}" for f in findings if f["kind"] == "missing-column"]
+    required = [f for f in findings if f["kind"] == "unexpected-required-column"]
+    sections = ["Database schema mismatch"]
+    if tables:
+        sections.append("  Missing tables\n    " + ", ".join(tables))
+    if columns:
+        sections.append("  Missing columns\n    " + "\n    ".join(columns))
+    help_lines: list[str] = []
+    if required:
+        sections.append(
+            "  Required columns Better Auth never writes\n    "
+            + "\n    ".join(f"{f['table']}.{f['column']}" for f in required)
+        )
+        affected = ", ".join(dict.fromkeys(f["table"] for f in required))
+        sections.append(f"  Inserts into {affected} will fail.")
+        help_lines.append("Make the listed columns nullable, give them defaults, or remove them.")
+    if tables or columns:
+        help_lines.append(
+            "Add the missing tables and columns with your migrations "
+            "(`await adapter.create_tables()` creates missing tables only)."
+        )
+    if help_lines:
+        sections.append("  help: " + "\n        ".join(help_lines))
+    if any(f["column"] == "issuer" for f in required):
+        sections.append(_UPGRADE_NOTE)
+    return "\n\n".join(sections)
+
+
+class SchemaMismatchError(BetterAuthError):
+    """The database cannot hold what this configuration writes (TS SchemaMismatchError).
+
+    ``findings`` carries every problem as data; the message lists them with the change
+    that resolves them.
+    """
+
+    code = "SCHEMA_MISMATCH"
+
+    def __init__(self, findings: list[SchemaFinding], source: str = "database") -> None:
+        self.findings = findings
+        self.source = source
+        super().__init__(format_schema_mismatch(findings))
 
 
 # --- parse layer (mirrors better-auth's db/schema.ts filterOutputFields/parseAccountOutput) ---

@@ -151,3 +151,103 @@ async def test_unique_indexed_field_creates_a_single_unique_index():
             await adapter.create("uniqueTable", {"id": "second", "slug": "shared"})
     finally:
         await engine.dispose()
+
+
+# --- schema validation (TS v1.7.6 be0e007e2, core/src/db/schema-diff.ts) -------------
+
+
+async def _sa(validate_schema=None):
+    from better_auth.config import AdvancedDatabase
+    from better_auth.schema import CORE_SCHEMA
+
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    adapter = SQLAlchemyAdapter(engine, advanced=AdvancedDatabase(validate_schema=validate_schema))
+    adapter.init(CORE_SCHEMA)
+    return adapter, engine
+
+
+async def test_schema_check_reports_a_missing_table_and_column(caplog):
+    from better_auth.schema import SchemaMismatchError
+
+    adapter, engine = await _sa()
+    await adapter.create_tables()
+    async with engine.begin() as conn:
+        await conn.execute(text('DROP TABLE "verification"'))
+        await conn.execute(text('ALTER TABLE "user" DROP COLUMN "image"'))
+    adapter._schema_verdict = None  # tables changed behind the adapter's back
+    with pytest.raises(SchemaMismatchError) as caught:
+        await adapter.find_one("user", [Where("id", "x")])
+    error = caught.value
+    assert error.code == "SCHEMA_MISMATCH"
+    assert {"kind": "missing-table", "table": "verification"} in error.findings
+    assert {"kind": "missing-column", "table": "user", "column": "image"} in error.findings
+    assert str(error).startswith(
+        "Database schema mismatch\n\n  Missing tables\n    verification\n\n"
+        "  Missing columns\n    user.image"
+    )
+    # the verdict is kept: later calls rethrow without asking the database again
+    with pytest.raises(SchemaMismatchError):
+        await adapter.count("user")
+    await engine.dispose()
+
+
+async def test_schema_check_reports_required_columns_better_auth_never_writes():
+    from better_auth.schema import SchemaMismatchError
+
+    adapter, engine = await _sa()
+    await adapter.create_tables()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text('ALTER TABLE "session" ADD COLUMN "tenant" TEXT NOT NULL DEFAULT \'\'')
+        )
+        await conn.execute(text('DROP TABLE "account"'))
+        await conn.execute(
+            text(
+                'CREATE TABLE "account" (id TEXT PRIMARY KEY, "accountId" TEXT, "providerId" TEXT,'
+                ' "userId" TEXT, "accessToken" TEXT, "refreshToken" TEXT, "idToken" TEXT,'
+                ' "accessTokenExpiresAt" DATETIME, "refreshTokenExpiresAt" DATETIME, scope TEXT,'
+                ' password TEXT, "createdAt" DATETIME, "updatedAt" DATETIME, issuer TEXT NOT NULL)'
+            )
+        )
+    adapter._schema_verdict = None
+    with pytest.raises(SchemaMismatchError) as caught:
+        await adapter.find_one("user", [Where("id", "x")])
+    # a column with a default is fine; a required one without is not
+    assert caught.value.findings == [
+        {"kind": "unexpected-required-column", "table": "account", "column": "issuer"}
+    ]
+    message = str(caught.value)
+    assert "  Required columns Better Auth never writes\n    account.issuer" in message
+    assert "  Inserts into account will fail." in message
+    assert "https://www.better-auth.com/docs/guides/1-7-upgrade-guide" in message
+    await engine.dispose()
+
+
+async def test_schema_check_passes_and_create_tables_clears_a_stale_verdict():
+    from better_auth.schema import SchemaMismatchError
+
+    adapter, engine = await _sa()
+    with pytest.raises(SchemaMismatchError):
+        await adapter.count("user")
+    await adapter.create_tables()  # like `auth migrate`, invalidates the verdict
+    assert await adapter.count("user") == 0
+    await engine.dispose()
+
+
+async def test_schema_check_can_be_disabled():
+    adapter, engine = await _sa(validate_schema=False)
+    await adapter.create_tables()
+    async with engine.begin() as conn:
+        await conn.execute(text('DROP TABLE "verification"'))
+    assert await adapter.count("user") == 0
+    await engine.dispose()
+
+
+async def test_schema_mismatch_fails_requests_with_a_500(caplog):
+    adapter, engine = await _sa()
+    auth = make_auth(adapter=adapter)
+    async with make_client(auth) as client:
+        response = await client.post("/api/auth/sign-in/email", json=SIGNUP)
+    assert response.status_code == 500
+    assert any("Database schema mismatch" in r.getMessage() for r in caplog.records)
+    await engine.dispose()

@@ -1,18 +1,15 @@
-"""Rate limiter — the TS window algorithm (``api/rate-limiter/index.ts``) over the
+"""Rate limiter: the TS request flow (``api/rate-limiter/index.ts``, v1.7.6) over the
 storage backends in ``adapters/rate_limit.py``.
 
-A counter row is ``{count, lastRequest}`` where ``lastRequest`` is epoch ms. The window
-is rolling: a key resets to ``count=1`` once ``window`` seconds have elapsed since its
-last request; within the window it increments until ``max`` and then blocks with a
-``X-Retry-After`` computed from ``lastRequest``.
+Every backend records and decides a request in one atomic ``consume(key, rule)`` step.
+Memory and database counters use a rolling window: a key resets to ``count=1`` once
+``window`` seconds have elapsed since its last request; within the window it increments
+until ``max`` and then blocks with a ``X-Retry-After`` computed from ``lastRequest``.
+Secondary-storage counters expire a fixed window after they open.
 
 Rule precedence (first match wins, later stages override): default ``{window, max}`` →
 special rules (sign-in/up etc.) → plugin ``rate_limit[]`` rules → ``custom_rules``
 (exact or ``*`` wildcard; a callable or ``False`` to skip).
-
-ponytail: uses the read-decide-write path (TS ``legacyConsume``) uniformly for all
-backends rather than per-backend atomic ``consume`` — correct for a single process;
-add an atomic primitive if a multi-worker deployment needs strict enforcement.
 
 The client IP is resolved via ``ip.get_request_ip`` from the configured
 ``advanced.ipAddress`` headers (TS ``getIp``); ``disable_ip_tracking`` skips per-IP
@@ -23,9 +20,7 @@ from __future__ import annotations
 
 import fnmatch
 import inspect
-import math
 import os
-import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +28,8 @@ from .adapters.rate_limit import (
     DatabaseRateLimitStorage,
     MemoryRateLimitStorage,
     SecondaryRateLimitStorage,
+    decide_consume,
+    legacy_consume,
 )
 from .ip import get_request_ip
 
@@ -61,26 +58,7 @@ _SPECIAL_RULES: list[tuple[Callable[[str], bool], tuple[int, int]]] = [
 ]
 
 
-def _retry_after(last_request: int, window: int, now_ms: int) -> int:
-    return math.ceil((last_request + window * 1000 - now_ms) / 1000)
-
-
-def decide_consume(
-    data: dict[str, Any] | None, window: int, maximum: int, now_ms: int
-) -> tuple[dict[str, Any], bool, bool, int | None]:
-    """One rolling-window step (TS ``decideConsume``).
-
-    Returns ``(next_row, is_update, allowed, retry_after)``. ``next_row`` carries the
-    new ``{count, lastRequest}``; ``is_update`` is False only when opening a fresh key.
-    """
-    window_ms = window * 1000
-    if not data:
-        return {"count": 1, "lastRequest": now_ms}, False, True, None
-    if now_ms - data["lastRequest"] > window_ms:
-        return {"count": 1, "lastRequest": now_ms}, True, True, None
-    if data["count"] >= maximum:
-        return data, True, False, _retry_after(data["lastRequest"], window, now_ms)
-    return {"count": data["count"] + 1, "lastRequest": now_ms}, True, True, None
+__all__ = ["NO_TRUSTED_IP", "RateLimiter", "decide_consume"]
 
 
 class RateLimiter:
@@ -89,6 +67,7 @@ class RateLimiter:
     def __init__(self, auth: BetterAuth) -> None:
         self.auth = auth
         self._memory: MemoryRateLimitStorage | None = None
+        self._database: DatabaseRateLimitStorage | None = None
 
     def _is_enabled(self) -> bool:
         enabled = self.auth.rate_limit.enabled
@@ -103,19 +82,34 @@ class RateLimiter:
         if cfg.custom_storage is not None:
             return cfg.custom_storage
         if cfg.storage == "database":
-            return DatabaseRateLimitStorage(self.auth.adapter)
+            if self._database is None:
+                self._database = DatabaseRateLimitStorage(
+                    self.auth.adapter, longest_window=self._longest_configured_window()
+                )
+            return self._database
         if cfg.storage == "secondary-storage":
             if self.auth.secondary_storage is None:
                 raise ValueError(
                     "rate_limit.storage='secondary-storage' requires a secondary_storage backend"
                 )
             return SecondaryRateLimitStorage(self.auth.secondary_storage, window=window)
-        # memory (default): one shared store; TTL follows the current rule's window so a
-        # key survives at least its whole window before eviction (else the count resets early).
         if self._memory is None:
             self._memory = MemoryRateLimitStorage(window=window)
-        self._memory._window = window  # ponytail: rule window per set; single shared store
         return self._memory
+
+    def _longest_configured_window(self) -> int:
+        """TS ``getConfiguredRateLimitWindows`` (index.ts:247), the sweep horizon."""
+        cfg = self.auth.rate_limit
+        windows = [cfg.window, *(w for _, (w, _m) in _SPECIAL_RULES)]
+        for plugin in self.auth.plugins:
+            windows.extend(rule.window for rule in plugin.rate_limit())
+        for rule in cfg.custom_rules.values():
+            if isinstance(rule, dict):
+                windows.append(rule["window"])
+            elif isinstance(rule, (tuple, list)):
+                windows.append(rule[0])
+        valid = [w for w in windows if isinstance(w, (int, float)) and w > 0]
+        return int(max(valid)) if valid else cfg.window
 
     async def _resolve(self, request: AuthRequest) -> tuple[str, int, int] | None:
         """``(key, window, max)`` for this request, or None to skip rate limiting."""
@@ -184,10 +178,10 @@ class RateLimiter:
         key, window, maximum = config
 
         storage = self._storage(window)
-        data = await storage.get(key)
-        now_ms = int(time.time() * 1000)
-        next_row, is_update, allowed, retry_after = decide_consume(data, window, maximum, now_ms)
-        if not allowed:
-            return retry_after if retry_after is not None else window
-        await storage.set(key, next_row, is_update)
-        return None
+        rule = {"window": window, "max": maximum}
+        consume = getattr(storage, "consume", None)
+        result = await (consume(key, rule) if consume else legacy_consume(storage, key, rule))
+        if result["allowed"]:
+            return None
+        retry_after = result.get("retryAfter")
+        return retry_after if retry_after is not None else window

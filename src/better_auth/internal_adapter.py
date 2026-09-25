@@ -39,6 +39,9 @@ _CLEANUP_LOCK_EXPIRES_S = 5.0
 _CLEANUP_LOCK_WAIT_S = 2.0
 _CLEANUP_LOCK_POLL_S = 0.25
 
+# Warn at most once when a single-use value is consumed without getAndDelete.
+_warned_non_atomic_consume = False
+
 # A single database-hook entry: {model: {op: {"before"|"after": callable}}}.
 DatabaseHooks = dict[str, Any]
 
@@ -597,12 +600,10 @@ class InternalAdapter:
         makes find-then-delete a single critical section under a scheduler that can
         interleave real DB awaits.
 
-        ponytail: the secondary-storage-only path (``storeInDatabase`` false) is atomic
-        across processes only when the store implements ``get_and_delete``; without it
-        this falls back to an in-process lock around get+delete, which cannot coordinate
-        across processes — faithful to TS's non-atomic fallback (db/internal-adapter.ts:1288
-        + FIXME(consume-atomic) at :1249). Add a store-native atomic get-and-delete (or
-        require DB-backed storage) to close the cross-process race.
+        The secondary-storage-only path (``storeInDatabase`` false) consumes through the
+        store's ``get_and_delete``, which TS v1.7.6 requires (core/src/db/type.ts:330). A
+        store without it keeps the TS 1.6 fallback: an in-process lock around get+delete,
+        which cannot coordinate across processes, with a one-time warning.
         """
         option, stored = await self._stored_identifier(identifier)
         identifiers_to_try = [stored, identifier] if (option and option != "plain") else [stored]
@@ -615,6 +616,15 @@ class InternalAdapter:
                 get_and_delete = getattr(ss, "get_and_delete", None)
                 if get_and_delete is not None:
                     return _hydrate_cached_verification(await get_and_delete(key))
+                global _warned_non_atomic_consume
+                if not _warned_non_atomic_consume:
+                    _warned_non_atomic_consume = True
+                    logger.warning(
+                        "Secondary storage does not implement `get_and_delete`, so single-use "
+                        "verification values cannot be consumed atomically across processes. "
+                        "Implement `get_and_delete` or use database-backed verification storage "
+                        "to guarantee single use."
+                    )
                 async with self._verification_consume_lock(key):
                     parsed = _hydrate_cached_verification(await ss.get(key))
                     if parsed is None:

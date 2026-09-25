@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..config import AdvancedDatabase
-from .base import BaseAdapter, SortBy, Where
+from .base import BaseAdapter, SortBy, Where, check_increment
 
 
 def _lower(value: Any) -> Any:
@@ -157,10 +157,72 @@ class MemoryAdapter(BaseAdapter):
     async def count(self, model: str, where: list[Where] | None = None) -> int:
         return sum(1 for r in self._store[model] if _matches(r, where))
 
+    # Native atomic methods: no await between the read and the write, so no other
+    # coroutine can interleave (TS v1.7.6 memory-adapter.ts consumeOne/incrementOne).
+
+    async def consume_one(self, model: str, where: list[Where]) -> dict[str, Any] | None:
+        rows = self._store[model]
+        for i, row in enumerate(rows):
+            if _matches(row, where):
+                del rows[i]
+                return self._out(model, dict(row))
+        return None
+
+    async def increment_one(
+        self,
+        model: str,
+        where: list[Where],
+        increment: dict[str, Any] | None = None,
+        set: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        increment = check_increment(increment, set)
+        target = next((r for r in self._store[model] if _matches(r, where)), None)
+        if target is None:
+            return None
+        for field_name, delta in increment.items():
+            current = target.get(field_name)
+            target[field_name] = (current if isinstance(current, (int, float)) else 0) + delta
+        if set is not None:
+            target.update(self._in(model, set, "update"))
+        return self._out(model, dict(target))
+
     async def transaction(self, callback: Callable[[BaseAdapter], Awaitable[Any]]) -> Any:
-        snapshot = copy.deepcopy(dict(self._store))
-        try:
-            return await callback(self)
-        except Exception:
-            self._store = defaultdict(list, {k: v for k, v in snapshot.items()})
-            raise
+        """Copy-on-write isolation (TS v1.7.6 memory-adapter.ts:151): the callback runs
+        against a clone, invisible to concurrent operations; a failure discards the clone,
+        a commit replays only the rows the transaction changed. Two writers editing the
+        same row resolve last-writer-wins."""
+        base = copy.deepcopy(dict(self._store))
+        tx = MemoryAdapter(self.advanced)
+        tx.schema = self.schema
+        tx._store = defaultdict(list, copy.deepcopy(base))
+        result = await callback(tx)
+        _merge_transaction_into(self._store, base, tx._store)
+        return result
+
+
+def _merge_transaction_into(
+    target: dict[str, list[dict[str, Any]]],
+    base: dict[str, list[dict[str, Any]]],
+    clone: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Three-way merge of the ``base -> clone`` delta onto the live store, by row id
+    (TS v1.7.6 memory-adapter.ts:58 mergeTransactionInto)."""
+    for model in {*base, *clone}:
+        if model not in clone:
+            target.pop(model, None)
+            continue
+        base_by_id = {r.get("id"): r for r in base.get(model, [])}
+        clone_by_id = {r.get("id"): r for r in clone[model]}
+        merged: list[dict[str, Any]] = []
+        placed = set()
+        for live in target.get(model, []):
+            row_id = live.get("id")
+            before, after = base_by_id.get(row_id), clone_by_id.get(row_id)
+            if before is not None and after is None:
+                continue  # deleted by the transaction
+            merged.append(after if after is not None and after != before else live)
+            placed.add(row_id)
+        merged.extend(
+            r for r in clone[model] if r.get("id") not in base_by_id and r.get("id") not in placed
+        )
+        target[model] = merged

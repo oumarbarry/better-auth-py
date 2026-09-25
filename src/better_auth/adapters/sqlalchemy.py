@@ -9,6 +9,7 @@ better-auth's ``supportsJSON:false``/``supportsArrays:false`` backends).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -31,15 +32,20 @@ from sqlalchemy import (
     or_,
 )
 from sqlalchemy import (
+    inspect as sa_inspect,
+)
+from sqlalchemy import (
     select as sa_select,
 )
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from sqlalchemy.sql import ColumnElement
 
 from ..config import AdvancedDatabase
-from ..schema import Field, Schema
-from .base import BaseAdapter, SortBy, Where
+from ..schema import Field, IntrospectedSchema, Schema, SchemaMismatchError, diff_schema
+from .base import BaseAdapter, SortBy, Where, check_increment
 from .transform import Caps
+
+logger = logging.getLogger("better_auth")
 
 
 def _col_type(spec: Field) -> Any:
@@ -84,6 +90,8 @@ class SQLAlchemyAdapter(BaseAdapter):
         self.metadata = metadata or MetaData()
         self._tables: dict[str, Table] = {}
         self._active: ContextVar[AsyncConnection | None] = ContextVar("_active", default=None)
+        #: None until checked; True when clean; the kept SchemaMismatchError otherwise
+        self._schema_verdict: bool | SchemaMismatchError | None = None
 
     def init(self, schema: Schema) -> None:
         super().init(schema)
@@ -113,6 +121,48 @@ class SQLAlchemyAdapter(BaseAdapter):
         """Create missing tables (dev convenience — use real migrations in production)."""
         async with self.engine.begin() as conn:
             await conn.run_sync(self.metadata.create_all)
+        self._schema_verdict = None  # the schema changed: check again (TS migrate)
+
+    # --- schema validation (TS v1.7.6 be0e007e2, advanced.database.validateSchema) -----
+
+    async def check_schema(self) -> None:
+        """Raise ``SchemaMismatchError`` when the database cannot hold what Better Auth
+        writes. A clean or mismatched verdict is kept until ``create_tables`` runs; a
+        failure to reach the database is not, so the next call asks again.
+
+        ponytail: concurrent first calls may each introspect once; TS shares one
+        promise. Harmless duplicate reads; share a task if introspection gets costly.
+        """
+        if self._schema_verdict is True or self.advanced.validate_schema is False:
+            return
+        if self._schema_verdict is None:
+            async with self.engine.connect() as conn:
+                actual = await conn.run_sync(self._introspect)
+            findings = diff_schema(self.schema, actual)
+            if not findings:
+                self._schema_verdict = True
+                return
+            self._schema_verdict = SchemaMismatchError(findings)
+            logger.error(str(self._schema_verdict))
+        if isinstance(self._schema_verdict, SchemaMismatchError):
+            raise self._schema_verdict
+
+    def _introspect(self, sync_conn: Any) -> IntrospectedSchema:
+        inspector = sa_inspect(sync_conn)
+        schema = self.metadata.schema
+        present = set(inspector.get_table_names(schema=schema))
+        return {
+            table: [
+                {
+                    "name": c["name"],
+                    "nullable": c["nullable"],
+                    "has_default": c.get("default") is not None or c.get("autoincrement") is True,
+                }
+                for c in inspector.get_columns(table, schema=schema)
+            ]
+            for table in self.schema
+            if table in present
+        }
 
     # --- connection sharing (item 8: transactions) ------------------------------------
 
@@ -121,7 +171,9 @@ class SQLAlchemyAdapter(BaseAdapter):
         active = self._active.get()
         if active is not None:
             yield active
-        elif write:
+            return
+        await self.check_schema()
+        if write:
             async with self.engine.begin() as conn:
                 yield conn
         else:
@@ -131,6 +183,8 @@ class SQLAlchemyAdapter(BaseAdapter):
     async def transaction(self, callback: Callable[[BaseAdapter], Awaitable[Any]]) -> Any:
         if self._active.get() is not None:
             return await callback(self)  # already inside a transaction
+        # settle the schema verdict before the transaction holds the connection
+        await self.check_schema()
         async with self.engine.begin() as conn:
             token = self._active.set(conn)
             try:
@@ -318,3 +372,58 @@ class SQLAlchemyAdapter(BaseAdapter):
             stmt = stmt.where(cond)
         async with self._connection(write=False) as conn:
             return int((await conn.execute(stmt)).scalar() or 0)
+
+    # --- native atomic methods (RETURNING dialects: PostgreSQL, SQLite >= 3.35) ---------
+    # One statement bound to a single row picked by `where`, with `where` re-checked on
+    # the row it writes. Other dialects (MySQL, MariaDB: no same-table subquery in a
+    # write) use the shared guarded fallbacks.
+
+    def _native(self, returning: bool) -> bool:
+        return returning and self.engine.dialect.name in ("postgresql", "sqlite")
+
+    def _one_row(self, table: Table, cond: ColumnElement | None) -> ColumnElement:
+        pk = table.c["id"]
+        pick = sa_select(pk).limit(1)
+        if cond is not None:
+            pick = pick.where(cond)
+        bound = pk == pick.scalar_subquery()
+        return and_(bound, cond) if cond is not None else bound
+
+    async def consume_one(self, model: str, where: list[Where]) -> dict[str, Any] | None:
+        if not self._native(self.engine.dialect.delete_returning):
+            return await super().consume_one(model, where)
+        table = self._table(model)
+        stmt = (
+            table.delete()
+            .where(self._one_row(table, self._condition(table, where)))
+            .returning(*table.c)
+        )
+        async with self._connection(write=True) as conn:
+            row = (await conn.execute(stmt)).first()
+        return self._row(model, row, None) if row is not None else None
+
+    async def increment_one(
+        self,
+        model: str,
+        where: list[Where],
+        increment: dict[str, Any] | None = None,
+        set: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        increment = check_increment(increment, set)
+        if not self._native(self.engine.dialect.update_returning):
+            return await super().increment_one(model, where, increment, set)
+        table = self._table(model)
+        values: dict[str, Any] = {
+            name: func.coalesce(table.c[name], 0) + delta for name, delta in increment.items()
+        }
+        if set is not None:
+            values.update({k: _to_storage(v) for k, v in self._in(model, set, "update").items()})
+        stmt = (
+            table.update()
+            .where(self._one_row(table, self._condition(table, where)))
+            .values(**values)
+            .returning(*table.c)
+        )
+        async with self._connection(write=True) as conn:
+            row = (await conn.execute(stmt)).first()
+        return self._row(model, row, None) if row is not None else None

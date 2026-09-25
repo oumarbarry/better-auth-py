@@ -14,7 +14,14 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class SecondaryStorage(Protocol):
-    """KV contract. ``get_and_delete`` / ``increment`` are optional (checked at runtime)."""
+    """KV contract.
+
+    Also implement ``get_and_delete(key)`` (atomic read and delete, for single-use
+    verification values) and ``increment(key, ttl)`` (atomic counter whose ttl is set only
+    when the key is created, for rate limiting). TS v1.7.6 requires both
+    (core/src/db/type.ts:330, :343). Here they stay optional: without them the port falls
+    back to non-atomic read then write paths and logs a warning once.
+    """
 
     async def get(self, key: str) -> str | None: ...
     async def set(self, key: str, value: str, ttl: int | None = None) -> None: ...

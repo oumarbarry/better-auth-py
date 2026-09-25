@@ -75,3 +75,24 @@ def test_parse_account_output_strips_sensitive():
     assert "accessToken" not in out
     assert "password" not in out
     assert out["scope"] == "email"
+
+
+def test_diff_schema_checks_what_better_auth_writes():
+    # TS v1.7.6 core/src/db/schema-diff.ts:88 diffSchema
+    from better_auth.schema import diff_schema
+
+    expected = {"t": {"id": Field("string"), "a": Field("string"), "b": Field("string")}}
+    actual = {
+        "t": [
+            {"name": "id", "nullable": False, "has_default": False},
+            {"name": "a", "nullable": False, "has_default": False},
+            {"name": "extra_ok", "nullable": True, "has_default": False},
+            {"name": "defaulted", "nullable": False, "has_default": True},
+            {"name": "blocking", "nullable": False, "has_default": False},
+        ]
+    }
+    assert diff_schema(expected, actual) == [
+        {"kind": "missing-column", "table": "t", "column": "b"},
+        {"kind": "unexpected-required-column", "table": "t", "column": "blocking"},
+    ]
+    assert diff_schema(expected, {}) == [{"kind": "missing-table", "table": "t"}]

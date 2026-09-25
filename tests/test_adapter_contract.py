@@ -7,15 +7,18 @@ options (item 6) and transactions (item 8).
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from better_auth.adapters.base import Where
+from better_auth.adapters.base import BaseAdapter, Where
 from better_auth.adapters.memory import MemoryAdapter
 from better_auth.adapters.sqlalchemy import SQLAlchemyAdapter
 from better_auth.config import AdvancedDatabase
 from better_auth.schema import CORE_SCHEMA, Field, merge_schema
+from better_auth.types import BetterAuthError
 
 # A tiny model with numeric fields for consume/increment tests.
 _COUNTER_SCHEMA = {
@@ -28,9 +31,17 @@ _COUNTER_SCHEMA = {
 _SCHEMA = merge_schema(CORE_SCHEMA, _COUNTER_SCHEMA)
 
 
+class FallbackAdapter(MemoryAdapter):
+    """A custom adapter without native atomic methods: exercises the shared fallbacks
+    (TS core/src/db/adapter/atomic-fallback.ts, v1.7.6)."""
+
+    consume_one = BaseAdapter.consume_one
+    increment_one = BaseAdapter.increment_one
+
+
 async def _make(kind: str, advanced: AdvancedDatabase | None = None):
-    if kind == "memory":
-        adapter = MemoryAdapter(advanced=advanced)
+    if kind in ("memory", "fallback"):
+        adapter = (MemoryAdapter if kind == "memory" else FallbackAdapter)(advanced=advanced)
         adapter.init(_SCHEMA)
         return adapter, None
     engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
@@ -40,7 +51,7 @@ async def _make(kind: str, advanced: AdvancedDatabase | None = None):
     return adapter, engine
 
 
-@pytest.fixture(params=["memory", "sqlalchemy"])
+@pytest.fixture(params=["memory", "fallback", "sqlalchemy"])
 async def adapter(request):
     a, engine = await _make(request.param)
     yield a
@@ -209,22 +220,6 @@ async def test_increment_one_guarded(adapter):
     assert blocked is None
 
 
-async def test_consume_one_returns_none_when_a_concurrent_caller_won(adapter, monkeypatch):
-    # TS core factory.ts:1386-1414 (v1.6.29): the fallback deletes by `where` + id and
-    # returns the row only when deleteMany removed it. Simulate another process deleting
-    # the row between our read and our delete.
-    await adapter.create("counter", {"key": "k", "count": 1})
-    real_find_many = adapter.find_many
-
-    async def find_then_lose_race(*args, **kwargs):
-        rows = await real_find_many(*args, **kwargs)
-        await adapter.delete_many("counter", [Where("key", "k")])
-        return rows
-
-    monkeypatch.setattr(adapter, "find_many", find_then_lose_race)
-    assert await adapter.consume_one("counter", [Where("key", "k")]) is None
-
-
 async def test_increment_one_updates_only_the_selected_row(adapter):
     # TS core factory.ts incrementOne fallback (v1.6.29) pins the update to the row id.
     await adapter.create("counter", {"key": "a", "count": 1})
@@ -235,9 +230,170 @@ async def test_increment_one_updates_only_the_selected_row(adapter):
 
 
 async def test_increment_one_requires_increment_or_set(adapter):
+    # TS v1.7.6 factory.ts:1466
     await adapter.create("counter", {"key": "k", "count": 1})
-    with pytest.raises(ValueError):
+    with pytest.raises(BetterAuthError, match="requires a non-empty `increment` or `set`"):
         await adapter.increment_one("counter", [Where("key", "k")], increment={})
+
+
+async def test_increment_one_set_only_and_mixed(adapter):
+    await adapter.create("counter", {"key": "k", "count": 1})
+    row = await adapter.increment_one(
+        "counter", [Where("key", "k")], increment={}, set={"count": 7}
+    )
+    assert row is not None and row["count"] == 7
+    row = await adapter.increment_one(
+        "counter", [Where("key", "k")], increment={"count": 2}, set={"key": "k2"}
+    )
+    assert row is not None and row["count"] == 9 and row["key"] == "k2"
+    stored = await adapter.find_one("counter", [Where("key", "k2")])
+    assert stored is not None and stored["count"] == 9
+
+
+async def test_concurrent_increments_lose_nothing(adapter):
+    # TS v1.7.6 atomic-fallback.ts:178: the counter value is part of the CAS guard, so
+    # interleaved increments retry instead of overwriting each other.
+    await adapter.create("counter", {"key": "k", "count": 0})
+    await asyncio.gather(
+        *(
+            adapter.increment_one("counter", [Where("key", "k")], increment={"count": 1})
+            for _ in range(4)
+        )
+    )
+    row = await adapter.find_one("counter", [Where("key", "k")])
+    assert row is not None and row["count"] == 4
+
+
+async def test_concurrent_consumers_get_one_row(adapter):
+    await adapter.create("counter", {"key": "k", "count": 1})
+    results = await asyncio.gather(
+        *(adapter.consume_one("counter", [Where("key", "k")]) for _ in range(3))
+    )
+    assert sum(r is not None for r in results) == 1
+
+
+# --- shared atomic fallbacks (TS v1.7.6 core/src/db/adapter/atomic-fallback.ts) -------
+
+
+async def _fallback() -> FallbackAdapter:
+    adapter, _ = await _make("fallback")
+    assert isinstance(adapter, FallbackAdapter)
+    return adapter
+
+
+async def test_fallback_consume_returns_none_when_a_concurrent_caller_won(monkeypatch):
+    adapter = await _fallback()
+    await adapter.create("counter", {"key": "k", "count": 1})
+    real_find_one = adapter.find_one
+
+    async def read_then_lose_race(*args, **kwargs):
+        row = await real_find_one(*args, **kwargs)
+        await adapter.delete_many("counter", [Where("key", "k")])
+        return row
+
+    monkeypatch.setattr(adapter, "find_one", read_then_lose_race)
+    assert await adapter.consume_one("counter", [Where("key", "k")]) is None
+
+
+async def test_fallback_consume_is_guarded_on_the_snapshot(monkeypatch):
+    # atomic-fallback.ts:157: the delete is guarded on every scalar column of the read
+    # snapshot, so a row changed between read and delete is left alone.
+    adapter = await _fallback()
+    await adapter.create("counter", {"key": "k", "count": 1})
+    real_find_one = adapter.find_one
+
+    async def read_then_row_changes(*args, **kwargs):
+        row = await real_find_one(*args, **kwargs)
+        await adapter.update_many("counter", [Where("key", "k")], {"count": 2})
+        return row
+
+    monkeypatch.setattr(adapter, "find_one", read_then_row_changes)
+    assert await adapter.consume_one("counter", [Where("key", "k")]) is None
+    assert await adapter.count("counter") == 1
+
+
+async def test_fallback_consume_rejects_an_impossible_row_count(monkeypatch):
+    adapter = await _fallback()
+    await adapter.create("counter", {"key": "k", "count": 1})
+
+    async def two_rows(*args, **kwargs):
+        return 2
+
+    monkeypatch.setattr(adapter, "delete_many", two_rows)
+    with pytest.raises(BetterAuthError, match="affected row count of 0 or 1"):
+        await adapter.consume_one("counter", [Where("key", "k")])
+
+
+async def test_fallback_increment_retries_after_a_concurrent_write(monkeypatch):
+    adapter = await _fallback()
+    await adapter.create("counter", {"key": "k", "count": 1})
+    real_find_one = adapter.find_one
+    raced = []
+
+    async def read_then_race_once(*args, **kwargs):
+        row = await real_find_one(*args, **kwargs)
+        if not raced:
+            raced.append(True)
+            await adapter.update_many("counter", [Where("key", "k")], {"count": 10})
+        return row
+
+    monkeypatch.setattr(adapter, "find_one", read_then_race_once)
+    row = await adapter.increment_one("counter", [Where("key", "k")], increment={"count": 1})
+    assert row is not None and row["count"] == 11
+    stored = await real_find_one("counter", [Where("key", "k")])
+    assert stored is not None and stored["count"] == 11
+
+
+async def test_fallback_increment_gives_up_after_five_attempts(monkeypatch):
+    adapter = await _fallback()
+    await adapter.create("counter", {"key": "k", "count": 1})
+    attempts = []
+
+    async def always_lost(*args, **kwargs):
+        attempts.append(1)
+        return 0
+
+    monkeypatch.setattr(adapter, "update_many", always_lost)
+    with pytest.raises(BetterAuthError, match="could not complete an atomic increment"):
+        await adapter.increment_one("counter", [Where("key", "k")], increment={"count": 1})
+    assert len(attempts) == 5
+
+
+async def test_fallback_increment_noop_skips_the_write(monkeypatch):
+    # atomic-fallback.ts:216: a no-op takes effect at the read.
+    adapter = await _fallback()
+    await adapter.create("counter", {"key": "k", "count": 3})
+
+    async def must_not_write(*args, **kwargs):
+        raise AssertionError("no write expected")
+
+    monkeypatch.setattr(adapter, "update_many", must_not_write)
+    row = await adapter.increment_one(
+        "counter", [Where("key", "k")], increment={"count": 0}, set={"count": 3}
+    )
+    assert row is not None and row["count"] == 3
+
+
+async def test_fallback_increment_requires_numeric_counters():
+    adapter = await _fallback()
+    await adapter.create("counter", {"key": "k", "count": 1})
+    await adapter.update_many("counter", [Where("key", "k")], {"count": "one"})
+    with pytest.raises(BetterAuthError, match="finite numeric counter values"):
+        await adapter.increment_one("counter", [Where("key", "k")], increment={"count": 1})
+
+
+async def test_fallback_increment_only_leaves_updated_at_alone():
+    # TS only runs transformInput (onUpdate) over `set`, never over bare increments.
+    adapter = await _fallback()
+    adapter.schema = merge_schema(
+        adapter.schema,
+        {"counter": {"updatedAt": Field("datetime", on_update=lambda: "bumped")}},
+    )
+    await adapter.create("counter", {"key": "k", "count": 1, "updatedAt": "original"})
+    row = await adapter.increment_one("counter", [Where("key", "k")], increment={"count": 1})
+    assert row is not None and row["updatedAt"] == "original"
+    stored = await adapter.find_one("counter", [Where("key", "k")])
+    assert stored is not None and stored["updatedAt"] == "original"
 
 
 # --- transactions (item 8) ---------------------------------------------------
@@ -275,3 +431,54 @@ async def test_in_operator_matches_generated_mixed_case_ids(adapter):
     assert {r["id"] for r in rows} == {u1["id"], u2["id"]}
     kept = await adapter.find_many("user", [Where("id", [u1["id"]], "not_in")])
     assert u1["id"] not in {r["id"] for r in kept}
+
+
+# --- memory adapter transaction isolation (TS v1.7.6 memory-adapter.ts:40-120) --------
+
+
+async def test_memory_failed_transaction_keeps_concurrent_writes():
+    adapter, _ = await _make("memory")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work(tx):
+        await tx.create("user", {"name": "X", "email": "x@example.com"})
+        started.set()
+        await release.wait()
+        raise RuntimeError("boom")
+
+    task = asyncio.create_task(adapter.transaction(work))
+    await started.wait()
+    # the uncommitted write is invisible outside the transaction
+    assert await adapter.find_one("user", [Where("email", "x@example.com")]) is None
+    await _user(adapter, email="concurrent@example.com")
+    release.set()
+    with pytest.raises(RuntimeError):
+        await task
+    assert await adapter.find_one("user", [Where("email", "concurrent@example.com")])
+    assert await adapter.find_one("user", [Where("email", "x@example.com")]) is None
+
+
+async def test_memory_committed_transaction_merges_with_concurrent_writes():
+    adapter, _ = await _make("memory")
+    kept = await _user(adapter, email="kept@example.com", name="old")
+    doomed = await _user(adapter, email="doomed@example.com")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work(tx):
+        await tx.create("user", {"name": "T", "email": "tx@example.com"})
+        await tx.delete("user", [Where("id", doomed["id"])])
+        started.set()
+        await release.wait()
+
+    task = asyncio.create_task(adapter.transaction(work))
+    await started.wait()
+    await _user(adapter, email="concurrent@example.com")
+    await adapter.update("user", [Where("id", kept["id"])], {"name": "new"})
+    release.set()
+    await task
+    emails = {r["email"] for r in await adapter.find_many("user")}
+    assert emails == {"kept@example.com", "tx@example.com", "concurrent@example.com"}
+    row = await adapter.find_one("user", [Where("id", kept["id"])])
+    assert row is not None and row["name"] == "new"

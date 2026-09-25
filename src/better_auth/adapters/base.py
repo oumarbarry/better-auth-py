@@ -6,11 +6,14 @@ their own models without adapter changes.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 
 from ..config import AdvancedDatabase
 from ..schema import Schema
+from ..types import BetterAuthError
 from .transform import Caps, transform_input, transform_output
 
 SortBy = dict[str, str]  # {"field": ..., "direction": "asc" | "desc"}
@@ -120,23 +123,30 @@ class BaseAdapter:
     async def transaction(self, callback: Callable[[BaseAdapter], Awaitable[Any]]) -> Any:
         raise NotImplementedError
 
-    # --- derived, atomic-ish primitives (shared via transaction) ----------------------
+    async def check_schema(self) -> None:
+        """Raise ``SchemaMismatchError`` when the store cannot hold what Better Auth writes
+        (TS v1.7.6 ``ctx.checkSchema``). Adapters that cannot introspect skip it."""
+
+    # --- atomic primitives ---------------------------------------------------------------
+    #
+    # Adapters override these with a native atomic statement when the store has one
+    # (MemoryAdapter, SQLAlchemyAdapter on RETURNING dialects). The shared fallbacks
+    # below port TS v1.7.6 core/src/db/adapter/atomic-fallback.ts: read a snapshot, then
+    # mutate it with a write guarded on that snapshot, and trust the write only when the
+    # adapter reports exactly one affected row. They need no transaction.
 
     async def consume_one(self, model: str, where: list[Where]) -> dict[str, Any] | None:
-        """Atomically delete-and-return one matching row (single-use credential primitive)."""
+        """Atomically delete one matching row and return it (single-use credentials).
 
-        async def _cb(tx: BaseAdapter) -> dict[str, Any] | None:
-            rows = await tx.find_many(model, where, limit=1)
-            if not rows:
-                return None
-            row = rows[0]
-            # TS core factory.ts:1386-1414 (v1.6.29): delete by `where` + id and hand the
-            # row out only if this call removed it, so a concurrent consumer that won the
-            # delete makes us return None instead of a second copy of the credential.
-            deleted = await tx.delete_many(model, [*where, Where("id", row["id"])])
-            return row if deleted > 0 else None
-
-        return await self.transaction(_cb)
+        Under concurrent calls exactly one caller gets the row; the others get None.
+        """
+        row = await self.find_one(model, where)
+        if row is None:
+            return None
+        # atomic-fallback.ts:157: guard the snapshot with AND predicates.
+        name = type(self).__name__
+        guard = _snapshot_guard(name, row, [*row, *(c.field for c in where)], where)
+        return row if _changed_one(name, await self.delete_many(model, guard)) else None
 
     async def increment_one(
         self,
@@ -145,25 +155,112 @@ class BaseAdapter:
         increment: dict[str, Any] | None = None,
         set: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Atomic ``field = field + delta`` with ``where`` as selector *and* CAS guard."""
-        if not increment and not set:
-            raise ValueError("increment_one requires a non-empty `increment` or `set`")
+        """Atomic ``field = field + delta`` on one row; ``where`` is selector *and* guard.
 
-        async def _cb(tx: BaseAdapter) -> dict[str, Any] | None:
-            rows = await tx.find_many(model, where, limit=1)
-            if not rows:
+        ``set`` assigns absolute values in the same write. Returns the updated row, or
+        None when the guard matched no row.
+        """
+        increment = check_increment(increment, set)
+        name = type(self).__name__
+        # atomic-fallback.ts:178: compare-and-swap on the snapshot value of every field
+        # the call reads or writes, retried a bounded number of times.
+        fields = [*(c.field for c in where), *increment, *(set or {})]
+        # TS applies onUpdate defaults only through a given `set` (factory.ts:1494);
+        # update_many would add them for a bare increment, so pin them to the snapshot.
+        pinned = (
+            []
+            if set is not None
+            else [
+                field
+                for field, spec in self.schema.get(model, {}).items()
+                if spec.on_update is not None and field not in increment
+            ]
+        )
+        for _ in range(_MAX_ATTEMPTS):
+            row = await self.find_one(model, where)
+            if row is None:
                 return None
-            row = rows[0]
             update: dict[str, Any] = dict(set or {})
-            for field_name, delta in (increment or {}).items():
-                update[field_name] = (row.get(field_name) or 0) + delta
-            # re-apply `where` (incl. guard) pinned to the row id, like the TS fallback
-            # (v1.6.29 factory.ts incrementOne): a non-unique `where` updates one row only.
-            # ponytail: counter values are not in the guard, so concurrent increments can
-            # still be lost; TS 1.7 adds a value-guarded CAS with retries (WP5).
-            affected = await tx.update_many(model, [*where, Where("id", row["id"])], update)
-            if affected == 0:
-                return None
-            return {**row, **update}
+            for field_name, delta in increment.items():
+                current = row.get(field_name)
+                if current is None:
+                    current = 0
+                if isinstance(current, bool) or not isinstance(current, (int, float)):
+                    raise BetterAuthError(
+                        f'Adapter "{name}" must return finite numeric counter '
+                        "values or null for atomic increments."
+                    )
+                nxt = current + delta
+                if not math.isfinite(nxt) or (delta != 0 and nxt == current):
+                    raise BetterAuthError(
+                        f'Adapter "{name}" cannot represent the requested counter increment safely.'
+                    )
+                update[field_name] = nxt
+            if all(row.get(k, _MISSING) == v for k, v in update.items()):
+                return row  # a no-op takes effect at the read
+            guard = _snapshot_guard(name, row, [*fields, *pinned], where)
+            write = {**update, **{field: row.get(field) for field in pinned}}
+            if _changed_one(name, await self.update_many(model, guard, write)):
+                # a second read could observe another writer's result instead of ours
+                return {**row, **update}
+        raise BetterAuthError(
+            f'Adapter "{name}" could not complete an atomic increment due to '
+            "contention. Retry the operation or implement incrementOne natively."
+        )
 
-        return await self.transaction(_cb)
+
+_MAX_ATTEMPTS = 5
+_MISSING = object()
+
+
+def check_increment(increment: dict[str, Any] | None, set: dict[str, Any] | None) -> dict[str, Any]:
+    """TS v1.7.6 factory.ts:1466 and atomic-fallback.ts:mutationSchema."""
+    if not increment and not set:
+        raise BetterAuthError(
+            "incrementOne requires a non-empty `increment` or `set`; both were empty."
+        )
+    increment = increment or {}
+    for delta in increment.values():
+        if isinstance(delta, bool) or not isinstance(delta, (int, float)):
+            raise BetterAuthError(
+                "incrementOne requires finite increments and a set object for the atomic fallback."
+            )
+    return increment
+
+
+def _is_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool, datetime))
+
+
+def _snapshot_guard(
+    adapter: str, row: dict[str, Any], fields: list[str], where: list[Where]
+) -> list[Where]:
+    """``where`` plus the row id plus ``field == snapshot`` for every scalar field
+    (atomic-fallback.ts:117). An OR selector is dropped in favor of the id so the
+    guard never widens."""
+    if row.get("id") is None:
+        raise BetterAuthError(f'Adapter "{adapter}" must return the row id for atomic fallbacks.')
+    has_or = any(c.connector == "OR" for c in where)
+    guard = [Where("id", row["id"])] if has_or else [*where, Where("id", row["id"])]
+    for field in dict.fromkeys(fields):
+        if field == "id":
+            continue
+        value = row.get(field)
+        if not _is_scalar(value):
+            if has_or and any(c.field == field for c in where):
+                raise BetterAuthError(
+                    f'Adapter "{adapter}" must implement native atomic methods for OR '
+                    "predicates on structured values."
+                )
+            continue
+        guard.append(Where(field, value))
+    return guard
+
+
+def _changed_one(adapter: str, count: int) -> bool:
+    if count not in (0, 1):
+        raise BetterAuthError(
+            f'Adapter "{adapter}" must return an affected row count of 0 or 1 from an '
+            "atomic fallback."
+        )
+    return count == 1

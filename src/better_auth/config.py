@@ -180,6 +180,10 @@ class AdvancedDatabase:
     default_find_many_limit: int = 100
     #: how ``id`` is generated for rows created without one (see ``GenerateId``)
     generate_id: bool | str | Callable[[str], str] = True
+    #: ``advanced.database.validateSchema``: check on first use that the database holds
+    #: the tables and columns Better Auth writes, and fail requests when it does not.
+    #: ``None`` (default) and ``True`` enable it, ``False`` disables it.
+    validate_schema: bool | None = None
 
 
 @dataclass

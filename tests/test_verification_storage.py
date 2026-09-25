@@ -8,6 +8,7 @@ test_plugin_foundation.py and must stay byte-identical; this file exercises the 
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -153,12 +154,19 @@ class _NoGetAndDelete:
         self._d.pop(key, None)
 
 
-async def test_secondary_consume_non_atomic_fallback():
+async def test_secondary_consume_non_atomic_fallback(caplog, monkeypatch):
+    # TS v1.7.6 requires SecondaryStorage.getAndDelete (core/src/db/type.ts:330); the port
+    # keeps the 1.6 in-process fallback so such stores keep working, and warns once.
+    monkeypatch.setattr("better_auth.internal_adapter._warned_non_atomic_consume", False)
     ss = _NoGetAndDelete()
     ia = InternalAdapter(_adapter(), secondary_storage=ss)
     await _mk(ia, "otp:nf", "v")
-    assert _must(await ia.consume_verification_value("otp:nf"))["value"] == "v"
-    assert await ia.consume_verification_value("otp:nf") is None
+    await _mk(ia, "otp:nf2", "v")
+    with caplog.at_level(logging.WARNING, logger="better_auth"):
+        assert _must(await ia.consume_verification_value("otp:nf"))["value"] == "v"
+        assert await ia.consume_verification_value("otp:nf") is None
+        assert await ia.consume_verification_value("otp:nf2") is not None
+    assert sum("get_and_delete" in r.getMessage() for r in caplog.records) == 1
 
 
 async def test_secondary_consume_expired_returns_none():
@@ -222,15 +230,16 @@ async def test_db_consume_returns_none_when_a_concurrent_caller_won(monkeypatch)
     adapter = _adapter()
     ia = InternalAdapter(adapter)
     await _mk(ia, "otp:race", "v")
-    real_find_many = adapter.find_many
+    real_find_many = MemoryAdapter.find_many
 
-    async def find_then_lose_race(model: str, *args: Any, **kwargs: Any) -> Any:
-        rows = await real_find_many(model, *args, **kwargs)
-        if model == "verification":  # another process consumes right after our read
-            await adapter.delete_many("verification", [])
+    # Patched on the class: the consume runs on the transaction's own adapter.
+    async def find_then_lose_race(self: MemoryAdapter, model: str, *args: Any, **kwargs: Any):
+        rows = await real_find_many(self, model, *args, **kwargs)
+        if model == "verification":  # another caller consumes right after our read
+            await self.delete_many("verification", [])
         return rows
 
-    monkeypatch.setattr(adapter, "find_many", find_then_lose_race)
+    monkeypatch.setattr(MemoryAdapter, "find_many", find_then_lose_race)
     assert await ia.consume_verification_value("otp:race") is None
 
 
