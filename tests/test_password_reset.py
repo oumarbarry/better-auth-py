@@ -158,3 +158,50 @@ async def test_reset_token_goes_through_verification_storage():
             "/api/auth/reset-password", json={"newPassword": "brand-new-password", "token": token}
         )
         assert response.status_code == 200, response.text
+
+
+async def test_reset_link_with_unknown_token_redirects_with_invalid_token():
+    # password.ts:212-228: the landing route checks the token before forwarding it
+    auth, _sent = reset_auth()
+    async with make_client(auth) as client:
+        landing = await client.get("/api/auth/reset-password/nope?callbackURL=%2Freset%23form")
+    assert landing.status_code == 302
+    assert landing.headers["location"] == "http://testserver/reset?error=INVALID_TOKEN#form"
+
+
+async def test_reset_link_with_expired_token_redirects_with_invalid_token():
+    auth, sent = reset_auth(reset_password_token_expires_in=-1)
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await client.post("/api/auth/request-password-reset", json={"email": SIGNUP["email"]})
+        token = sent[0][2]
+        landing = await client.get(f"/api/auth/reset-password/{token}?callbackURL=%2Freset")
+    assert landing.headers["location"] == "http://testserver/reset?error=INVALID_TOKEN"
+
+
+async def test_reset_link_with_valid_token_forwards_it():
+    auth, sent = reset_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await client.post("/api/auth/request-password-reset", json={"email": SIGNUP["email"]})
+        token = sent[0][2]
+        landing = await client.get(f"/api/auth/reset-password/{token}?callbackURL=%2Freset%3Fa%3D1")
+    assert landing.headers["location"] == f"http://testserver/reset?a=1&token={token}"
+
+
+async def test_reset_password_for_a_deleted_user():
+    # password.ts:299-303 (v1.7.6): the user must still exist
+    from better_auth.adapters.base import Where
+
+    auth, sent = reset_auth()
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        await client.post("/api/auth/request-password-reset", json={"email": SIGNUP["email"]})
+        await auth.adapter.delete_many("user", [Where("id", data["user"]["id"])])
+        response = await client.post(
+            "/api/auth/reset-password",
+            json={"newPassword": "brand-new-password", "token": sent[0][2]},
+        )
+    assert response.status_code == 400
+    assert response.json() == {"code": "USER_NOT_FOUND", "message": "User not found"}
+    assert await auth.adapter.find_many("account", [Where("providerId", "credential")]) != []

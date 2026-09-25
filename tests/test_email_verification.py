@@ -79,6 +79,16 @@ async def test_invalid_token_redirects_with_error():
         assert "error=INVALID_TOKEN" in response.headers["location"]
 
 
+async def test_invalid_token_redirect_keeps_callback_fragment():
+    # email-verification.ts:293-301 (79904f0be): the error goes before the fragment
+    auth, _sent = verification_auth()
+    async with make_client(auth) as client:
+        response = await client.get(
+            "/api/auth/verify-email?token=bogus&callbackURL=%2Fwelcome%3Fa%3D1%23done"
+        )
+    assert response.headers["location"] == "http://testserver/welcome?a=1&error=INVALID_TOKEN#done"
+
+
 async def test_auto_sign_in_after_verification():
     auth, sent = verification_auth(auto_sign_in_after_verification=True)
     async with make_client(auth) as client:

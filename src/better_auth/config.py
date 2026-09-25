@@ -125,6 +125,12 @@ class AccountOptions:
     update_account_on_sign_in: bool = True
     #: XChaCha20-Poly1305 encrypt access/refresh tokens at rest (account.encryptOAuthTokens)
     encrypt_oauth_tokens: bool = False
+    #: Deprecated, port-only. Also accept the 1.0 account selection on /unlink-account,
+    #: /get-access-token, /refresh-token and /account-info: ``{providerId, accountId?}``
+    #: where ``accountId`` is the provider's account id. better-auth 1.7 takes only the
+    #: Better Auth account id (account.ts:547-632), which stays the default. Migrate
+    #: clients to the ``id`` from /list-accounts; this option will be removed.
+    legacy_account_selection: bool = False
 
 
 @dataclass

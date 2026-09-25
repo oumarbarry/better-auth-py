@@ -13,15 +13,17 @@ from __future__ import annotations
 import inspect
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .types import APIError, Ctx
 
 if TYPE_CHECKING:
     from .auth import BetterAuth
 
-# matchesOriginPattern relative-path allowlist (trusted-origins.ts:22).
-_RELATIVE_RE = re.compile(r"^/(?!/|\\|%2f|%5c)[\w\-.+/@]*(?:\?[\w\-.+/=&%@]*)?$", re.IGNORECASE)
+# trusted-origins.ts:4-6 (v1.7.6)
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_ENCODED_PATH_SEPARATOR = re.compile(r"%2[fF]|%5[cC]")
+_MALFORMED_PERCENT = re.compile(r"%(?![0-9a-fA-F]{2})")
 
 _FORM_CSRF_PREFIXES = ("/sign-in", "/sign-up")
 
@@ -66,10 +68,63 @@ def _wildcard_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(out))
 
 
+def _normalize_path(path: str) -> str:
+    """trusted-origins.ts:14-30: percent-decode, then resolve ``.``/``..`` segments."""
+    decoded = path
+    if not _MALFORMED_PERCENT.search(path):  # decodeURIComponent throws on these
+        try:
+            decoded = unquote(path, errors="strict")
+        except UnicodeDecodeError:
+            decoded = path
+    segments: list[str] = []
+    for segment in decoded.split("/"):
+        if segment == "..":
+            if segments:
+                segments.pop()
+        elif segment not in (".", ""):
+            segments.append(segment)
+    return "/" + "/".join(segments) if segments else ""
+
+
+def _parse_custom_scheme_origin(value: str) -> tuple[str, str, str] | None:
+    """``(scheme, authority, path)`` by plain string ops (trusted-origins.ts:45-73)."""
+    if _CONTROL_CHARACTER.search(value):
+        return None
+    scheme_end = value.find(":")
+    if scheme_end <= 0:
+        return None
+    scheme = value[:scheme_end].lower()
+    rest = value[scheme_end + 1 :]
+    authority = ""
+    if rest.startswith("//"):
+        rest = rest[2:]
+        end = re.search(r"[/?#]", rest)
+        authority, rest = (rest, "") if end is None else (rest[: end.start()], rest[end.start() :])
+    path_end = re.search(r"[?#]", rest)
+    path = _normalize_path(rest if path_end is None else rest[: path_end.start()])
+    return scheme, authority.lower(), path
+
+
+def _is_safe_relative_url(value: str) -> bool:
+    """trusted-origins.ts:80-105. The trailing ``new URL(value, origin).origin`` recheck
+    can only fail for ``//`` or ``\\`` prefixes and C0 controls, all rejected here first,
+    so a value that reaches the end is a same-origin path."""
+    if (
+        not value.startswith("/")
+        or value.startswith("//")
+        or "\\" in value
+        or _CONTROL_CHARACTER.search(value)
+    ):
+        return False
+    path_end = re.search(r"[?#]", value)
+    path = value if path_end is None else value[: path_end.start()]
+    return not _ENCODED_PATH_SEPARATOR.search(path)
+
+
 def matches_origin_pattern(url: str, pattern: str, allow_relative: bool = False) -> bool:
-    """Whether ``url`` matches an origin ``pattern`` (trusted-origins.ts)."""
+    """Whether ``url`` matches an origin ``pattern`` (trusted-origins.ts:116-165, v1.7.6)."""
     if url.startswith("/"):
-        return bool(allow_relative and _RELATIVE_RE.match(url))
+        return allow_relative and _is_safe_relative_url(url)
 
     if "*" in pattern or "?" in pattern:
         if "://" in pattern:
@@ -80,7 +135,17 @@ def matches_origin_pattern(url: str, pattern: str, allow_relative: bool = False)
     protocol = _get_protocol(url)
     if protocol in ("http:", "https:") or protocol is None:
         return pattern == _get_origin(url)
-    return url.startswith(pattern)
+    # Custom schemes: same scheme, the exact authority when the pattern pins one, and
+    # the pattern path or a path beneath it (trusted-origins.ts:143-164).
+    parsed = _parse_custom_scheme_origin(url)
+    parsed_pattern = _parse_custom_scheme_origin(pattern)
+    if parsed is None or parsed_pattern is None or parsed[0] != parsed_pattern[0]:
+        return False
+    if parsed_pattern[1] and parsed[1] != parsed_pattern[1]:
+        return False
+    if not parsed_pattern[2]:
+        return True
+    return parsed[2] == parsed_pattern[2] or parsed[2].startswith(parsed_pattern[2] + "/")
 
 
 async def resolve_trusted_origins(auth: BetterAuth, request) -> list[str]:
@@ -128,10 +193,31 @@ async def _validate_url(auth: BetterAuth, request, url, label: str) -> None:
         raise APIError(403, _URL_ERROR_CODES[label], f"Invalid {label}")
 
 
+def _request_origin(auth: BetterAuth, request) -> str | None:
+    """The origin the request was sent to (TS ``getBaseURL(undefined, basePath, request,
+    false, trustedProxyHeaders)`` then ``getOrigin``, utils/url.ts:142-188): trusted
+    ``x-forwarded-host`` + ``x-forwarded-proto`` first, else the request URL."""
+    from .base_url import validate_proxy_header
+
+    headers = request.headers
+    host = headers.get("x-forwarded-host")
+    proto = headers.get("x-forwarded-proto")
+    if (
+        host
+        and proto
+        and auth.trusted_proxy_headers
+        and validate_proxy_header(proto, "proto")
+        and validate_proxy_header(host, "host")
+    ):
+        return _get_origin(f"{proto}://{host}")
+    return _get_origin(request.url) if request.url else None
+
+
 async def _validate_origin(auth: BetterAuth, ctx: Ctx, force: bool = False) -> None:
     request = ctx.request
     headers = request.headers
-    origin_header = headers.get("origin") or headers.get("referer") or ""
+    origin = headers.get("origin")
+    origin_header = origin or headers.get("referer") or ""
     use_cookies = "cookie" in headers
 
     if auth.disable_csrf_check:
@@ -145,10 +231,16 @@ async def _validate_origin(auth: BetterAuth, ctx: Ctx, force: bool = False) -> N
         return
     if not (force or use_cookies):
         return
-    if not origin_header or origin_header == "null":
-        raise APIError(403, "MISSING_OR_NULL_ORIGIN", "Missing or null origin")
-    if not await is_trusted_origin(auth, request, origin_header, allow_relative=False):
-        raise APIError(403, "INVALID_ORIGIN", "Origin not trusted")
+    # origin-check.ts:253-269 (c8dcfa57e): a same-origin form sent with `no-referrer`
+    # carries `Origin: null`; Fetch Metadata lets the request target stand in for it.
+    inferred = None
+    if origin == "null" and headers.get("sec-fetch-site") == "same-origin":
+        inferred = _request_origin(auth, request)
+    origin_to_validate = inferred or origin_header
+    if not origin_to_validate or origin_to_validate == "null":
+        raise APIError(403, "MISSING_OR_NULL_ORIGIN", "Missing or null Origin")
+    if not await is_trusted_origin(auth, request, origin_to_validate, allow_relative=False):
+        raise APIError(403, "INVALID_ORIGIN", "Invalid origin")
 
 
 async def _validate_form_csrf(auth: BetterAuth, ctx: Ctx) -> None:
@@ -170,7 +262,7 @@ async def _validate_form_csrf(auth: BetterAuth, ctx: Ctx) -> None:
             raise APIError(
                 403,
                 "CROSS_SITE_NAVIGATION_LOGIN_BLOCKED",
-                "Cross-site navigation login blocked",
+                "Cross-site navigation login blocked. This request appears to be a CSRF attack.",
             )
         return await _validate_origin(auth, ctx, force=True)
 

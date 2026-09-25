@@ -328,7 +328,8 @@ class InternalAdapter:
         await self._queue_after(model, "update", updated, ctx)
         return updated
 
-    async def _delete(self, model: str, where: list[Where], ctx: Any = None) -> None:
+    async def _delete(self, model: str, where: list[Where], ctx: Any = None) -> bool:
+        """True when a row was found and deleted (TS ``deleteWithHooks`` non-null)."""
         entity = None
         try:
             rows = await self.adapter.find_many(model, where, limit=1)
@@ -338,12 +339,14 @@ class InternalAdapter:
         if entity is not None:
             _, aborted = await self._run_before(model, "delete", entity, ctx)
             if aborted:
-                return
+                return False
         await self.adapter.delete(model, where)
         if entity is not None:
             await self._queue_after(model, "delete", entity, ctx)
+        return entity is not None
 
-    async def _delete_many(self, model: str, where: list[Where], ctx: Any = None) -> int:
+    async def _delete_many(self, model: str, where: list[Where], ctx: Any = None) -> int | None:
+        """Rows deleted, or None when a before-hook aborted (TS ``deleteManyWithHooks``)."""
         try:
             entities = await self.adapter.find_many(model, where)
         except Exception:
@@ -351,7 +354,7 @@ class InternalAdapter:
         for entity in entities:
             _, aborted = await self._run_before(model, "delete", entity, ctx)
             if aborted:
-                return 0
+                return None
         deleted = await self.adapter.delete_many(model, where)
         for entity in entities:
             await self._queue_after(model, "delete", entity, ctx)
@@ -379,7 +382,7 @@ class InternalAdapter:
         await self._delete(model, where, ctx)
 
     async def delete_many(self, model: str, where: list[Where], *, ctx: Any = None) -> int:
-        return await self._delete_many(model, where, ctx)
+        return await self._delete_many(model, where, ctx) or 0
 
     async def transaction(self, callback: Callable[[InternalAdapter], Awaitable[Any]]) -> Any:
         """Run ``callback`` in a DB transaction, flushing after-hooks once it commits."""
@@ -429,15 +432,16 @@ class InternalAdapter:
         return await self._update("user", [Where("id", user_id)], data, custom_fn=None)
 
     async def delete_user(self, user_id: str) -> None:
-        # TS a03e4c186 (db/internal-adapter.ts:321-326): deleting a user owns its whole
-        # session cleanup, KV side included — callers no longer pre-call
-        # delete_user_sessions. Note the KV sweep is unconditional here: unlike
-        # delete_user_sessions, a deleted user keeps no sessions anywhere.
-        await self._delete_secondary_storage_sessions(user_id)
+        # TS a03e4c186 + fd49908b4 (db/internal-adapter.ts:427-463, v1.7.6): deleting a
+        # user owns its whole session cleanup, KV side included. The KV sessions seen
+        # before the delete go only once the user row is actually gone, so a vetoing
+        # before-hook keeps them and a session created by a later hook survives.
+        references = await self._active_session_references(user_id)
         if self._database_stores_sessions:
             await self._delete_many("session", [Where("userId", user_id)])
         await self._delete_many("account", [Where("userId", user_id)])
-        await self._delete("user", [Where("id", user_id)])
+        if await self._delete("user", [Where("id", user_id)]):
+            await self._queue_cached_session_deletion(user_id, references)
 
     async def list_users(
         self,
@@ -1053,22 +1057,56 @@ class InternalAdapter:
         """TS ``databaseStoresSessions`` (db/internal-adapter.ts:50-51)."""
         return not self.secondary_storage or self.store_session_in_database
 
-    async def _delete_secondary_storage_sessions(self, user_id: str) -> None:
-        """TS ``deleteSecondaryStorageSessions`` (db/internal-adapter.ts:123-137): drop
-        every KV session blob a user owns, then the active-sessions list itself."""
+    async def delete_user_sessions(self, user_id: str) -> None:
+        # fd49908b4 (db/internal-adapter.ts:943-973): same deferred KV cleanup
+        references = await self._active_session_references(user_id)
+        if not self._database_stores_sessions:
+            await self._queue_cached_session_deletion(user_id, references)
+            return
+        if await self._delete_many("session", [Where("userId", user_id)]) is not None:
+            await self._queue_cached_session_deletion(user_id, references)
+
+    async def _active_session_references(self, user_id: str) -> list[dict[str, Any]]:
+        """TS ``getActiveSessionReferences`` (db/internal-adapter.ts:140-148)."""
+        if self.secondary_storage is None:
+            return []
+        raw = await self.secondary_storage.get(f"active-sessions-{user_id}")
+        return (_safe_json(raw) or []) if raw else []
+
+    async def _queue_cached_session_deletion(
+        self, user_id: str, references: list[dict[str, Any]]
+    ) -> None:
+        """TS ``queueCachedUserSessionDeletion`` + ``deleteCachedUserSessions``
+        (db/internal-adapter.ts:150-202): after the transaction commits, drop the captured
+        KV sessions and rewrite the active list without them."""
         ss = self.secondary_storage
         if ss is None:
             return
-        list_key = f"active-sessions-{user_id}"
-        raw = await ss.get(list_key)
-        sessions = _safe_json(raw) if raw else []
-        if sessions is None:  # unparseable list: TS `if (!sessions) return` — keep the key
-            return
-        for session in sessions:
-            await ss.delete(session["token"])
-        await ss.delete(list_key)
 
-    async def delete_user_sessions(self, user_id: str) -> None:
-        await self._delete_secondary_storage_sessions(user_id)
-        if self._database_stores_sessions:
-            await self._delete_many("session", [Where("userId", user_id)])
+        async def run() -> None:
+            try:
+                deleted = {ref["token"] for ref in references}
+                for token in deleted:
+                    await ss.delete(token)
+                list_key = f"active-sessions-{user_id}"
+                now_ms = _now_ms()
+                remaining = sorted(
+                    (
+                        ref
+                        for ref in await self._active_session_references(user_id)
+                        if ref["expiresAt"] > now_ms and ref["token"] not in deleted
+                    ),
+                    key=lambda ref: ref["expiresAt"],
+                )
+                if remaining:
+                    furthest = remaining[-1]["expiresAt"]
+                    await ss.set(list_key, _dumps(remaining), _ttl_seconds(furthest, now_ms))
+                else:
+                    await ss.delete(list_key)
+            except Exception:
+                logger.exception("Failed to delete committed user sessions from secondary storage")
+
+        if self._after_queue is not None:
+            self._after_queue.append(run)
+        else:
+            await run()

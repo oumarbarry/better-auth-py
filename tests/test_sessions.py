@@ -291,3 +291,55 @@ async def test_tampered_cookie_is_rejected(client):
     client.cookies.set("better-auth.session_token", "forged-token.AAAA", domain="testserver")
     response = await client.get("/api/auth/get-session")
     assert response.json() is None
+
+
+# --- fd49908b4: cached sessions are cleaned only once the deletion happened ------------
+
+
+def _kv_internal(database_hooks=None):
+    from better_auth.adapters.memory import MemoryAdapter
+    from better_auth.internal_adapter import InternalAdapter
+    from better_auth.schema import CORE_SCHEMA
+    from better_auth.secondary_storage import MemorySecondaryStorage
+
+    adapter = MemoryAdapter()
+    adapter.init(CORE_SCHEMA)
+    ss = MemorySecondaryStorage()
+    return InternalAdapter(adapter, secondary_storage=ss, database_hooks=database_hooks), ss
+
+
+async def _kv_user_with_session(ia):
+    user = await ia.create_user({"name": "Ada", "email": "ada@x.com"}, force_allow_id=True)
+    assert user is not None
+    session = await ia.create_session(user["id"])
+    assert session is not None
+    return user, session
+
+
+async def test_aborted_user_delete_keeps_cached_sessions():
+    async def refuse(_user, _ctx):
+        return False
+
+    ia, ss = _kv_internal({"user": {"delete": {"before": refuse}}})
+    user, session = await _kv_user_with_session(ia)
+    await ia.delete_user(user["id"])
+    assert await ss.get(session["token"]) is not None
+    assert await ss.get(f"active-sessions-{user['id']}") is not None
+
+
+async def test_user_delete_keeps_a_replacement_session():
+    # internal-adapter.ts:150-181: only the sessions captured before the delete go
+    created: list[dict] = []
+
+    ia, ss = _kv_internal()
+
+    async def replace(_user, _ctx):
+        created.append(await ia.create_session(_user["id"]) or {})
+
+    ia.hooks = [{"user": {"delete": {"after": replace}}}]
+    user, session = await _kv_user_with_session(ia)
+    await ia.delete_user(user["id"])
+    assert await ss.get(session["token"]) is None
+    assert await ss.get(created[0]["token"]) is not None
+    listed = await ss.get(f"active-sessions-{user['id']}")
+    assert listed is not None and created[0]["token"] in listed

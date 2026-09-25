@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
 import re
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import jwt as pyjwt
 
 from .adapters.base import Where
+from .base_url import append_query_params
 from .config import UserOptions
 from .crypto import (
     decode_email_verification_token,
@@ -27,12 +30,26 @@ from .oauth import (
     refresh_token,
     sign_in_social,
 )
-from .oauth.flow import _valid_access_token, parse_stored_scopes
-from .session import clear_cookie, create_session, get_session, refresh_session_cookie, utcnow
+from .oauth.flow import (
+    _valid_access_token,
+    account_selection,
+    parse_stored_scopes,
+    resolve_user_account,
+)
+from .session import (
+    create_session,
+    delete_session_cookies,
+    get_session,
+    read_token,
+    set_session_cookies,
+    utcnow,
+)
 from .types import APIError, AuthResponse, Ctx
 
 if TYPE_CHECKING:
     from .auth import BetterAuth
+
+logger = logging.getLogger("better_auth")
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -68,8 +85,15 @@ def _require_email_password_enabled(ctx: Ctx) -> None:
 
 
 async def _credential_account(ctx: Ctx, user_id: str) -> dict[str, Any] | None:
+    """``findCredentialAccount`` (internal-adapter.ts:1182-1191, v1.7.6): the credential
+    account is keyed by the user id, so a row with another ``accountId`` is not it."""
     return await ctx.adapter.find_one(
-        "account", [Where("userId", user_id), Where("providerId", "credential")]
+        "account",
+        [
+            Where("userId", user_id),
+            Where("providerId", "credential"),
+            Where("accountId", user_id),
+        ],
     )
 
 
@@ -153,7 +177,21 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
         "createdAt": now,
         "updatedAt": now,
     }
-    await ctx.internal.create("user", user, ctx=ctx)
+    try:
+        created = await ctx.internal.create("user", user, ctx=ctx)
+    except APIError as error:
+        # sign-up.ts:350-357: a gate rejection (403) under generic-duplicate mode gets
+        # the same opaque success as an existing email, closing an enumeration channel
+        if error.status == 403 and should_return_generic_duplicate:
+            return AuthResponse(
+                body={
+                    "token": None,
+                    "user": ctx.auth.parse_user_output({**user, "id": generate_id()}),
+                }
+            )
+        raise
+    if created is None:  # sign-up.ts:343-348
+        raise APIError(400, "FAILED_TO_CREATE_USER", "Failed to create user")
     await ctx.internal.create(
         "account",
         {
@@ -275,14 +313,76 @@ async def get_session_post(ctx: Ctx) -> AuthResponse:
     return await get_session_handler(ctx, is_post_request=True)
 
 
+async def _provider_logout_url(ctx: Ctx, user_id: str, body: dict[str, Any]) -> str | None:
+    """sign-out.ts:101-152 (430c89549): the end-session URL of the most recently updated
+    linked account whose provider offers RP-initiated logout.
+
+    A provider opts in with ``async create_end_session_url(*, id_token,
+    post_logout_redirect_uri, state) -> str | None`` (TS ``createEndSessionURL``).
+    """
+    accounts = await ctx.adapter.find_many("account", [Where("userId", user_id)])
+    providers = ctx.auth.social_providers
+    logout_accounts = sorted(
+        (
+            a
+            for a in accounts
+            if callable(getattr(providers.get(a["providerId"]), "create_end_session_url", None))
+        ),
+        key=lambda a: a["updatedAt"],
+        reverse=True,
+    )
+    callback_url = body.get("callbackURL")
+    post_logout = _absolute(ctx, callback_url) if callback_url else None
+    seen: set[str] = set()
+    for account in logout_accounts:
+        if account["providerId"] in seen:
+            continue
+        seen.add(account["providerId"])
+        create = providers[account["providerId"]].create_end_session_url  # ty: ignore[unresolved-attribute]
+        try:
+            url = create(
+                id_token=account.get("idToken"),
+                post_logout_redirect_uri=post_logout,
+                state=body.get("state"),
+            )
+            if inspect.isawaitable(url):
+                url = await url
+        except Exception:
+            logger.exception('Failed to create logout URL for provider "%s"', account["providerId"])
+            continue
+        if url:
+            return str(url)
+    return None
+
+
 async def sign_out(ctx: Ctx) -> AuthResponse:
-    result = await ctx.get_session()
-    if result is None:
-        raise APIError(400, "FAILED_TO_GET_SESSION", "Failed to get session")
-    await ctx.adapter.delete_many("session", [Where("token", result["session"]["token"])])
+    """POST /sign-out (sign-out.ts:77-166): drop the session when there is one, expire
+    the cookies, and hand back the provider logout URL when a linked provider has one."""
+    body = ctx.body()
+    token = read_token(ctx.auth, ctx.request)
+    current = None
+    if token:
+        try:
+            current = await ctx.adapter.find_one("session", [Where("token", token)])
+        except Exception:
+            logger.exception("Failed to read session from database")
+        try:
+            await ctx.internal.delete_many("session", [Where("token", token)], ctx=ctx)
+        except Exception:
+            logger.exception("Failed to delete session from database")
+    logout_url = None
+    if current is not None:
+        try:
+            logout_url = await _provider_logout_url(ctx, current["userId"], body)
+        except Exception:
+            logger.exception("Failed to create provider logout URL")
     response = AuthResponse(body={"success": True})
-    response.set_cookie(clear_cookie(ctx.auth))
-    response.set_cookie(clear_cookie(ctx.auth, "dont_remember"))
+    if logout_url:
+        redirect = not body.get("disableRedirect")
+        if redirect:
+            response.headers.append(("location", logout_url))
+        response.body = {"success": True, "url": logout_url, "redirect": redirect}
+    _clear_session(response, ctx)
     return response
 
 
@@ -346,7 +446,8 @@ async def update_session(ctx: Ctx) -> AuthResponse:
     )
     new_session = updated or {**result["session"], **updates}
     response = AuthResponse(body={"session": ctx.auth.parse_session_output(new_session)})
-    response.set_cookie(refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"]))
+    for cookie in await set_session_cookies(ctx.auth, ctx.request, new_session, result["user"]):
+        response.set_cookie(cookie)
     return response
 
 
@@ -373,9 +474,13 @@ async def update_user(ctx: Ctx) -> AuthResponse:
     if not updates:
         raise APIError(400, "BAD_REQUEST", "No fields to update")
     updates["updatedAt"] = utcnow()
-    await ctx.internal.update("user", [Where("id", result["user"]["id"])], updates, ctx=ctx)
+    updated = await ctx.internal.update(
+        "user", [Where("id", result["user"]["id"])], updates, ctx=ctx
+    )
     response = AuthResponse(body={"status": True})
-    response.set_cookie(refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"]))
+    user = updated or {**result["user"], **updates}
+    for cookie in await set_session_cookies(ctx.auth, ctx.request, result["session"], user):
+        response.set_cookie(cookie)
     return response
 
 
@@ -424,8 +529,17 @@ async def set_password(ctx: Ctx) -> AuthResponse:
     validate_password(ctx, body["newPassword"])
     account = await _credential_account(ctx, result["user"]["id"])
     if account is not None and account.get("password"):
-        raise APIError(400, "USER_ALREADY_HAS_PASSWORD", "User already has a password")
+        raise APIError(400, "PASSWORD_ALREADY_SET", "User already has a password set")
     now = utcnow()
+    password_hash = await ctx.auth.hash_password_checked(body["newPassword"], ctx.request.path)
+    if account is not None:  # update-user.ts:343-350: fill the passwordless credential row
+        await ctx.internal.update(
+            "account",
+            [Where("id", account["id"])],
+            {"password": password_hash, "updatedAt": now},
+            ctx=ctx,
+        )
+        return AuthResponse(body={"status": True})
     await ctx.internal.create(
         "account",
         {
@@ -433,7 +547,7 @@ async def set_password(ctx: Ctx) -> AuthResponse:
             "accountId": result["user"]["id"],
             "providerId": "credential",
             "userId": result["user"]["id"],
-            "password": await ctx.auth.hash_password_checked(body["newPassword"], ctx.request.path),
+            "password": password_hash,
             "createdAt": now,
             "updatedAt": now,
         },
@@ -495,8 +609,19 @@ async def request_password_reset(ctx: Ctx) -> AuthResponse:
     return AuthResponse(body={"status": True})
 
 
+def _set_query_params(url: str, params: dict[str, str]) -> str:
+    """``url.searchParams.set`` for each param: replaces a same-named key, keeps the
+    fragment (password.ts:14-37 ``redirectError``/``redirectCallback``)."""
+    parts = urlsplit(url)
+    pairs = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in params]
+    query = urlencode([*pairs, *params.items()])
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
 async def reset_password_redirect(ctx: Ctx) -> AuthResponse:
-    """GET /reset-password/{token} — email-link landing, forwards the token."""
+    """GET /reset-password/{token}: the email-link landing. Forwards a live token, or
+    redirects with ``error=INVALID_TOKEN`` when it is unknown or expired (password.ts:212-228).
+    """
     token = ctx.params["token"]
     callback_url = ctx.request.query.get("callbackURL")
     if not callback_url:
@@ -507,8 +632,10 @@ async def reset_password_redirect(ctx: Ctx) -> AuthResponse:
     target = (
         callback_url if callback_url.startswith("http") else f"{ctx.auth.base_url}{callback_url}"
     )
-    separator = "&" if "?" in target else "?"
-    return AuthResponse(redirect_to=f"{target}{separator}token={token}")
+    verification = await ctx.internal.find_verification_value(f"reset-password:{token}")
+    if verification is None or verification["expiresAt"] < utcnow():
+        return AuthResponse(redirect_to=_set_query_params(target, {"error": "INVALID_TOKEN"}))
+    return AuthResponse(redirect_to=_set_query_params(target, {"token": token}))
 
 
 async def reset_password(ctx: Ctx) -> AuthResponse:
@@ -527,6 +654,10 @@ async def reset_password(ctx: Ctx) -> AuthResponse:
         raise APIError(400, "INVALID_TOKEN", "Invalid token")
 
     user_id = row["value"]
+    # password.ts:299-303 (v1.7.6): the user must still exist
+    reset_user = await ctx.adapter.find_one("user", [Where("id", user_id)])
+    if reset_user is None:
+        raise APIError(400, "USER_NOT_FOUND", "User not found")
     now = utcnow()
     password_hash = await ctx.auth.hash_password_checked(body["newPassword"], ctx.request.path)
     account = await _credential_account(ctx, user_id)
@@ -535,7 +666,7 @@ async def reset_password(ctx: Ctx) -> AuthResponse:
             "account",
             {
                 "id": generate_id(),
-                "accountId": user_id,
+                "accountId": reset_user["id"],
                 "providerId": "credential",
                 "userId": user_id,
                 "password": password_hash,
@@ -551,9 +682,7 @@ async def reset_password(ctx: Ctx) -> AuthResponse:
         )
     on_password_reset = ctx.auth.email_and_password.on_password_reset
     if on_password_reset is not None:
-        reset_user = await ctx.adapter.find_one("user", [Where("id", user_id)])
-        if reset_user is not None:
-            await on_password_reset({"user": reset_user}, ctx.request)
+        await on_password_reset({"user": reset_user}, ctx.request)
     if ctx.auth.email_and_password.revoke_sessions_on_password_reset:
         await ctx.adapter.delete_many("session", [Where("userId", user_id)])
     return AuthResponse(body={"status": True})
@@ -596,10 +725,9 @@ async def verify_email(ctx: Ctx) -> AuthResponse:
         ctx.auth.ensure_trusted_url(callback_url)
 
     def fail(code: str) -> AuthResponse:
-        if callback_url:
-            target = _absolute(ctx, callback_url)
-            separator = "&" if "?" in target else "?"
-            return AuthResponse(redirect_to=f"{target}{separator}error={code}")
+        if callback_url:  # email-verification.ts:293-301
+            target = append_query_params(_absolute(ctx, callback_url), {"error": code})
+            return AuthResponse(redirect_to=target)
         raise APIError(401, code, code.replace("_", " ").capitalize())
 
     def succeed(user: dict[str, Any] | None, cookies: list[str]) -> AuthResponse:
@@ -669,7 +797,7 @@ async def _verify_change_email(
         # refresh the existing session cookie, or mint a fresh session when the
         # link is opened without one (TS creates a session in that case)
         if session is not None:
-            return [refresh_session_cookie(ctx.auth, ctx.request, session["session"]["token"])]
+            return await set_session_cookies(ctx.auth, ctx.request, session["session"], target_user)
         _s, cookies = await create_session(ctx.auth, target_user["id"], ctx.request, ctx=ctx)
         return cookies
 
@@ -767,13 +895,15 @@ async def change_email(ctx: Ctx) -> AuthResponse:
         return AuthResponse(body={"status": True})
 
     if can_update_without_verification:
-        await ctx.adapter.update(
+        updated = await ctx.adapter.update(
             "user", [Where("id", user["id"])], {"email": new_email, "updatedAt": utcnow()}
         )
         response = AuthResponse(body={"status": True})
-        response.set_cookie(
-            refresh_session_cookie(ctx.auth, ctx.request, result["session"]["token"])
+        cookies = await set_session_cookies(
+            ctx.auth, ctx.request, result["session"], updated or {**user, "email": new_email}
         )
+        for cookie in cookies:
+            response.set_cookie(cookie)
         if can_send_verification:
             token = sign_email_verification_token(
                 ctx.auth.secret, new_email, expires_in=cfg.expires_in
@@ -836,8 +966,8 @@ async def _consume_delete_token(ctx: Ctx, user: dict[str, Any], token: str | Non
 
 
 def _clear_session(response: AuthResponse, ctx: Ctx) -> None:
-    response.set_cookie(clear_cookie(ctx.auth))
-    response.set_cookie(clear_cookie(ctx.auth, "dont_remember"))
+    for cookie in delete_session_cookies(ctx.auth):
+        response.set_cookie(cookie)
 
 
 async def delete_user(ctx: Ctx) -> AuthResponse:
@@ -937,11 +1067,40 @@ async def list_accounts(ctx: Ctx) -> AuthResponse:
     return AuthResponse(body=sanitized)
 
 
-async def unlink_account(ctx: Ctx) -> AuthResponse:
+async def _require_fresh_session(ctx: Ctx) -> dict[str, Any]:
+    """TS ``freshSessionMiddleware`` (session.ts:598-616)."""
     result = await ctx.require_session()
+    fresh_age = ctx.auth.session_options.fresh_age
+    if fresh_age != 0:
+        age = (utcnow() - result["session"]["createdAt"]).total_seconds()
+        if age >= fresh_age:
+            raise APIError(403, "SESSION_NOT_FRESH", "Session is not fresh")
+    return result
+
+
+async def unlink_account(ctx: Ctx) -> AuthResponse:
+    """POST /unlink-account (account.ts:453-509, v1.7.6): ``accountId`` is the Better
+    Auth account id; the last account is refused before any lookup."""
+    result = await _require_fresh_session(ctx)
     body = ctx.body()
-    require_fields(body, "providerId")
+    if ctx.auth.account.legacy_account_selection and "providerId" in body:
+        return await _legacy_unlink_account(ctx, result["user"]["id"], body)
+    if set(body) != {"accountId"} or not isinstance(body["accountId"], str):
+        raise APIError(400, "INVALID_BODY", "'accountId' is required")
     accounts = await ctx.adapter.find_many("account", [Where("userId", result["user"]["id"])])
+    if len(accounts) == 1 and not ctx.auth.account.account_linking.allow_unlinking_all:
+        raise APIError(400, "FAILED_TO_UNLINK_LAST_ACCOUNT", "You can't unlink your last account")
+    account = next((a for a in accounts if a["id"] == body["accountId"]), None)
+    if account is None:
+        raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
+    await ctx.internal.delete_one("account", [Where("id", account["id"])], ctx=ctx)
+    return AuthResponse(body={"status": True})
+
+
+async def _legacy_unlink_account(ctx: Ctx, user_id: str, body: dict[str, Any]) -> AuthResponse:
+    """The 1.0 port's unlink (``account.legacy_account_selection``): every account of
+    ``providerId``, narrowed by the provider's ``accountId`` when given."""
+    accounts = await ctx.adapter.find_many("account", [Where("userId", user_id)])
     matching = [
         account
         for account in accounts
@@ -954,44 +1113,56 @@ async def unlink_account(ctx: Ctx) -> AuthResponse:
     if not allow_unlinking_all and len(accounts) - len(matching) < 1:
         raise APIError(400, "FAILED_TO_UNLINK_LAST_ACCOUNT", "You can't unlink your last account")
     for account in matching:
-        await ctx.adapter.delete_many("account", [Where("id", account["id"])])
+        await ctx.internal.delete_one("account", [Where("id", account["id"])], ctx=ctx)
     return AuthResponse(body={"status": True})
+
+
+async def _legacy_account_info_account(
+    ctx: Ctx, user_id: str, query: dict[str, str]
+) -> dict[str, Any]:
+    """The 1.0 port's /account-info lookup (``account.legacy_account_selection``): the
+    Better Auth id first when no ``providerId`` is given, else the provider's
+    ``accountId`` optionally narrowed by ``providerId``."""
+    accounts = await ctx.adapter.find_many("account", [Where("userId", user_id)])
+    account_id = query.get("accountId")
+    provider_id = query.get("providerId")
+    if provider_id is None:
+        by_row = next((a for a in accounts if a["id"] == account_id), None)
+        if by_row is not None:
+            return by_row
+    matching = [
+        acc
+        for acc in accounts
+        if account_id
+        and acc["accountId"] == account_id
+        and (not provider_id or acc["providerId"] == provider_id)
+    ]
+    if len(matching) > 1:
+        raise APIError(
+            400,
+            "AMBIGUOUS_ACCOUNT",
+            "Multiple accounts share this account ID. Pass a providerId to disambiguate.",
+        )
+    if not matching:
+        raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
+    return matching[0]
 
 
 async def account_info(ctx: Ctx) -> AuthResponse:
     """GET /account-info — the provider's user-info for one linked account (account.ts).
 
-    Returns ``{user, data}`` (the provider `getUserInfo` shape, with ``data`` the raw
-    provider profile). Refreshes the access token first if it's near expiry (shared
-    ``getValidAccessToken`` path). Every HTTP caller needs a valid session; the account
-    must belong to the session user.
+    Returns ``{user, data, account}`` (the provider `getUserInfo` shape, with ``data``
+    the raw provider profile, plus the selected account). The account is picked by its
+    Better Auth id (``accountId``). Refreshes the access token first if it's near expiry
+    (shared ``getValidAccessToken`` path). Every HTTP caller needs a valid session; the
+    account must belong to the session user.
     """
     result = await ctx.require_session()
-    user_id = result["user"]["id"]
-    query = ctx.request.query
-    provided_account_id = query.get("accountId")
-    provided_provider_id = query.get("providerId")
-
-    account: dict[str, Any] | None = None
-    if provided_account_id:
-        accounts = await ctx.adapter.find_many("account", [Where("userId", user_id)])
-        matching = [
-            acc
-            for acc in accounts
-            if acc["accountId"] == provided_account_id
-            and (not provided_provider_id or acc["providerId"] == provided_provider_id)
-        ]
-        if len(matching) > 1:
-            raise APIError(
-                400,
-                "AMBIGUOUS_ACCOUNT",
-                "Multiple accounts share this account ID. Pass a providerId to disambiguate.",
-            )
-        account = matching[0] if matching else None
-    # else: account-cookie lookup (storeAccountCookie) is unimplemented → no match
-
-    if account is None:
-        raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
+    query = dict(ctx.request.query)
+    if ctx.auth.account.legacy_account_selection:
+        account = await _legacy_account_info_account(ctx, result["user"]["id"], query)
+    else:
+        account = await resolve_user_account(ctx, result["user"]["id"], account_selection(query))
 
     provider = ctx.auth.social_providers.get(account["providerId"])
     if provider is None:
@@ -1011,6 +1182,8 @@ async def account_info(ctx: Ctx) -> AuthResponse:
         scope=account.get("scope"),
     )
     info = await provider.fetch_user(tokens, ctx.auth.http)
+    if info is None:
+        raise APIError(401, "FAILED_TO_GET_USER_INFO", "Failed to get user info")
     return AuthResponse(
         body={
             "user": {
@@ -1021,6 +1194,12 @@ async def account_info(ctx: Ctx) -> AuthResponse:
                 "emailVerified": info.email_verified,
             },
             "data": info.raw,
+            # account.ts:1054-1061 (v1.7.6): which account answered
+            "account": {
+                "id": account["id"],
+                "providerId": account["providerId"],
+                "accountId": account["accountId"],
+            },
         }
     )
 
@@ -1046,16 +1225,16 @@ _ERROR_PAGE = """<!DOCTYPE html>
 async def error_page(ctx: Ctx) -> AuthResponse:
     query = ctx.request.query
     raw_error = query.get("error", "Unknown error")
-    # onAPIError.errorURL: hand the error off to the app's own page instead of rendering.
+    # onAPIError.errorURL: hand the error off to the app's own page instead of rendering
+    # (error.ts:396-428): a safe code, the description only when present, both before
+    # any fragment of the configured URL.
     error_url = ctx.auth.on_api_error.error_url
     if error_url:
-        separator = "&" if "?" in error_url else "?"
-        description = query.get("error_description", "")
-        target = (
-            f"{error_url}{separator}error={quote(raw_error, safe='')}"
-            f"&error_description={quote(description, safe='')}"
-        )
-        return AuthResponse(redirect_to=target)
+        safe_code = raw_error if re.fullmatch(r"[\'A-Za-z0-9_-]+", raw_error) else "UNKNOWN"
+        params = {"error": safe_code}
+        if query.get("error_description"):
+            params["error_description"] = query["error_description"]
+        return AuthResponse(redirect_to=append_query_params(error_url, params))
     error = re.sub(r"[^a-zA-Z0-9_\- .]", "", raw_error)
     return AuthResponse(body=_ERROR_PAGE.format(error=error), media_type="text/html")
 

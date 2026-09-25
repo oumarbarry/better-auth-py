@@ -61,6 +61,9 @@ class AuthRequest:
     query: dict[str, str] = field(default_factory=dict)
     body: bytes = b""
     client_ip: str | None = None
+    #: absolute request URL (scheme, host, path, query) when the integration knows it;
+    #: TS reads ``request.url`` for the same-origin inference in the origin check
+    url: str | None = None
 
     def cookies(self) -> dict[str, str]:
         raw = self.headers.get("cookie", "")
