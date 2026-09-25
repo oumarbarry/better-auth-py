@@ -178,7 +178,8 @@ async def redirect_with_authorization_code(
             "query": query,
             "userId": user_id,
             "sessionId": session_id,
-            "referenceId": reference_id,
+            # Omitted when unset, like TS JSON.stringify: the TS verification schema rejects null.
+            **({"referenceId": reference_id} if reference_id is not None else {}),
             "authTime": auth_time,
         },
         separators=(",", ":"),
@@ -307,7 +308,7 @@ async def authorize_endpoint(
         query["scope"] = " ".join(requested_scopes)
 
     # 7. PKCE enforcement.
-    reason = is_pkce_required(client, requested_scopes)
+    reason = is_pkce_required(client, requested_scopes, query.get("nonce"))
     if reason and not (query.get("code_challenge") and query.get("code_challenge_method")):
         return handle_redirect(
             ctx,

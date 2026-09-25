@@ -52,6 +52,8 @@ async def seed(auth, *, client_id="client-1", secret=SECRET, public=False, **fie
         "scopes": ["openid", "profile", "email", "offline_access"],
         "grantTypes": ["authorization_code", "client_credentials", "refresh_token"],
         "public": public,
+        # TS 1.7 binds a client to its registered authentication method (utils/index.ts:737).
+        "tokenEndpointAuthMethod": "none" if public else "client_secret_post",
         "disabled": False,
         "requirePKCE": False,
         "skipConsent": True,
@@ -280,7 +282,7 @@ async def test_custom_id_token_claims_override_acr_not_pinned():
 
 async def test_client_credentials_success_no_refresh_no_id_token():
     auth = provider_auth()
-    await seed(auth, scopes=["read", "write"])
+    await seed(auth, scopes=["read", "write"], clientCredentialsScopes=["read", "write"])
     async with make_client(auth) as c:
         body = (
             await token(
@@ -299,7 +301,7 @@ async def test_client_credentials_success_no_refresh_no_id_token():
 
 async def test_client_credentials_rejects_oidc_scopes():
     auth = provider_auth()
-    await seed(auth, scopes=["openid", "read"])
+    await seed(auth, scopes=["openid", "read"], clientCredentialsScopes=["read"])
     async with make_client(auth) as c:
         res = await token(
             c,
@@ -312,9 +314,10 @@ async def test_client_credentials_rejects_oidc_scopes():
         assert res.json()["error"] == "invalid_scope"
 
 
-async def test_client_credentials_defaults_to_client_scopes():
+async def test_client_credentials_defaults_to_client_credentials_scopes():
+    # TS token.ts:1762: the machine-scope ceiling is also the omitted-scope default.
     auth = provider_auth()
-    await seed(auth, scopes=["read", "write"])
+    await seed(auth, scopes=["openid"], clientCredentialsScopes=["read", "write"])
     async with make_client(auth) as c:
         body = (
             await token(
@@ -447,7 +450,7 @@ async def test_redirect_uri_mismatch_rejected():
             redirect_uri="https://app.example.com/other",
         )
         assert res.status_code == 400
-        assert res.json()["error"] == "invalid_request"
+        assert res.json()["error"] == "invalid_grant"  # TS token.ts:1428 (RFC 6749 §5.2)
 
 
 async def test_wrong_client_secret_rejected():
@@ -464,7 +467,8 @@ async def test_wrong_client_secret_rejected():
             code=code,
             redirect_uri=CB,
         )
-        assert res.status_code == 401
+        # client_secret_post failure: 400 without a challenge (TS utils/index.ts:688).
+        assert res.status_code == 400
         assert res.json()["error"] == "invalid_client"
 
 
@@ -628,8 +632,8 @@ async def test_concurrent_code_redemption_one_winner():
         )
         r1, r2 = await asyncio.gather(token(c, **form), token(c, **form))
         codes = sorted([r1.status_code, r2.status_code])
-        # loser: consumed code -> invalid_grant (TS UNAUTHORIZED = 401)
-        assert codes == [200, 401], (r1.text, r2.text)
+        # loser: consumed code -> invalid_grant (TS token.ts:1384, BAD_REQUEST)
+        assert codes == [200, 400], (r1.text, r2.text)
 
 
 async def test_concurrent_refresh_rotation_one_winner():
@@ -805,7 +809,7 @@ async def test_introspect_unknown_token_inactive():
         assert body["active"] is False
 
 
-async def test_introspect_sid_cleared_on_dead_session():
+async def test_introspect_inactive_on_dead_session():
     auth = provider_auth()
     await seed(auth, scopes=["openid"])
     async with make_client(auth) as c:
@@ -823,8 +827,8 @@ async def test_introspect_sid_cleared_on_dead_session():
         ).json()["access_token"]
         await auth.adapter.delete_many("session", [])  # kill all sessions
         body = (await introspect(c, client_id="client-1", client_secret=SECRET, token=at)).json()
-        assert body["active"] is True
-        assert not body.get("sid")
+        # A session-bound token dies with its session (TS introspect.ts:325).
+        assert body == {"active": False}
 
 
 # --- pairwise sub --------------------------------------------------------------------

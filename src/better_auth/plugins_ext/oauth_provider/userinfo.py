@@ -18,7 +18,7 @@ from typing import Any
 from ...adapters.base import Where
 from ...types import Ctx
 from .client_crud import get_client
-from .introspect import validate_access_token
+from .introspect import invalid_access_token_error, validate_access_token
 from .token import user_normal_claims
 from .utils import OAuthError, resolve_subject_identifier
 
@@ -37,6 +37,8 @@ async def userinfo_endpoint(ctx: Ctx, opts: Any) -> dict[str, Any]:
         raise OAuthError(401, "invalid_request", "authorization header not found")
 
     jwt = await validate_access_token(ctx, opts, token)
+    if not jwt.get("active"):  # TS requireActiveAccessTokenWithClaims (introspect.ts:604)
+        raise invalid_access_token_error()
 
     scope = jwt.get("scope")
     scopes = scope.split(" ") if isinstance(scope, str) else None

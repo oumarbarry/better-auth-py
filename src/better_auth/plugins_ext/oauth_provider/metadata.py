@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
 from ...types import AuthResponse
-from .utils import get_jwt_plugin, is_loopback_host
+from .utils import PRIVATE_KEY_JWT_SIGNING_ALGORITHMS, get_jwt_plugin, is_loopback_host
 
 if TYPE_CHECKING:
     from ...auth import BetterAuth
@@ -69,7 +69,10 @@ def build_auth_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
         *(["none"] if public_client else []),
         "client_secret_basic",
         "client_secret_post",
+        "private_key_jwt",
     ]
+    endpoint_auth_methods = ["client_secret_basic", "client_secret_post", "private_key_jwt"]
+    signing_algs = list(PRIVATE_KEY_JWT_SIGNING_ALGORITHMS)
     metadata: dict[str, Any] = {
         "scopes_supported": scopes_supported,
         "issuer": _issuer(auth, opts),
@@ -83,15 +86,13 @@ def build_auth_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
         "response_modes_supported": ["query"],
         "grant_types_supported": grant_types
         or ["authorization_code", "client_credentials", "refresh_token"],
+        # private_key_jwt on every client-authenticated endpoint (TS metadata.ts:68, aebf66d8e).
         "token_endpoint_auth_methods_supported": token_endpoint_auth_methods,
-        "introspection_endpoint_auth_methods_supported": [
-            "client_secret_basic",
-            "client_secret_post",
-        ],
-        "revocation_endpoint_auth_methods_supported": [
-            "client_secret_basic",
-            "client_secret_post",
-        ],
+        "token_endpoint_auth_signing_alg_values_supported": signing_algs,
+        "introspection_endpoint_auth_methods_supported": endpoint_auth_methods,
+        "introspection_endpoint_auth_signing_alg_values_supported": signing_algs,
+        "revocation_endpoint_auth_methods_supported": endpoint_auth_methods,
+        "revocation_endpoint_auth_signing_alg_values_supported": signing_algs,
         "code_challenge_methods_supported": ["S256"],
         "authorization_response_iss_parameter_supported": True,
     }

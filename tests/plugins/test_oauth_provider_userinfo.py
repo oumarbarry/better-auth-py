@@ -52,6 +52,8 @@ async def seed(auth, *, client_id="client-1", secret=SECRET, public=False, redir
         "scopes": ["openid", "profile", "email", "offline_access"],
         "grantTypes": ["authorization_code", "client_credentials", "refresh_token"],
         "public": public,
+        # TS 1.7 binds a client to its registered authentication method (utils/index.ts:737).
+        "tokenEndpointAuthMethod": "none" if public else "client_secret_post",
         "disabled": False,
         "requirePKCE": False,
         "skipConsent": True,
@@ -373,7 +375,7 @@ async def test_revoke_wrong_client_secret_rejected():
     await seed(auth, scopes=["openid"])
     async with make_client(auth) as c:
         res = await revoke(c, client_id="client-1", client_secret="wrong", token="whatever")
-        assert res.status_code == 401
+        assert res.status_code == 400  # client_secret_post: no Basic challenge
         assert res.json()["error"] == "invalid_client"
 
 

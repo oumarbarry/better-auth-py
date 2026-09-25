@@ -1,4 +1,4 @@
-"""oauth-provider database schema — 4 tables, exact camelCase columns.
+"""oauth-provider database schema: 5 tables, exact camelCase columns.
 
 Port of TS ``packages/oauth-provider/src/schema.ts`` (v1.6.23). Column names match the TS
 provider exactly so a DB written by the TS provider is readable by the Python port. All 4
@@ -21,6 +21,8 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         "enableEndSession": Field("boolean", required=False),
         "subjectType": Field("string", required=False),
         "scopes": Field("string[]", required=False),
+        # Machine scopes for the client_credentials grant (TS schema.ts:42, 5c45abcd2).
+        "clientCredentialsScopes": Field("string[]", required=False, default_factory=list),
         # Recommended client data
         "userId": Field("string", required=False, references=Reference("user", "id"), index=True),
         "createdAt": Field("datetime", required=False),
@@ -74,9 +76,15 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         ),
         "userId": Field("string", required=True, references=Reference("user", "id"), index=True),
         "referenceId": Field("string", required=False),
+        # Hashed code the token family was issued for (TS schema.ts, 508d8d6f0).
+        "authorizationCodeId": Field("string", required=False, index=True),
         "expiresAt": Field("datetime", required=False),
         "createdAt": Field("datetime", required=False),
         "revoked": Field("datetime", required=False),
+        # Rotation bookkeeping for refreshTokenReuseInterval (TS schema.ts, 5838df2f4).
+        "rotatedAt": Field("datetime", required=False),
+        "rotationReplayResponse": Field("string", required=False),
+        "rotationReplayExpiresAt": Field("datetime", required=False),
         "authTime": Field("datetime", required=False),
         "scopes": Field("string[]", required=True),  # immutable
     },
@@ -95,11 +103,17 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         ),
         "userId": Field("string", required=False, references=Reference("user", "id"), index=True),
         "referenceId": Field("string", required=False),
+        "authorizationCodeId": Field("string", required=False, index=True),
         "refreshId": Field(
             "string", required=False, references=Reference("oauthRefreshToken", "id"), index=True
         ),
         "expiresAt": Field("datetime", required=False),
         "createdAt": Field("datetime", required=False),
         "scopes": Field("string[]", required=True),
+    },
+    # Single-use private_key_jwt assertion jti markers; the id is a digest of the namespaced jti,
+    # so a replay collides on the primary key (TS schema.ts oauthClientAssertion, 7abaaed53).
+    "oauthClientAssertion": {
+        "expiresAt": Field("datetime", required=True),
     },
 }
