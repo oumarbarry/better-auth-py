@@ -610,8 +610,20 @@ class InternalAdapter:
                         latest = rows[0] if rows else None
                         if latest is None:
                             return None
-                        await tx._delete_many("verification", [Where("identifier", row_id)])
-                        return latest
+                        # TS 1.6.29 db/internal-adapter.ts:1332 consumeOneWithHooks:
+                        # delete.before sees the latest row, consumeOne(latest.id) is the
+                        # race gate, stale rows go next, delete.after sees the consumed row.
+                        _, aborted = await tx._run_before("verification", "delete", latest, None)
+                        if aborted:
+                            return None
+                        row = await tx.adapter.consume_one(
+                            "verification", [Where("id", latest["id"])]
+                        )
+                        if row is None:
+                            return None
+                        await tx.adapter.delete_many("verification", [Where("identifier", row_id)])
+                        await tx._queue_after("verification", "delete", row, None)
+                        return row
 
                     return await self.transaction(_consume)
 

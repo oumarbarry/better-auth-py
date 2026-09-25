@@ -211,3 +211,45 @@ async def test_store_in_database_dual_writes_and_find_prefers_cache():
     assert _must(await ia.consume_verification_value("otp:both"))["value"] == "v"
     assert await ss.get("verification:otp:both") is None
     assert await adapter.find_many("verification", []) == []
+
+
+# --- DB path race gate (TS db/internal-adapter.ts:1330-1348 at v1.6.29) ------------------
+# consumeOneWithHooks runs delete.before on the latest row, consumeOne(latest.id) is the
+# race gate, stale rows are then deleted, and delete.after fires for the consumed row only.
+
+
+async def test_db_consume_returns_none_when_a_concurrent_caller_won(monkeypatch):
+    adapter = _adapter()
+    ia = InternalAdapter(adapter)
+    await _mk(ia, "otp:race", "v")
+    real_find_many = adapter.find_many
+
+    async def find_then_lose_race(model: str, *args: Any, **kwargs: Any) -> Any:
+        rows = await real_find_many(model, *args, **kwargs)
+        if model == "verification":  # another process consumes right after our read
+            await adapter.delete_many("verification", [])
+        return rows
+
+    monkeypatch.setattr(adapter, "find_many", find_then_lose_race)
+    assert await ia.consume_verification_value("otp:race") is None
+
+
+async def test_db_consume_before_hook_veto_returns_none_and_keeps_row():
+    ia = InternalAdapter(
+        _adapter(), database_hooks={"verification": {"delete": {"before": lambda e: False}}}
+    )
+    await _mk(ia, "otp:veto", "v")
+    assert await ia.consume_verification_value("otp:veto") is None
+    assert await ia.find_verification_value("otp:veto") is not None
+
+
+async def test_db_consume_after_hook_fires_for_consumed_row_only():
+    seen: list[dict[str, Any]] = []
+    ia = InternalAdapter(
+        _adapter(), database_hooks={"verification": {"delete": {"after": seen.append}}}
+    )
+    await _mk(ia, "otp:two", "old")
+    await _mk(ia, "otp:two", "new")
+    assert _must(await ia.consume_verification_value("otp:two"))["value"] == "new"
+    assert [row["value"] for row in seen] == ["new"]
+    assert await ia.find_verification_value("otp:two") is None
