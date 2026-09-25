@@ -50,6 +50,15 @@ from ..auth import BetterAuth
 from ..types import AuthRequest, AuthResponse, dump_json
 
 
+def _absolute_url(request: HttpRequest) -> str | None:
+    # build_absolute_uri validates the Host header against ALLOWED_HOSTS and raises
+    # when it does not match; without a URL the null-Origin inference simply fails closed.
+    try:
+        return request.build_absolute_uri()
+    except Exception:
+        return None
+
+
 def _to_auth_request(request: HttpRequest, path: str, body: bytes) -> AuthRequest:
     headers = {k.lower(): v for k, v in request.headers.items()}
     client_ip = request.META.get("REMOTE_ADDR")
@@ -65,6 +74,7 @@ def _to_auth_request(request: HttpRequest, path: str, body: bytes) -> AuthReques
         query={key: values[-1] for key, values in request.GET.lists()},
         body=body,
         client_ip=client_ip,
+        url=_absolute_url(request),
     )
 
 

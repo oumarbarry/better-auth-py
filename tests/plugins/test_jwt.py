@@ -12,6 +12,7 @@ TS-layout row must be usable by the plugin.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -29,7 +30,7 @@ from better_auth.plugins_ext.jwt import JWTPlugin, generate_exported_key_pair, t
 from better_auth.session import utcnow
 
 # tests/plugins/ has no conftest of its own; pytest imports tests/conftest.py first.
-from conftest import SECRET, make_auth, make_client, sign_up
+from conftest import SECRET, SIGNUP, make_auth, make_client, sign_up
 
 API = "/api/auth"
 BASE = "http://testserver"  # conftest make_auth base_url
@@ -565,3 +566,100 @@ def test_to_exp_jwt_time_span(span, expected):
 def test_to_exp_jwt_invalid_raises(bad):
     with pytest.raises((TypeError, ValueError)):
         to_exp_jwt(bad, 1000)
+
+
+# --- sessionCookieCache: JWKS-signed cookie cache (34558bc52, 40ced3962) ---------------
+
+
+def _cookie_cache_auth(**plugin_kwargs):
+    from better_auth.config import CookieCache, SessionOptions
+
+    plugin = JWTPlugin(session_cookie_cache=True, **plugin_kwargs)
+    auth = make_auth(
+        plugins=[plugin],
+        session=SessionOptions(cookie_cache=CookieCache(enabled=True, strategy="jwt")),
+    )
+    return auth, plugin
+
+
+def _session_data(response) -> str:
+    for header in response.headers.get_list("set-cookie"):
+        if header.startswith("better-auth.session_data="):
+            return header.split(";", 1)[0].split("=", 1)[1]
+    raise AssertionError("no session_data cookie")
+
+
+async def test_session_cookie_cache_is_signed_with_the_jwks_key():
+    from better_auth.cookie_cache import verify_session_cookie_jwt_with_jwks
+
+    auth, _plugin = _cookie_cache_auth()
+    async with make_client(auth) as client:
+        response = await client.post(f"{API}/sign-up/email", json=SIGNUP)
+        value = _session_data(response)
+        jwks = await fetch_jwks(client)
+    header = pyjwt.get_unverified_header(value)
+    assert header["typ"] == "better-auth.session-cache+jwt"
+    assert header["kid"] == jwks["keys"][0]["kid"]
+    claims = verify_session_cookie_jwt_with_jwks(value, jwks, issuer=BASE)
+    assert claims is not None
+    assert claims["user"]["email"] == response.json()["user"]["email"]
+    raw = pyjwt.decode(value, options={"verify_signature": False})
+    assert raw["aud"] == "better-auth:session-cache"
+    assert raw["iss"] == BASE and raw["sub"] == claims["user"]["id"]
+    assert raw["sid"] == claims["session"]["token"]
+    assert verify_session_cookie_jwt_with_jwks(value, jwks, issuer="https://other") is None
+
+
+async def test_session_cookie_cache_hit_skips_the_database():
+    auth, _plugin = _cookie_cache_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await auth.adapter.delete_many("session", [])  # only the cache can answer now
+        response = await client.get(f"{API}/get-session")
+    assert response.json() is not None
+
+
+async def test_session_cookie_cache_rejects_a_secret_signed_jwt():
+    from better_auth.config import CookieCache, SessionOptions
+    from better_auth.cookie_cache import make_cache_value
+
+    auth, _plugin = _cookie_cache_auth()
+    plain = make_auth(
+        session=SessionOptions(cookie_cache=CookieCache(enabled=True, strategy="jwt"))
+    )
+    async with make_client(auth) as client:
+        await sign_up(client)
+        session = await client.get(f"{API}/get-session")
+        body = session.json()
+    forged = make_cache_value(plain, body["session"], body["user"])
+    from better_auth.cookie_cache import decode_cookie_cache
+
+    assert await decode_cookie_cache(auth, forged) is None
+
+
+def test_session_cookie_cache_requires_the_jwt_strategy():
+    # plugins/jwt/index.ts:74-106
+    with pytest.raises(ValueError, match=re.escape('session.cookieCache.strategy = "jwt"')):
+        make_auth(plugins=[JWTPlugin(session_cookie_cache=True)])
+
+
+def test_session_cookie_cache_refuses_remote_signing():
+    from better_auth.config import CookieCache, SessionOptions
+
+    plugin = JWTPlugin(
+        session_cookie_cache=True,
+        remote_url="https://keys.example/jwks",
+        key_pair_config={"alg": "EdDSA"},
+        sign=lambda payload: "x",
+    )
+    with pytest.raises(ValueError, match=re.escape("does not support `jwt.sign`")):
+        make_auth(
+            plugins=[plugin],
+            session=SessionOptions(cookie_cache=CookieCache(enabled=True, strategy="jwt")),
+        )
+
+
+def test_session_cookie_cache_warns_when_max_age_outlives_grace(caplog):
+    with caplog.at_level("WARNING", logger="better_auth"):
+        _cookie_cache_auth(grace_period=60)
+    assert "exceeds the JWT plugin JWKS grace period (60s)" in caplog.text

@@ -165,3 +165,6 @@ def test_to_auth_request_prefers_forwarded_ip():
     assert auth_request.client_ip == "203.0.113.7"
     assert auth_request.headers["x-forwarded-for"] == "203.0.113.7, 10.0.0.1"
     assert auth_request.path == "/get-session"
+    # the absolute URL feeds the null-Origin inference (origin-check.ts:253-269)
+    assert auth_request.url is not None
+    assert auth_request.url.endswith("/api/auth/get-session")

@@ -16,6 +16,7 @@ import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from .config import DynamicBaseURL
 from .origin import _get_origin, _wildcard_to_regex
@@ -156,6 +157,33 @@ def expand_trusted_origins(config: DynamicBaseURL) -> list[str]:
         if fallback_origin:
             origins.append(fallback_origin)
     return origins
+
+
+def append_query_params(url: str, params: Mapping[str, str]) -> str:
+    """Append form-encoded ``params`` before the fragment of an absolute or root-relative
+    URL, keeping the existing query text as is (core utils/url.ts:61-92, v1.7.6). Only
+    composes: callers validate untrusted input first.
+
+    ponytail: an absolute URL gets WHATWG's scheme/host lowercasing and the ``/`` path of
+    a bare http(s) origin, but not its full percent-encoding pass; add that if a caller
+    ever feeds unencoded characters through here.
+    """
+    if url.startswith(("//", "/\\")):
+        raise ValueError("Expected an absolute or root-relative URL")
+    relative = url.startswith("/")
+    parts = urlsplit(url)
+    if not relative and not parts.scheme:
+        raise ValueError("Expected an absolute or root-relative URL")
+    query = urlencode(params)
+    if not query:
+        return url
+    search = parts.query
+    search = f"{search}{'' if search.endswith('&') else '&'}{query}" if search else query
+    if relative:
+        return urlunsplit(("", "", parts.path, search, parts.fragment))
+    scheme = parts.scheme.lower()
+    path = parts.path or ("/" if scheme in ("http", "https") else "")
+    return urlunsplit((scheme, parts.netloc.lower(), path, search, parts.fragment))
 
 
 @contextmanager

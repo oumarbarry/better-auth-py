@@ -37,6 +37,7 @@ def _to_auth_request(request: Request, path: str, body: bytes) -> AuthRequest:
         query=dict(request.query_params),
         body=body,
         client_ip=client_ip,
+        url=str(request.url),
     )
 
 

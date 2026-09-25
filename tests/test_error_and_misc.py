@@ -115,3 +115,12 @@ async def test_trailing_slash_ignored_when_enabled():
     auth = make_auth(skip_trailing_slashes=True)
     async with make_client(auth) as client:
         assert (await client.get("/api/auth/ok/")).status_code == 200
+
+
+async def test_error_page_redirect_keeps_error_url_fragment():
+    # error.ts:406-428 (79904f0be): params go before the fragment; the code is the safe
+    # code and error_description only rides along when present
+    auth = make_auth(on_api_error=OnAPIError(error_url="https://app.example/oops#top"))
+    async with make_client(auth) as client:
+        response = await client.get("/api/auth/error?error=<bad>", follow_redirects=False)
+    assert response.headers["location"] == "https://app.example/oops?error=UNKNOWN#top"

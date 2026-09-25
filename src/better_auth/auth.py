@@ -25,6 +25,7 @@ from .config import (
     SessionOptions,
     UserOptions,
 )
+from .cookie_cache import CookieCacheSigner
 from .crypto import hash_password, resolve_secret_config
 from .endpoints import ROUTES
 from .internal_adapter import InternalAdapter, VerificationOptions
@@ -71,7 +72,7 @@ class BetterAuth:
         adapter: BaseAdapter | None = None,
         base_url: str | DynamicBaseURL = "http://localhost:8000",
         base_path: str = "/api/auth",
-        trusted_proxy_headers: bool = True,
+        trusted_proxy_headers: bool = False,
         email_and_password: EmailAndPassword | None = None,
         email_verification: EmailVerification | None = None,
         social_providers: Mapping[str, OAuthProvider | Mapping[str, Any]] | None = None,
@@ -122,8 +123,9 @@ class BetterAuth:
             self._dynamic_base_url = None
             self._base_url = base_url.rstrip("/")
             self._dynamic_origins = []
-        #: trust ``x-forwarded-host``/``x-forwarded-proto`` when deriving a dynamic
-        #: base URL (helpers.ts:196-200 — on by default, for reverse-proxy deployments)
+        #: trust ``x-forwarded-host``/``x-forwarded-proto`` when deriving a dynamic base
+        #: URL or inferring a null Origin (helpers.ts:201, off by default since 1.7; a
+        #: proxy that only exposes the public host through those headers needs True)
         self.trusted_proxy_headers = trusted_proxy_headers
         stripped = base_path.strip("/")
         self.base_path = f"/{stripped}" if stripped else ""
@@ -218,6 +220,9 @@ class BetterAuth:
         for plugin in self.plugins:
             self.error_codes.update(plugin.error_codes)
 
+        #: signs ``jwt``-strategy cookie caches with JWKS keys; the JWT plugin sets it when
+        #: run with ``session_cookie_cache=True`` (TS ``sessionConfig.cookieCacheSigner``)
+        self.cookie_cache_signer: CookieCacheSigner | None = None
         self.secondary_storage = secondary_storage
         self.database_hooks = database_hooks
         self.adapter = adapter if adapter is not None else MemoryAdapter()
@@ -334,8 +339,8 @@ class BetterAuth:
         )
 
     def ensure_trusted_url(self, url: str) -> None:
-        if not self.is_trusted_url(url):
-            raise APIError(403, "INVALID_CALLBACK_URL", "Callback URL is not trusted")
+        if not self.is_trusted_url(url):  # message: core error/codes.ts:55
+            raise APIError(403, "INVALID_CALLBACK_URL", "Invalid callbackURL")
 
     async def load_session(self, request: AuthRequest) -> dict[str, Any] | None:
         """``{"session": ..., "user": ...}`` for the request, or None. Used by integrations."""

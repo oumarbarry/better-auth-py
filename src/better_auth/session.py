@@ -58,6 +58,16 @@ def clear_cookie(auth: BetterAuth, base: str = "session_token") -> str:
     return build_cookie(auth, "", 0, base)
 
 
+def delete_session_cookies(auth: BetterAuth) -> list[str]:
+    """``deleteSessionCookie`` (cookies/index.ts:517-555): the session token, the cookie
+    cache and the dont-remember marker all expire."""
+    return [
+        clear_cookie(auth),
+        clear_cookie(auth, "session_data"),
+        clear_cookie(auth, "dont_remember"),
+    ]
+
+
 def read_token(auth: BetterAuth, request: AuthRequest) -> str | None:
     """Signed token from the session cookie, or an `Authorization: Bearer` header
     (bearer is a plugin in better-auth TS; built in here for API-first apps).
@@ -85,8 +95,8 @@ async def create_session(
 ) -> tuple[dict[str, Any], list[str]]:
     """Create a DB session and return ``(session, set_cookie_values)``.
 
-    When ``user`` is given and the cookie cache is enabled, also emits the signed
-    ``session_data`` cache cookie so the next ``/get-session`` can skip the DB.
+    When the cookie cache is enabled, also emits the signed ``session_data`` cache
+    cookie (reading the user when not given) so the next ``/get-session`` can skip the DB.
 
     When ``ctx`` is given, records ``ctx.new_session = {"session", "user"}`` so
     after-hooks can detect this request created a session (TS ``setNewSession``).
@@ -118,31 +128,43 @@ async def create_session(
             build_cookie(auth, signed, None),
             build_cookie(auth, "true", None, "dont_remember"),
         ]
-    if user is not None:
-        from .cookie_cache import set_cookie_cache
+    # setSessionCookie always writes the cache next to the token (cookies/index.ts:350-392)
+    cache_on = auth.session_options.cookie_cache.enabled
+    if user is None and (ctx is not None or cache_on):
+        user = await auth.adapter.find_one("user", [Where("id", user_id)])
+    if user is not None and cache_on:
+        from .cookie_cache import set_cookie_cache_async
 
-        cache_cookie = set_cookie_cache(auth, session, user, not remember_me)
+        cache_cookie = await set_cookie_cache_async(auth, session, user, not remember_me)
         if cache_cookie is not None:
             cookies.append(cache_cookie)
     if ctx is not None:
-        resolved_user = user
-        if resolved_user is None:
-            resolved_user = await auth.adapter.find_one("user", [Where("id", user_id)])
-        ctx.new_session = {"session": session, "user": resolved_user}
+        ctx.new_session = {"session": session, "user": user}
     return session, cookies
 
 
 def refresh_session_cookie(auth: BetterAuth, request: AuthRequest, token: str) -> str:
-    """Re-issue the ``session_token`` cookie for an already-valid session.
-
-    better-auth's TS `setSessionCookie` also refreshes the (session_data) cookie
-    cache with the new user payload; that cache isn't implemented here (see gap
-    item 15), so this only re-signs/re-sets the plain session cookie, honouring
-    the existing `dont_remember` (browser-session) marker.
-    """
+    """Re-issue the ``session_token`` cookie for an already-valid session, honouring
+    the existing `dont_remember` (browser-session) marker. :func:`set_session_cookies`
+    also refreshes the cookie cache."""
     dont_remember = cookie_name(auth, "dont_remember") in request.cookies()
     max_age = None if dont_remember else auth.session_options.expires_in
     return build_cookie(auth, sign_value(auth.secret, token), max_age)
+
+
+async def set_session_cookies(
+    auth: BetterAuth, request: AuthRequest, session: dict[str, Any], user: dict[str, Any]
+) -> list[str]:
+    """TS ``setSessionCookie`` for an existing session (cookies/index.ts:350-392): the
+    token cookie plus the cookie cache rebuilt from the current session and user."""
+    from .cookie_cache import set_cookie_cache_async
+
+    cookies = [refresh_session_cookie(auth, request, session["token"])]
+    dont_remember = cookie_name(auth, "dont_remember") in request.cookies()
+    cache_cookie = await set_cookie_cache_async(auth, session, user, dont_remember)
+    if cache_cookie is not None:
+        cookies.append(cache_cookie)
+    return cookies
 
 
 async def get_session(
@@ -168,19 +190,33 @@ async def get_session(
     ``is_post_request=True`` — TS pins ``method: "GET"`` for every other session read
     (getSessionFromCtx, session.ts:563).
     """
-    if not disable_cache:
-        from .cookie_cache import get_cookie_cache
+    from .cookie_cache import cache_is_current, decode_cookie_cache, expire_cookie_cache
 
-        cached = get_cookie_cache(auth, request)
-        if cached is not None:
-            return cached, []
-
+    cookies: list[str] = []
+    cache_enabled = auth.session_options.cookie_cache.enabled
     token = read_token(auth, request)
-    if token is None:
+    if token is None and cache_enabled:
         return None, []
+    # session.ts:84-171 (v1.7.6): a session_data cookie is only honoured while the cache
+    # is on, for the session_token it was issued with; any other one is expired.
+    cache_value = request.cookies().get(cookie_name(auth, "session_data"))
+    if cache_value and not cache_enabled:
+        cookies.append(expire_cookie_cache(auth))  # 7ec71461f
+    if token is None:
+        return None, cookies
+    if cache_enabled and not disable_cache and cache_value:
+        decoded = await decode_cookie_cache(auth, cache_value)
+        if (
+            decoded is not None
+            and decoded[0]["session"]["token"] == token
+            and cache_is_current(auth, decoded)
+        ):
+            return {"session": decoded[0]["session"], "user": decoded[0]["user"]}, []
+        cookies.append(expire_cookie_cache(auth))
+
     session = await auth.adapter.find_one("session", [Where("token", token)])
     if session is None:
-        return None, [clear_cookie(auth)]
+        return None, [*cookies, *delete_session_cookies(auth)]
 
     now = utcnow()
     options = auth.session_options
@@ -189,9 +225,8 @@ async def get_session(
     if session["expiresAt"] <= now:
         if not defer:
             await auth.internal.delete_many("session", [Where("token", token)])
-        return None, [clear_cookie(auth), clear_cookie(auth, "dont_remember")]
+        return None, [*cookies, *delete_session_cookies(auth)]
 
-    cookies: list[str] = []
     dont_remember = cookie_name(auth, "dont_remember") in request.cookies()
     due_at = (
         session["expiresAt"]
@@ -214,12 +249,12 @@ async def get_session(
 
     user = await auth.adapter.find_one("user", [Where("id", session["userId"])])
     if user is None:
-        return None, [clear_cookie(auth)]
+        return None, [*cookies, *delete_session_cookies(auth)]
 
     if options.cookie_cache.enabled:
-        from .cookie_cache import set_cookie_cache
+        from .cookie_cache import set_cookie_cache_async
 
-        cache_cookie = set_cookie_cache(auth, session, user, dont_remember)
+        cache_cookie = await set_cookie_cache_async(auth, session, user, dont_remember)
         if cache_cookie is not None:
             cookies.append(cache_cookie)
 

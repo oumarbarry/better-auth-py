@@ -794,39 +794,76 @@ async def _link_social_id_token(
 # --- token endpoints ----------------------------------------------------------------------
 
 
-async def _find_account(ctx: Ctx, user_id: str, provider_id: str, account_id: str | None):
-    accounts = await ctx.adapter.find_many("account", [Where("userId", user_id)])
-    for acc in accounts:
-        if account_id:
-            if acc["accountId"] == account_id and acc["providerId"] == provider_id:
-                return acc
-        elif acc["providerId"] == provider_id:
-            return acc
-    return None
+def account_selection(data: dict[str, Any]) -> dict[str, Any]:
+    """TS ``accountSelectionSchema`` (account.ts:547-571, v1.7.6): exactly
+    ``{accountId}`` (the Better Auth account id) or ``{useAccountCookie: true}``, each
+    with an optional ``userId``; any other key is refused."""
+    keys = set(data) - {"userId"}
+    if keys == {"accountId"} and isinstance(data["accountId"], str):
+        return data
+    if keys == {"useAccountCookie"} and data["useAccountCookie"] in (True, "true"):
+        return data
+    raise APIError(400, "INVALID_BODY", "Pass either accountId or useAccountCookie")
+
+
+async def resolve_user_account(ctx: Ctx, user_id: str, selection: dict[str, Any]):
+    """account.ts:600-632 ``resolveUserAccount``: the session user's account with that id.
+
+    ponytail: ``useAccountCookie`` never matches because the account cookie store
+    (``account.storeAccountCookie``) is not ported; resolve it here once it is.
+    """
+    if "accountId" in selection:
+        accounts = await ctx.adapter.find_many("account", [Where("userId", user_id)])
+        for account in accounts:
+            if account["id"] == selection["accountId"]:
+                return account
+    raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
+
+
+async def select_user_account(
+    ctx: Ctx, user_id: str, data: dict[str, Any], *, require_refresh: bool = False
+) -> dict[str, Any]:
+    """The account a token route acts on: the TS selection, or the 1.0 port's
+    ``{providerId, accountId?}`` body when ``account.legacy_account_selection`` is on."""
+    if not (ctx.auth.account.legacy_account_selection and "providerId" in data):
+        return await resolve_user_account(ctx, user_id, account_selection(data))
+    provider_id = data["providerId"]
+    provider = ctx.auth.social_providers.get(provider_id)
+    if provider is None:
+        raise APIError(400, "PROVIDER_NOT_SUPPORTED", f"Provider {provider_id} is not supported.")
+    if require_refresh and not provider.supports_refresh:
+        raise APIError(
+            400,
+            "TOKEN_REFRESH_NOT_SUPPORTED",
+            f"Provider {provider_id} does not support token refreshing.",
+        )
+    account_id = data.get("accountId")
+    for account in await ctx.adapter.find_many("account", [Where("userId", user_id)]):
+        if account["providerId"] == provider_id and (
+            not account_id or account["accountId"] == account_id
+        ):
+            return account
+    raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
 
 
 async def refresh_token(ctx: Ctx) -> AuthResponse:
     """POST /refresh-token — force a token refresh via the provider's refresh grant."""
     result = await ctx.require_session()
-    body = ctx.body()
-    provider_id = body.get("providerId")
-    if not provider_id:
-        raise APIError(400, "INVALID_BODY", "providerId is required")
+    # account.ts resolveUserId: over HTTP the session user ALWAYS wins; a body
+    # userId is honored only for a trusted server-side call with no session.
+    # These handlers always require a session, so the session user is authoritative:
+    # never trust body.userId here (would be an IDOR onto another user's tokens).
+    account = await select_user_account(ctx, result["user"]["id"], ctx.body(), require_refresh=True)
+    provider_id = account["providerId"]
     provider = ctx.auth.social_providers.get(provider_id)
     if provider is None:
         raise APIError(400, "PROVIDER_NOT_SUPPORTED", f"Provider {provider_id} is not supported.")
     if not provider.supports_refresh:
         raise APIError(
-            400, "TOKEN_REFRESH_NOT_SUPPORTED", f"Provider {provider_id} does not support refresh."
+            400,
+            "TOKEN_REFRESH_NOT_SUPPORTED",
+            f"Provider {provider_id} does not support token refreshing.",
         )
-    # account.ts resolveUserId: over HTTP the session user ALWAYS wins; a body
-    # userId is honored only for a trusted server-side call with no session.
-    # These handlers always require a session, so the session user is authoritative
-    # — never trust body.userId here (would be an IDOR onto another user's tokens).
-    user_id = result["user"]["id"]
-    account = await _find_account(ctx, user_id, provider_id, body.get("accountId"))
-    if account is None:
-        raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
     refresh = account.get("refreshToken")
     if not refresh:
         raise APIError(400, "REFRESH_TOKEN_NOT_FOUND", "Refresh token not found")
@@ -915,19 +952,13 @@ async def _valid_access_token(ctx: Ctx, account: dict[str, Any], provider: Provi
 async def get_access_token(ctx: Ctx) -> AuthResponse:
     """POST /get-access-token — a valid access token, doing a refresh only if near expiry."""
     result = await ctx.require_session()
-    body = ctx.body()
-    provider_id = body.get("providerId")
-    if not provider_id:
-        raise APIError(400, "INVALID_BODY", "providerId is required")
+    # Session user is authoritative (account.ts resolveUserId): never trust
+    # body.userId over HTTP, else any user could read another's access token.
+    account = await select_user_account(ctx, result["user"]["id"], ctx.body())
+    provider_id = account["providerId"]
     provider = ctx.auth.social_providers.get(provider_id)
     if provider is None:
         raise APIError(400, "PROVIDER_NOT_SUPPORTED", f"Provider {provider_id} is not supported.")
-    # Session user is authoritative (account.ts resolveUserId) — never trust
-    # body.userId over HTTP, else any user could read another's access token.
-    user_id = result["user"]["id"]
-    account = await _find_account(ctx, user_id, provider_id, body.get("accountId"))
-    if account is None:
-        raise APIError(400, "ACCOUNT_NOT_FOUND", "Account not found")
     try:
         return AuthResponse(body=await _valid_access_token(ctx, account, provider))
     except OAuthFetchError:

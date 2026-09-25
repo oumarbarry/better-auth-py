@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import math
 import re
 import time
@@ -35,6 +36,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 
+from ..cookie_cache import (
+    SESSION_COOKIE_JWT_AUDIENCE,
+    SESSION_COOKIE_JWT_ISSUER,
+    SESSION_COOKIE_JWT_TYPE,
+    parse_session_cookie_jwt_payload,
+)
 from ..crypto import (
     b64url_decode_nopad,
     decode_jwk_private_key,
@@ -48,6 +55,8 @@ from ..types import APIError, AuthResponse, Ctx, dump_json
 
 if TYPE_CHECKING:
     from ..auth import BetterAuth
+
+logger = logging.getLogger("better_auth")
 
 _DEFAULT_KEY_PAIR_CONFIG: dict[str, Any] = {"alg": "EdDSA", "crv": "Ed25519"}
 #: TS ``JWKOptions`` types the curve into the alg — no ``crv`` config (types.ts:181-188).
@@ -167,6 +176,74 @@ def key_from_jwk(jwk: dict[str, Any]) -> Any:
     raise ValueError(f"unsupported JWK kty: {kty!r}")
 
 
+_REMOTE_SIGN_ERROR = (
+    "`jwt({ sessionCookieCache: true })` requires locally managed JWT plugin keys and does"
+    " not support `jwt.sign`."
+)
+
+
+class _CookieCacheSigner:
+    """plugins/jwt/cookie-cache.ts: session cookie caches as JWTs over the JWKS keys."""
+
+    def __init__(self, plugin: JWTPlugin) -> None:
+        self.plugin = plugin
+
+    def _issuer(self, auth: BetterAuth) -> str:
+        # cookie-cache.ts:19-24: the configured string base URL, else the request's
+        # resolved base URL (base path included), else a fixed issuer
+        if auth._dynamic_base_url is None:
+            return auth._base_url or SESSION_COOKIE_JWT_ISSUER
+        return f"{auth.base_url}{auth.base_path}" or SESSION_COOKIE_JWT_ISSUER
+
+    async def sign(self, auth: BetterAuth, payload: dict[str, Any], expires_in: int) -> str:
+        plugin = self.plugin
+        key = await plugin._get_latest_or_new_key()
+        now = math.floor(time.time())
+        claims = {
+            **payload,
+            "sid": payload["session"]["token"],
+            "iat": now,
+            "exp": now + expires_in,
+            "iss": self._issuer(auth),
+            "aud": SESSION_COOKIE_JWT_AUDIENCE,
+            "sub": payload["user"]["id"],
+        }
+        return pyjwt.encode(
+            claims,
+            key_from_jwk(plugin._decode_private(key)),
+            algorithm=plugin._alg(),
+            headers={"kid": key["id"], "typ": SESSION_COOKIE_JWT_TYPE},
+        )
+
+    async def verify(self, auth: BetterAuth, token: str) -> tuple[dict[str, Any], float] | None:
+        plugin = self.plugin
+        try:
+            header = pyjwt.get_unverified_header(token)
+            kid = header.get("kid")
+            if header.get("typ") != SESSION_COOKIE_JWT_TYPE or not kid:
+                return None
+            key = next((k for k in await plugin._get_all_keys() if k["id"] == kid), None)
+            if key is None:
+                return None
+            alg = key.get("alg") or plugin._alg()
+            claims = pyjwt.decode(
+                token,
+                key_from_jwk(json.loads(key["publicKey"])),
+                algorithms=[alg],
+                audience=SESSION_COOKIE_JWT_AUDIENCE,
+                issuer=self._issuer(auth),
+                leeway=15,
+            )
+        except Exception:
+            logger.debug("Cookie-cache JWT verification failed", exc_info=True)
+            return None
+        payload = parse_session_cookie_jwt_payload(claims)
+        if payload is None:
+            return None
+        exp = claims.get("exp")
+        return payload, exp * 1000 if exp else time.time() * 1000
+
+
 class JWTPlugin(Plugin):
     """Port of TS ``jwt(options)``. Flat snake_case kwargs mirror the TS ``jwks``/``jwt``
     option groups with identical defaults."""
@@ -193,6 +270,7 @@ class JWTPlugin(Plugin):
         sign: Any = None,
         # top-level
         disable_setting_jwt_header: bool = False,
+        session_cookie_cache: bool = False,
     ) -> None:
         # TS init guards (index.ts:42-67).
         if sign is not None and remote_url is None:
@@ -226,6 +304,9 @@ class JWTPlugin(Plugin):
         self.get_subject = get_subject
         self.sign = sign
         self.disable_setting_jwt_header = disable_setting_jwt_header
+        #: sign ``jwt``-strategy session cookie caches with this plugin's keys
+        #: (TS ``sessionCookieCache``, types.ts:7-15)
+        self.session_cookie_cache = session_cookie_cache
         self._auth: BetterAuth | None = None
 
     @property
@@ -237,6 +318,27 @@ class JWTPlugin(Plugin):
 
     def init(self, auth: BetterAuth) -> None:
         self._auth = auth
+        if not self.session_cookie_cache:
+            return
+        # index.ts:74-106
+        cache = auth.session_options.cookie_cache
+        if cache.strategy != "jwt":
+            raise ValueError(
+                "`jwt({ sessionCookieCache: true })` requires"
+                ' `session.cookieCache.strategy = "jwt"`.'
+            )
+        if self.sign is not None:
+            raise ValueError(_REMOTE_SIGN_ERROR)
+        max_age = cache.max_age or 60 * 5
+        if max_age > self.grace_period:
+            logger.warning(
+                "[better-auth] `session.cookieCache.maxAge` (%ss) exceeds the JWT plugin JWKS"
+                " grace period (%ss). Rotated keys may stop verifying cookie-cache JWTs before"
+                " the cookie expires.",
+                max_age,
+                self.grace_period,
+            )
+        auth.cookie_cache_signer = _CookieCacheSigner(self)
 
     def routes(self) -> list[tuple[str, str, Any]]:
         return [

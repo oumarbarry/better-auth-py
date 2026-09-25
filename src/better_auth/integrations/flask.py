@@ -51,6 +51,7 @@ def _to_auth_request(request: Any, path: str, body: bytes) -> AuthRequest:
         query={key: values[-1] for key, values in request.args.lists()},
         body=body,
         client_ip=client_ip,
+        url=request.url,
     )
 
 

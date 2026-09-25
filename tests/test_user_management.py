@@ -350,7 +350,7 @@ def account_info_auth():
 
 async def _link_account(auth, user_id, *, provider_id="fake", account_id="ext-1", **extra):
     now = utcnow()
-    await auth.adapter.create(
+    return await auth.adapter.create(
         "account",
         {
             "accountId": account_id,
@@ -364,16 +364,49 @@ async def _link_account(auth, user_id, *, provider_id="fake", account_id="ext-1"
 
 
 async def test_account_info_returns_provider_shape():
+    # account.ts:1015-1063 (v1.7.6): selected by the Better Auth account id, and the
+    # response names the account it read
     auth = account_info_auth()
     async with make_client(auth) as client:
         data = await sign_up(client)
-        await _link_account(auth, data["user"]["id"], accessToken="at-123")
-        response = await client.get("/api/auth/account-info?accountId=ext-1&providerId=fake")
+        row = await _link_account(auth, data["user"]["id"], accessToken="at-123")
+        response = await client.get(f"/api/auth/account-info?accountId={row['id']}")
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["user"]["email"] == "ext@example.com"
         assert body["user"]["emailVerified"] is True
         assert body["data"] == {}
+        assert body["account"] == {"id": row["id"], "providerId": "fake", "accountId": "ext-1"}
+
+
+async def test_account_info_does_not_select_by_provider_account_id():
+    auth = account_info_auth()
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        await _link_account(auth, data["user"]["id"], accessToken="at-123")
+        response = await client.get("/api/auth/account-info?accountId=ext-1")
+        assert response.status_code == 400
+        assert response.json()["code"] == "ACCOUNT_NOT_FOUND"
+
+
+async def test_account_info_rejects_the_legacy_provider_selection():
+    # accountSelectionSchema is a strict object: providerId is no longer accepted
+    auth = account_info_auth()
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        row = await _link_account(auth, data["user"]["id"], accessToken="at-123")
+        response = await client.get(f"/api/auth/account-info?accountId={row['id']}&providerId=fake")
+        assert response.status_code == 400
+        assert response.json()["code"] == "INVALID_BODY"
+
+
+async def test_account_info_use_account_cookie_without_cookie_store():
+    auth = account_info_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        response = await client.get("/api/auth/account-info?useAccountCookie=true")
+        assert response.status_code == 400
+        assert response.json()["code"] == "ACCOUNT_NOT_FOUND"
 
 
 async def test_account_info_requires_auth():
@@ -396,10 +429,10 @@ async def test_account_info_provider_not_configured():
     auth = account_info_auth()
     async with make_client(auth) as client:
         data = await sign_up(client)
-        await _link_account(
+        row = await _link_account(
             auth, data["user"]["id"], provider_id="ghost", account_id="ext-9", accessToken="x"
         )
-        response = await client.get("/api/auth/account-info?accountId=ext-9&providerId=ghost")
+        response = await client.get(f"/api/auth/account-info?accountId={row['id']}")
         assert response.status_code == 400
         assert response.json()["code"] == "PROVIDER_NOT_CONFIGURED"
 
@@ -408,30 +441,70 @@ async def test_account_info_access_token_missing():
     auth = account_info_auth()
     async with make_client(auth) as client:
         data = await sign_up(client)
-        await _link_account(auth, data["user"]["id"], account_id="ext-3")  # no accessToken
-        response = await client.get("/api/auth/account-info?accountId=ext-3&providerId=fake")
+        row = await _link_account(auth, data["user"]["id"], account_id="ext-3")
+        response = await client.get(f"/api/auth/account-info?accountId={row['id']}")
         assert response.status_code == 400
         assert response.json()["code"] == "ACCESS_TOKEN_NOT_FOUND"
 
 
-async def test_account_info_ambiguous_account():
+async def test_account_info_is_scoped_to_the_session_user():
+    auth = account_info_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        row = await _link_account(auth, "someone-else", accessToken="a")
+        response = await client.get(f"/api/auth/account-info?accountId={row['id']}")
+        assert response.status_code == 400
+        assert response.json()["code"] == "ACCOUNT_NOT_FOUND"
+
+
+# --- /unlink-account (account.ts:453-509, v1.7.6) -------------------------------------
+
+
+async def test_unlink_account_by_account_id():
+    auth = account_info_auth()
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        row = await _link_account(auth, data["user"]["id"])
+        response = await client.post("/api/auth/unlink-account", json={"accountId": row["id"]})
+        assert response.json() == {"status": True}
+    assert await auth.adapter.find_one("account", [Where("id", row["id"])]) is None
+
+
+async def test_unlink_account_needs_the_account_id():
+    auth = account_info_auth()
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        await _link_account(auth, data["user"]["id"])
+        response = await client.post("/api/auth/unlink-account", json={"providerId": "fake"})
+        assert response.status_code == 400
+        assert response.json()["code"] == "INVALID_BODY"
+
+
+async def test_unlink_last_account_refused_before_lookup():
+    auth = account_info_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        response = await client.post("/api/auth/unlink-account", json={"accountId": "nope"})
+        assert response.status_code == 400
+        assert response.json()["code"] == "FAILED_TO_UNLINK_LAST_ACCOUNT"
+
+
+async def test_unlink_account_requires_a_fresh_session():
     auth = make_auth(
-        social_providers={
-            "fake": FakeProvider(client_id="cid", client_secret="secret"),
-            "other": FakeProvider(client_id="cid2", client_secret="secret2"),
-        }
+        social_providers={"fake": FakeProvider(client_id="cid", client_secret="secret")},
+        session=SessionOptions(fresh_age=60),
     )
     async with make_client(auth) as client:
         data = await sign_up(client)
-        await _link_account(
-            auth, data["user"]["id"], provider_id="fake", account_id="dup", accessToken="a"
+        row = await _link_account(auth, data["user"]["id"])
+        await auth.adapter.update(
+            "session",
+            [Where("userId", data["user"]["id"])],
+            {"createdAt": utcnow() - timedelta(seconds=120)},
         )
-        await _link_account(
-            auth, data["user"]["id"], provider_id="other", account_id="dup", accessToken="b"
-        )
-        response = await client.get("/api/auth/account-info?accountId=dup")
-        assert response.status_code == 400
-        assert response.json()["code"] == "AMBIGUOUS_ACCOUNT"
+        response = await client.post("/api/auth/unlink-account", json={"accountId": row["id"]})
+        assert response.status_code == 403
+        assert response.json() == {"code": "SESSION_NOT_FRESH", "message": "Session is not fresh"}
 
 
 # --- legacy change-email token (externally minted, no requestType) --------------------
@@ -453,3 +526,86 @@ async def test_verify_email_legacy_update_branch():
         assert response.status_code == 200
         assert response.json()["user"]["email"] == NEW_EMAIL
         assert response.json()["user"]["emailVerified"] is False
+
+
+# --- AccountOptions.legacy_account_selection (port-only, deprecated) -------------------
+
+
+def _legacy_auth(enabled: bool):
+    from better_auth.config import AccountOptions
+
+    return make_auth(
+        social_providers={"fake": FakeProvider(client_id="cid", client_secret="secret")},
+        account=AccountOptions(legacy_account_selection=enabled),
+    )
+
+
+async def test_legacy_unlink_by_provider_when_opted_in():
+    auth = _legacy_auth(True)
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        row = await _link_account(auth, data["user"]["id"])
+        response = await client.post(
+            "/api/auth/unlink-account", json={"providerId": "fake", "accountId": "ext-1"}
+        )
+        assert response.json() == {"status": True}
+    assert await auth.adapter.find_one("account", [Where("id", row["id"])]) is None
+
+
+async def test_legacy_unlink_keeps_the_last_account_rule():
+    auth = _legacy_auth(True)
+    async with make_client(auth) as client:
+        await sign_up(client)
+        response = await client.post("/api/auth/unlink-account", json={"providerId": "credential"})
+    assert response.json()["code"] == "FAILED_TO_UNLINK_LAST_ACCOUNT"
+
+
+async def test_legacy_unlink_still_accepts_the_row_id():
+    auth = _legacy_auth(True)
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        row = await _link_account(auth, data["user"]["id"])
+        response = await client.post("/api/auth/unlink-account", json={"accountId": row["id"]})
+    assert response.json() == {"status": True}
+
+
+async def test_legacy_unlink_body_refused_by_default():
+    auth = _legacy_auth(False)
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        await _link_account(auth, data["user"]["id"])
+        response = await client.post("/api/auth/unlink-account", json={"providerId": "fake"})
+    assert response.status_code == 400 and response.json()["code"] == "INVALID_BODY"
+
+
+async def test_legacy_account_info_by_provider_account_id():
+    auth = _legacy_auth(True)
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        row = await _link_account(auth, data["user"]["id"], accessToken="at-1")
+        by_pair = await client.get("/api/auth/account-info?accountId=ext-1&providerId=fake")
+        by_provider_id = await client.get("/api/auth/account-info?accountId=ext-1")
+        by_row = await client.get(f"/api/auth/account-info?accountId={row['id']}")
+    for response in (by_pair, by_provider_id, by_row):
+        assert response.status_code == 200, response.text
+        assert response.json()["account"]["id"] == row["id"]
+
+
+async def test_legacy_account_info_ambiguous_provider_account_id():
+    from better_auth.config import AccountOptions
+
+    auth = make_auth(
+        social_providers={
+            "fake": FakeProvider(client_id="cid", client_secret="secret"),
+            "other": FakeProvider(client_id="cid2", client_secret="secret2"),
+        },
+        account=AccountOptions(legacy_account_selection=True),
+    )
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        await _link_account(auth, data["user"]["id"], account_id="dup", accessToken="a")
+        await _link_account(
+            auth, data["user"]["id"], provider_id="other", account_id="dup", accessToken="b"
+        )
+        response = await client.get("/api/auth/account-info?accountId=dup")
+    assert response.json()["code"] == "AMBIGUOUS_ACCOUNT"

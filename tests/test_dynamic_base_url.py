@@ -316,6 +316,34 @@ async def test_spoofed_forwarded_host_ignored_when_untrusted():
     assert captured == ["https://a.vercel.app"]
 
 
+async def _captured_base_url(auth, headers):
+    captured: list[str] = []
+
+    async def before(ctx):
+        captured.append(ctx.auth.base_url)
+        return None
+
+    auth.hooks = {"before": before}
+    await auth.handle(AuthRequest(method="GET", path="/get-session", headers=headers))
+    return captured
+
+
+async def test_forwarded_host_ignored_by_default():
+    # helpers.ts:201 (652fa53e4): `advanced.trustedProxyHeaders ?? false`
+    auth = make_auth(base_url=DynamicBaseURL(allowed_hosts=["*.vercel.app"]))
+    assert auth.trusted_proxy_headers is False
+    headers = {"host": "a.vercel.app", "x-forwarded-host": "b.vercel.app"}
+    assert await _captured_base_url(auth, headers) == ["https://a.vercel.app"]
+
+
+async def test_forwarded_host_honoured_when_opted_in():
+    auth = make_auth(
+        base_url=DynamicBaseURL(allowed_hosts=["*.vercel.app"]), trusted_proxy_headers=True
+    )
+    headers = {"host": "a.vercel.app", "x-forwarded-host": "b.vercel.app"}
+    assert await _captured_base_url(auth, headers) == ["https://b.vercel.app"]
+
+
 # --- trusted origins expansion --------------------------------------------------------
 
 
@@ -430,3 +458,37 @@ def test_cookie_domain_follows_resolved_host():
     assert auth.cookie_domain == "myapp.com"
     with bind_base_url(auth._dynamic_base_url, {"host": "pr-7.vercel.app"}, True):
         assert auth.cookie_domain == "pr-7.vercel.app"
+
+
+# --- appendQueryParams (core/src/utils/url.ts:61-92, 79904f0be) -----------------------
+
+import pytest  # noqa: E402
+
+from better_auth.base_url import append_query_params  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("/dashboard", "/dashboard?error=x"),
+        ("/dashboard#tab", "/dashboard?error=x#tab"),
+        ("/d?a=1#tab", "/d?a=1&error=x#tab"),
+        ("/d?a=1&", "/d?a=1&error=x"),
+        ("/d?", "/d?error=x"),
+        ("https://App.example.com", "https://app.example.com/?error=x"),
+        ("https://app.example.com/cb?a=1#f", "https://app.example.com/cb?a=1&error=x#f"),
+        ("myapp://callback#done", "myapp://callback?error=x#done"),
+    ],
+)
+def test_append_query_params(url, expected):
+    assert append_query_params(url, {"error": "x"}) == expected
+
+
+def test_append_query_params_form_encodes_values():
+    assert append_query_params("/cb", {"error": "a b", "d": "x&y"}) == "/cb?error=a+b&d=x%26y"
+
+
+@pytest.mark.parametrize("url", ["//evil.example/x", "/\\evil.example"])
+def test_append_query_params_rejects_authority_prefix(url):
+    with pytest.raises(ValueError):
+        append_query_params(url, {"error": "x"})

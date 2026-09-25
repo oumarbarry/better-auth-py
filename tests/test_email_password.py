@@ -1,4 +1,9 @@
+from datetime import timedelta
+
 from better_auth import EmailAndPassword
+from better_auth.crypto import generate_id
+from better_auth.oauth import GitHub
+from better_auth.session import utcnow
 from conftest import SIGNUP, make_auth, make_client, sign_up
 
 
@@ -164,9 +169,90 @@ async def test_sign_out(client):
 
 
 async def test_sign_out_without_session(client):
+    # sign-out.ts:77-166: no session cookie is still a successful, local sign-out
     response = await client.post("/api/auth/sign-out")
-    assert response.status_code == 400
-    assert response.json()["code"] == "FAILED_TO_GET_SESSION"
+    assert response.status_code == 200
+    assert response.json() == {"success": True}
+
+
+async def test_sign_out_expires_the_session_cookies(client):
+    # deleteSessionCookie (cookies/index.ts:517-555): token, cache and dont_remember
+    await sign_up(client)
+    response = await client.post("/api/auth/sign-out")
+    expired = {
+        c.split("=", 1)[0] for c in response.headers.get_list("set-cookie") if "Max-Age=0" in c
+    }
+    assert expired == {
+        "better-auth.session_token",
+        "better-auth.session_data",
+        "better-auth.dont_remember",
+    }
+
+
+class _LogoutProvider(GitHub):
+    """A provider with RP-initiated logout (TS ``createEndSessionURL``)."""
+
+    calls: list[dict] = []
+
+    async def create_end_session_url(self, *, id_token, post_logout_redirect_uri, state):
+        self.calls.append({"id_token": id_token, "post": post_logout_redirect_uri, "state": state})
+        return f"https://idp.example/logout?id_token_hint={id_token}"
+
+
+async def _logout_client_setup(auth, client):
+    data = await sign_up(client)
+    now = utcnow()
+    for provider_id, id_token, age in (("github", "old-token", 60), ("github", "new-token", 0)):
+        await auth.adapter.create(
+            "account",
+            {
+                "id": generate_id(),
+                "userId": data["user"]["id"],
+                "providerId": provider_id,
+                "accountId": id_token,
+                "idToken": id_token,
+                "createdAt": now,
+                "updatedAt": now - timedelta(seconds=age),
+            },
+        )
+
+
+async def test_sign_out_returns_the_provider_logout_url():
+    # sign-out.ts:101-165 (430c89549): newest account of a provider with logout support
+    _LogoutProvider.calls = []
+    auth = make_auth(social_providers={"github": _LogoutProvider(client_id="c", client_secret="s")})
+    async with make_client(auth) as client:
+        await _logout_client_setup(auth, client)
+        response = await client.post(
+            "/api/auth/sign-out", json={"callbackURL": "/bye", "state": "xyz"}
+        )
+    url = "https://idp.example/logout?id_token_hint=new-token"
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "url": url, "redirect": True}
+    assert response.headers["location"] == url
+    assert _LogoutProvider.calls == [
+        {"id_token": "new-token", "post": "http://testserver/bye", "state": "xyz"}
+    ]
+
+
+async def test_sign_out_provider_logout_without_redirect():
+    auth = make_auth(social_providers={"github": _LogoutProvider(client_id="c", client_secret="s")})
+    async with make_client(auth) as client:
+        await _logout_client_setup(auth, client)
+        response = await client.post("/api/auth/sign-out", json={"disableRedirect": True})
+    assert response.json()["redirect"] is False
+    assert "location" not in response.headers
+
+
+async def test_sign_out_rejects_an_untrusted_callback_url():
+    auth = make_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        response = await client.post(
+            "/api/auth/sign-out", json={"callbackURL": "https://evil.example/bye"}
+        )
+    assert response.status_code == 403
+    assert response.json()["code"] == "INVALID_CALLBACK_URL"
 
 
 async def test_protected_dependency(client):
@@ -255,3 +341,100 @@ async def test_ok_endpoint(client):
 async def test_unknown_route(client):
     response = await client.get("/api/auth/does-not-exist")
     assert response.status_code == 404
+
+
+# --- credential identity (internal-adapter.ts:1182-1191, sign-in.ts:527-547) -----------
+
+
+async def test_sign_in_ignores_a_credential_account_keyed_to_another_id():
+    auth = make_auth()
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        from better_auth.adapters.base import Where
+
+        await auth.adapter.update(
+            "account",
+            [Where("userId", data["user"]["id"]), Where("providerId", "credential")],
+            {"accountId": "ada@example.com"},
+        )
+        client.cookies.clear()
+        response = await client.post("/api/auth/sign-in/email", json=SIGNUP)
+    assert response.status_code == 401
+    assert response.json()["code"] == "INVALID_EMAIL_OR_PASSWORD"
+
+
+async def test_set_password_fills_a_passwordless_credential_account():
+    # update-user.ts:343-350 (v1.7.6)
+    from better_auth.adapters.base import Where
+
+    auth = make_auth()
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        where = [Where("userId", data["user"]["id"]), Where("providerId", "credential")]
+        await auth.adapter.update("account", where, {"password": None})
+        response = await client.post(
+            "/api/auth/set-password", json={"newPassword": "another-password-1"}
+        )
+        assert response.json() == {"status": True}
+        accounts = await auth.adapter.find_many("account", where)
+    assert len(accounts) == 1 and accounts[0]["password"]
+
+
+async def test_set_password_when_already_set():
+    auth = make_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        response = await client.post(
+            "/api/auth/set-password", json={"newPassword": "another-password-1"}
+        )
+    assert response.status_code == 400
+    assert response.json() == {
+        "code": "PASSWORD_ALREADY_SET",
+        "message": "User already has a password set",
+    }
+
+
+# --- sign-up gate rejections (sign-up.ts:238-365, v1.7.6) -------------------------------
+
+
+def _rejecting_hooks(result):
+    async def before(user, ctx):
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    return {"user": {"create": {"before": before}}}
+
+
+async def test_sign_up_gate_rejection_hidden_behind_generic_response():
+    from better_auth.types import APIError
+
+    auth = make_auth(
+        email_and_password=EmailAndPassword(enabled=True, require_email_verification=True),
+        database_hooks=_rejecting_hooks(APIError(403, "blocked_domain", "Blocked")),
+    )
+    async with make_client(auth) as client:
+        response = await client.post("/api/auth/sign-up/email", json=SIGNUP)
+    assert response.status_code == 200
+    assert response.json()["token"] is None
+    assert response.json()["user"]["email"] == SIGNUP["email"]
+    assert await auth.adapter.find_many("account", []) == []
+
+
+async def test_sign_up_gate_rejection_surfaces_without_generic_mode():
+    from better_auth.types import APIError
+
+    auth = make_auth(database_hooks=_rejecting_hooks(APIError(403, "blocked_domain", "Blocked")))
+    async with make_client(auth) as client:
+        response = await client.post("/api/auth/sign-up/email", json=SIGNUP)
+    assert response.status_code == 403
+    assert response.json()["code"] == "blocked_domain"
+
+
+async def test_sign_up_aborted_by_a_hook_fails_to_create_user():
+    auth = make_auth(database_hooks=_rejecting_hooks(False))
+    async with make_client(auth) as client:
+        response = await client.post("/api/auth/sign-up/email", json=SIGNUP)
+    assert response.status_code == 400
+    assert response.json() == {"code": "FAILED_TO_CREATE_USER", "message": "Failed to create user"}
+    assert await auth.adapter.find_many("account", []) == []

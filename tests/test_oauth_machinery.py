@@ -217,7 +217,7 @@ async def test_get_access_token_refreshes_when_expired():
     async with make_client(auth) as client:
         signup = await sign_up(client)
         await _make_account(auth, signup["user"]["id"])
-        r = await client.post("/api/auth/get-access-token", json={"providerId": "github"})
+        r = await client.post("/api/auth/get-access-token", json={"accountId": "acc1"})
         assert r.status_code == 200, r.text
         assert r.json()["accessToken"] == "fresh"
         acc = await auth.adapter.find_one("account", [Where("id", "acc1")])
@@ -229,7 +229,7 @@ async def test_refresh_token_endpoint():
     async with make_client(auth) as client:
         signup = await sign_up(client)
         await _make_account(auth, signup["user"]["id"])
-        r = await client.post("/api/auth/refresh-token", json={"providerId": "github"})
+        r = await client.post("/api/auth/refresh-token", json={"accountId": "acc1"})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["accessToken"] == "fresh2"
@@ -241,7 +241,7 @@ async def test_refresh_token_missing_account():
     auth = gh_auth(VERIFIED)
     async with make_client(auth) as client:
         await sign_up(client)
-        r = await client.post("/api/auth/refresh-token", json={"providerId": "github"})
+        r = await client.post("/api/auth/refresh-token", json={"accountId": "acc1"})
         assert r.status_code == 400
         assert r.json()["code"] == "ACCOUNT_NOT_FOUND"
 
@@ -249,7 +249,7 @@ async def test_refresh_token_missing_account():
 async def test_get_access_token_requires_session():
     auth = gh_auth(VERIFIED)
     async with make_client(auth) as client:
-        r = await client.post("/api/auth/get-access-token", json={"providerId": "github"})
+        r = await client.post("/api/auth/get-access-token", json={"accountId": "acc1"})
         assert r.status_code == 401
 
 
@@ -260,7 +260,9 @@ async def test_account_info_returns_raw_profile():
     auth = gh_auth(VERIFIED)
     async with make_client(auth) as client:
         await start_and_callback(client)  # creates github account with access token
-        r = await client.get("/api/auth/account-info?accountId=4242&providerId=github")
+        listed = (await client.get("/api/auth/list-accounts")).json()
+        github = next(a for a in listed if a["providerId"] == "github")
+        r = await client.get(f"/api/auth/account-info?accountId={github['id']}")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["user"]["email"] == SIGNUP["email"]
@@ -725,7 +727,7 @@ async def test_refresh_token_keeps_stored_scope():
     async with make_client(auth) as client:
         signup = await sign_up(client)
         await _make_account(auth, signup["user"]["id"], scope="read:user,repo")
-        r = await client.post("/api/auth/refresh-token", json={"providerId": "github"})
+        r = await client.post("/api/auth/refresh-token", json={"accountId": "acc1"})
         assert r.status_code == 200, r.text
         assert r.json()["scope"] == "read:user,repo"
     account = await auth.adapter.find_one("account", [Where("id", "acc1")])
@@ -758,7 +760,7 @@ async def test_stored_scopes_are_trimmed_on_read():
         listed = await client.get("/api/auth/list-accounts")
         github = next(a for a in listed.json() if a["providerId"] == "github")
         assert github["scopes"] == ["read:user", "repo"]
-        token = await client.post("/api/auth/get-access-token", json={"providerId": "github"})
+        token = await client.post("/api/auth/get-access-token", json={"accountId": "acc1"})
         assert token.json()["scopes"] == ["read:user", "repo"]
 
 
@@ -896,3 +898,51 @@ async def test_id_token_sign_in_does_not_store_refresh_token():
         assert r.status_code == 200, r.text
     [account] = await auth.adapter.find_many("account", [Where("providerId", "ctxp")])
     assert account.get("refreshToken") is None
+
+
+async def test_token_routes_select_the_account_by_its_id():
+    """TS v1.7.6 account.ts:547-632 (dbd302e42): ``accountId`` is the Better Auth account
+    id; the provider comes from that account, and the old ``providerId`` body is refused."""
+    auth = gh_auth(VERIFIED, refresh_response={"access_token": "fresh"})
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await _make_account(auth, signup["user"]["id"])
+        by_provider_account_id = await client.post(
+            "/api/auth/get-access-token", json={"accountId": "4242"}
+        )
+        legacy = await client.post("/api/auth/refresh-token", json={"providerId": "github"})
+    assert by_provider_account_id.json()["code"] == "ACCOUNT_NOT_FOUND"
+    assert legacy.status_code == 400 and legacy.json()["code"] == "INVALID_BODY"
+
+
+async def test_legacy_provider_selection_when_opted_in():
+    """Port-only ``AccountOptions.legacy_account_selection``: the 1.0 body still works."""
+    from better_auth.config import AccountOptions
+
+    auth = gh_auth(
+        VERIFIED,
+        refresh_response={"access_token": "fresh"},
+        account=AccountOptions(legacy_account_selection=True),
+    )
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await _make_account(auth, signup["user"]["id"])
+        by_provider = await client.post("/api/auth/get-access-token", json={"providerId": "github"})
+        by_pair = await client.post(
+            "/api/auth/get-access-token", json={"providerId": "github", "accountId": "4242"}
+        )
+        by_row = await client.post("/api/auth/get-access-token", json={"accountId": "acc1"})
+        refreshed = await client.post("/api/auth/refresh-token", json={"providerId": "github"})
+        unknown = await client.post("/api/auth/get-access-token", json={"providerId": "gitlab"})
+    for response in (by_provider, by_pair, by_row, refreshed):
+        assert response.status_code == 200, response.text
+    assert unknown.json()["code"] == "PROVIDER_NOT_SUPPORTED"
+
+
+async def test_legacy_provider_selection_refused_by_default():
+    auth = gh_auth(VERIFIED)
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await _make_account(auth, signup["user"]["id"])
+        r = await client.post("/api/auth/get-access-token", json={"providerId": "github"})
+    assert r.status_code == 400 and r.json()["code"] == "INVALID_BODY"

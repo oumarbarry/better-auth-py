@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from ..cookie_cache import set_cookie_cache
+from ..cookie_cache import set_cookie_cache_async
 from ..crypto import sign_value, unsign_value
 from ..endpoints import require_fields
 from ..plugins import HookSet, Plugin, PluginHook, Route
@@ -61,7 +61,9 @@ async def _activate(ctx: Ctx, response: AuthResponse, item: dict[str, Any]) -> N
     token = item["session"]["token"]
     response.set_cookie(refresh_session_cookie(ctx.auth, ctx.request, token))
     dont_remember = cookie_name(ctx.auth, "dont_remember") in ctx.request.cookies()
-    cache_cookie = set_cookie_cache(ctx.auth, item["session"], item["user"], dont_remember)
+    cache_cookie = await set_cookie_cache_async(
+        ctx.auth, item["session"], item["user"], dont_remember
+    )
     if cache_cookie is not None:
         response.set_cookie(cache_cookie)
     ctx.new_session = {"session": item["session"], "user": item["user"]}

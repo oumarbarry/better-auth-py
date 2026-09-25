@@ -66,7 +66,8 @@ async def test_forwards_set_cookie_headers_as_separate_entries_not_comma_joined(
     )
     async with make_client(auth) as client:
         await sign_up(client)
-        response = await client.get("/api/auth/get-session")
+        # sign-up already wrote the cache; bypass it so the DB read refreshes both cookies
+        response = await client.get("/api/auth/get-session?disableCookieCache=true")
         assert response.status_code == 200
         cookies = response.headers.get_list("set-cookie")
         # each cookie is its own header -- never comma-joined into one entry
@@ -97,7 +98,7 @@ async def test_refreshed_session_cookie_is_not_double_encoded():
         await sign_up(client)
         original_token = signed_in_cookie.get("better-auth.session_token")
         assert original_token is not None
-        response = await client.get("/api/auth/get-session")
+        response = await client.get("/api/auth/get-session?disableCookieCache=true")
         refreshed = None
         for cookie in response.headers.get_list("set-cookie"):
             if cookie.startswith("better-auth.session_token="):
