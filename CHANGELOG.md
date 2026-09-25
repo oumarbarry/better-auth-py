@@ -7,6 +7,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-09-25
+
+### Fixed
+
+- Single-use values (magic links, one-time tokens, email and phone OTP codes,
+  two-factor challenges, password reset and account deletion tokens, device
+  codes) can no longer be used twice when two requests race on a database
+  shared by several processes. Consuming one now deletes the row by id and
+  succeeds only for the request that actually removed it, as better-auth
+  does.
+- Password reset and account deletion tokens are stored and read through the
+  verification storage, so they follow `verification.store_identifier` and
+  secondary storage like other verification values.
+- An expired account deletion link is rejected with `INVALID_TOKEN` instead
+  of deleting the account.
+- Database hooks on `verification` deletes run once, for the consumed row. A
+  `before` hook that returns `False` now stops the consume.
+- A guarded counter update changes only the row it read, even when the
+  condition matches several rows.
+
 ## [1.0.2] - 2026-09-25
 
 ### Fixed
