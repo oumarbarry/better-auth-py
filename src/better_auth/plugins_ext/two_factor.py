@@ -76,8 +76,11 @@ _BACKUP_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567
 #: KEY is the wire ``code``; the value is the ``message``.
 ERROR_CODES: dict[str, str] = {
     "OTP_NOT_ENABLED": "OTP not enabled",
+    "OTP_NOT_CONFIGURED": "OTP is not available",
     "OTP_HAS_EXPIRED": "OTP has expired",
     "TOTP_NOT_ENABLED": "TOTP not enabled",
+    "TOTP_ALREADY_ENABLED": "TOTP is already enabled",
+    "TOTP_NOT_CONFIGURED": "TOTP is not available",
     "TWO_FACTOR_NOT_ENABLED": "Two factor isn't enabled",
     "BACKUP_CODES_NOT_ENABLED": "Backup codes aren't enabled",
     "INVALID_BACKUP_CODE": "Invalid backup code",
@@ -184,9 +187,16 @@ class _Challenge:
             parsed = -1
         attempts = parsed if parsed >= 0 else allowed
         if attempts >= allowed:
-            # Budget spent: cancel the whole challenge so every factor must restart.
-            with contextlib.suppress(Exception):
+            # Budget spent: cancel the whole challenge so every factor must restart. A
+            # failed cancel fails closed (TS verify-two-factor.ts:164-174).
+            try:
                 await auth.internal.consume_verification_value(self.identifier)
+            except Exception as exc:
+                raise APIError(
+                    500,
+                    "FAILED_TO_INVALIDATE_TWO_FACTOR_CHALLENGE",
+                    "Failed to invalidate two-factor challenge",
+                ) from exc
             raise _err(400, "TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE")
         expires_at = self.expires_at
 
@@ -478,10 +488,13 @@ class TwoFactorPlugin(Plugin):
             self.table, [Where("id", tf["id"])], increment={"failedVerificationCount": 1}
         )
         if (updated or {}).get("failedVerificationCount", 0) >= max_failed:
-            await self.auth.adapter.update(
+            # Guarded so a concurrent reset cannot be overwritten by a stale lock
+            # (TS verify-two-factor.ts:284-297).
+            await self.auth.adapter.increment_one(
                 self.table,
-                [Where("id", tf["id"])],
-                {"lockedUntil": utcnow() + timedelta(seconds=duration)},
+                [Where("id", tf["id"]), Where("failedVerificationCount", max_failed, "gte")],
+                increment={},
+                set={"lockedUntil": utcnow() + timedelta(seconds=duration)},
             )
 
     async def _reset_failures(self, tf: dict[str, Any]) -> None:
@@ -540,40 +553,56 @@ class TwoFactorPlugin(Plugin):
         user = result["user"]
         body = ctx.body()
         await self._require_password(user["id"], body.get("password"), self.allow_passwordless)
+        # TS two-factor/index.ts:72 `method: z.enum(["otp", "totp"]).default("totp")`.
+        method = body.get("method", "totp")
+        if method not in ("otp", "totp"):
+            raise APIError(400, "INVALID_BODY", "method must be 'otp' or 'totp'")
+        if method == "otp" and not self._otp_send:
+            raise _err(400, "OTP_NOT_CONFIGURED")
+        if method == "totp" and self._totp_disable:
+            raise _err(400, "TOTP_NOT_CONFIGURED")
 
-        secret = generate_random_string(32)
-        encrypted_secret = symmetric_encrypt(self.auth.secret, secret)
-        codes = self._generate_backup_codes()
-        encrypted_codes = await self._encode_backup_codes(codes)
-
-        cookies: list[str] = []
-        if self.skip_verification_on_enable:
+        async def enable_user() -> list[str]:
             updated = await self.auth.internal.update_user(user["id"], {"twoFactorEnabled": True})
             assert updated is not None
             _new_session, cookies = await create_session(
                 self.auth, updated["id"], ctx.request, remember_me=True, user=updated, ctx=ctx
             )
             await self.auth.internal.delete_session(result["session"]["token"])
+            return cookies
+
+        cookies: list[str] = []
+        if method == "otp":
+            # OTP enablement is immediate and needs no twoFactor row (index.ts:210-229).
+            resp = AuthResponse(body={"method": "otp"})
+            for cookie in await enable_user():
+                resp.set_cookie(cookie)
+            return resp
 
         existing = await self.auth.adapter.find_one(self.table, [Where("userId", user["id"])])
-        await self.auth.adapter.delete_many(self.table, [Where("userId", user["id"])])
-        verified = (
-            existing is not None and existing.get("verified") is not False
-        ) or self.skip_verification_on_enable
-        await self.auth.adapter.create(
-            self.table,
-            {
-                "secret": encrypted_secret,
-                "backupCodes": encrypted_codes,
-                "userId": user["id"],
-                "verified": verified,
-            },
-        )
+        if existing and existing.get("verified") is not False:
+            raise _err(400, "TOTP_ALREADY_ENABLED")  # index.ts:231-242
+        codes = self._generate_backup_codes()
+        encrypted_codes = await self._encode_backup_codes(codes)
+        secret = generate_random_string(32)
+        encrypted_secret = symmetric_encrypt(self.auth.secret, secret)
+        if self.skip_verification_on_enable:
+            cookies = await enable_user()
+        totp_data = {
+            "secret": encrypted_secret,
+            "backupCodes": encrypted_codes,
+            "verified": self.skip_verification_on_enable,
+        }
+        if existing:
+            # Restart an unverified enrollment in place (index.ts:278-283).
+            await self.auth.adapter.update(self.table, [Where("id", existing["id"])], totp_data)
+        else:
+            await self.auth.adapter.create(self.table, {**totp_data, "userId": user["id"]})
         issuer = body.get("issuer") or self.issuer or DEFAULT_APP_NAME
         uri = otpauth_url(
             secret, issuer, user["email"], digits=self._totp_digits, period=self._totp_period
         )
-        resp = AuthResponse(body={"totpURI": uri, "backupCodes": codes})
+        resp = AuthResponse(body={"method": "totp", "totpURI": uri, "backupCodes": codes})
         for cookie in cookies:
             resp.set_cookie(cookie)
         return resp
@@ -727,9 +756,10 @@ class TwoFactorPlugin(Plugin):
             tf = await self.auth.adapter.find_one(
                 self.table, [Where("userId", challenge.user["id"])]
             )
-            if not tf:
-                raise _err(400, "TWO_FACTOR_NOT_ENABLED")
-            await self._assert_not_locked(tf)
+            # OTP-only accounts have no row; the shared lockout applies only when one
+            # exists (TS otp/index.ts:319-334).
+            if tf:
+                await self._assert_not_locked(tf)
         # Consume the OTP row atomically as the race gate.
         otp_identifier = f"2fa-otp-{challenge.key}"
         consumed = await self.auth.internal.consume_verification_value(otp_identifier)

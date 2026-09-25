@@ -732,3 +732,71 @@ def _recorder(holder: dict[str, Any]):
         holder["code"] = data["code"]
 
     return record
+
+
+# --- v1.7.6: counter parsing, server-side consume -------------------------------------
+
+
+async def test_corrupt_attempt_counter_counts_as_zero():
+    # TS v1.7.6 routes.ts:919-922 parseVerificationAttempts: a corrupt counter is 0.
+    otp: dict[str, Any] = {}
+    auth = make_auth(plugins=[phone_plugin(otp)])
+    phone = "+251900000077"
+    async with make_client(auth) as client:
+        await send_otp(client, phone)
+        row = await auth.adapter.find_one("verification", [Where("identifier", phone)])
+        assert row is not None
+        await auth.adapter.update(
+            "verification", [Where("id", row["id"])], {"value": f"{otp['code']}:garbage"}
+        )
+        wrong = await client.post(
+            f"{BASE}/phone-number/verify", json={"phoneNumber": phone, "code": "000000"}
+        )
+        assert wrong.status_code == 400
+        rearmed = await auth.adapter.find_one("verification", [Where("identifier", phone)])
+        assert rearmed is not None and rearmed["value"] == f"{otp['code']}:1"
+
+
+async def test_zero_allowed_attempts_rejects_every_code():
+    # TS v1.7.6 routes.ts:881 `allowedAttempts ?? 3`: an explicit 0 is honored.
+    otp: dict[str, Any] = {}
+    auth = make_auth(plugins=[phone_plugin(otp, allowed_attempts=0)])
+    phone = "+251900000078"
+    async with make_client(auth) as client:
+        await send_otp(client, phone)
+        res = await client.post(
+            f"{BASE}/phone-number/verify", json={"phoneNumber": phone, "code": otp["code"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "TOO_MANY_ATTEMPTS"
+
+
+async def test_consume_phone_number_otp_server_only():
+    # TS v1.7.6 routes.ts:343-363 consumePhoneNumberOTP: verifies and burns the OTP
+    # without touching a user or a session; it has no HTTP route.
+    otp: dict[str, Any] = {}
+    plugin = phone_plugin(otp)
+    auth = make_auth(plugins=[plugin])
+    phone = "+251900000079"
+    async with make_client(auth) as client:
+        await send_otp(client, phone)
+        assert await plugin.consume_phone_number_otp(phone, otp["code"]) == {"status": True}
+        assert await auth.adapter.find_one("verification", [Where("identifier", phone)]) is None
+        assert await auth.adapter.find_one("user", [Where("phoneNumber", phone)]) is None
+        again = await client.post(
+            f"{BASE}/phone-number/consume-otp", json={"phoneNumber": phone, "code": "1"}
+        )
+        assert again.status_code == 404
+
+
+async def test_consume_phone_number_otp_uses_custom_verifier():
+    otp: dict[str, Any] = {}
+    plugin = phone_plugin(otp, verify_otp=lambda data, ctx=None: data["code"] == "424242")
+    make_auth(plugins=[plugin])
+    assert await plugin.consume_phone_number_otp("+251900000080", "424242") == {"status": True}
+    try:
+        await plugin.consume_phone_number_otp("+251900000080", "000000")
+    except Exception as exc:
+        assert getattr(exc, "code", None) == "INVALID_OTP"
+    else:
+        raise AssertionError("expected INVALID_OTP")

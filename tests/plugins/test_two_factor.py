@@ -785,3 +785,171 @@ async def test_rate_limit_rule() -> None:
     assert rules[0].max == 3
     assert rules[0].path_matcher("/two-factor/verify-totp") is True
     assert rules[0].path_matcher("/sign-in/email") is False
+
+
+# --- v1.7.6: OTP enablement, re-enrollment, guarded lock writes ----------------------
+
+
+async def test_enable_totp_response_carries_method() -> None:
+    # TS two-factor/index.ts:293 returns {method: "totp", totpURI, backupCodes}.
+    auth, _box, _plugin = build()
+    s = Session(auth)
+    await sign_up(s)
+    res = await s.post("/two-factor/enable", {"password": PW})
+    assert res.status == 200
+    assert res.body["method"] == "totp"
+
+
+async def test_enable_otp_method_activates_immediately_without_row() -> None:
+    # TS two-factor/index.ts:210-229: OTP enablement flips twoFactorEnabled, rotates the
+    # session and creates no twoFactor row.
+    auth, _box, _plugin = build()
+    s = Session(auth)
+    uid = await sign_up(s)
+    old_token = s.cookies["better-auth.session_token"]
+    res = await s.post("/two-factor/enable", {"password": PW, "method": "otp"})
+    assert res.status == 200, res.body
+    assert res.body == {"method": "otp"}
+    user = await auth.adapter.find_one("user", [Where("id", uid)])
+    assert user["twoFactorEnabled"] is True
+    assert await row(auth, uid) is None
+    assert s.cookies["better-auth.session_token"] != old_token
+    assert (await s.get("/get-session")).body is not None
+
+
+async def test_enable_otp_rejected_without_send_otp() -> None:
+    # TS two-factor/index.ts:197-202.
+    auth, _box, _plugin = build(otp=False)
+    s = Session(auth)
+    await sign_up(s)
+    res = await s.post("/two-factor/enable", {"password": PW, "method": "otp"})
+    assert res.status == 400
+    assert res.body == {"code": "OTP_NOT_CONFIGURED", "message": "OTP is not available"}
+
+
+async def test_enable_totp_rejected_when_totp_disabled() -> None:
+    # TS two-factor/index.ts:203-208.
+    auth, _box, _plugin = build(totp_options={"disable": True})
+    s = Session(auth)
+    await sign_up(s)
+    res = await s.post("/two-factor/enable", {"password": PW})
+    assert res.status == 400
+    assert res.body == {"code": "TOTP_NOT_CONFIGURED", "message": "TOTP is not available"}
+
+
+async def test_enable_rejects_unknown_method() -> None:
+    auth, _box, _plugin = build()
+    s = Session(auth)
+    await sign_up(s)
+    res = await s.post("/two-factor/enable", {"password": PW, "method": "sms"})
+    assert res.status == 400
+
+
+async def test_otp_only_sign_in_offers_otp_and_verifies_without_row() -> None:
+    # TS otp/index.ts:319-334 (2fa9fbb0e): OTP-only accounts have no twoFactor row; the
+    # shared account lockout applies only when a row exists.
+    auth, box, _plugin = build()
+    s = Session(auth)
+    await sign_up(s)
+    await s.post("/two-factor/enable", {"password": PW, "method": "otp"})
+
+    fresh = Session(auth)
+    res = await fresh.post("/sign-in/email", {"email": "user@example.com", "password": PW})
+    assert res.body["twoFactorMethods"] == ["otp"]
+    await fresh.post("/two-factor/send-otp", {})
+    wrong = await fresh.post("/two-factor/verify-otp", {"code": "000000"})
+    assert wrong.status == 401
+    ok = await fresh.post("/two-factor/verify-otp", {"code": box["otp"]})
+    assert ok.status == 200, ok.body
+    assert (await fresh.get("/get-session")).body is not None
+
+
+async def test_enable_otp_preserves_existing_totp_row() -> None:
+    auth, _box, _plugin = build()
+    s, uid = await enroll(auth)
+    before = await require_row(auth, uid)
+    res = await s.post("/two-factor/enable", {"password": PW, "method": "otp"})
+    assert res.status == 200
+    assert await require_row(auth, uid) == before
+    fresh = Session(auth)
+    sign_in = await fresh.post("/sign-in/email", {"email": "user@example.com", "password": PW})
+    assert sign_in.body["twoFactorMethods"] == ["totp", "otp"]
+
+
+async def test_enable_rejects_re_enrollment_when_totp_verified() -> None:
+    # TS two-factor/index.ts:231-242 (5bd709640).
+    auth, _box, _plugin = build()
+    s, uid = await enroll(auth)
+    before = await require_row(auth, uid)
+    res = await s.post("/two-factor/enable", {"password": PW})
+    assert res.status == 400
+    assert res.body == {"code": "TOTP_ALREADY_ENABLED", "message": "TOTP is already enabled"}
+    assert await require_row(auth, uid) == before
+
+
+async def test_enable_restarts_unverified_enrollment_in_place() -> None:
+    # TS two-factor/index.ts:273-291: an unverified row is updated, not recreated.
+    auth, _box, _plugin = build()
+    s = Session(auth)
+    uid = await sign_up(s)
+    await s.post("/two-factor/enable", {"password": PW})
+    first = await require_row(auth, uid)
+    res = await s.post("/two-factor/enable", {"password": PW})
+    assert res.status == 200
+    second = await require_row(auth, uid)
+    assert second["id"] == first["id"]
+    assert second["secret"] != first["secret"]
+    assert second["verified"] is False
+    assert len(await auth.adapter.find_many("twoFactor", [Where("userId", uid)])) == 1
+
+
+async def test_lock_write_is_guarded_on_failed_count() -> None:
+    # TS verify-two-factor.ts:284-297 (3ea364d5f): lockedUntil is set through incrementOne
+    # guarded on failedVerificationCount >= max, never a blind update.
+    auth, _box, plugin = build(account_lockout={"max_failed_attempts": 1})
+    _s, uid = await enroll(auth)
+    calls: list[dict[str, Any]] = []
+    real = auth.adapter.increment_one
+
+    async def spy(model: str, where: list[Where], increment: Any = None, set: Any = None) -> Any:
+        calls.append({"model": model, "where": where, "increment": increment, "set": set})
+        return await real(model, where, increment=increment, set=set)
+
+    auth.adapter.increment_one = spy
+    fresh = Session(auth)
+    await fresh.post("/sign-in/email", {"email": "user@example.com", "password": PW})
+    res = await fresh.post("/two-factor/verify-totp", {"code": "000000"})
+    assert res.status == 401
+    lock = calls[-1]
+    tf = await require_row(auth, uid)
+    assert [(w.field, w.value, w.operator) for w in lock["where"]] == [
+        ("id", tf["id"], "eq"),
+        ("failedVerificationCount", 1, "gte"),
+    ]
+    assert set(lock["set"]) == {"lockedUntil"}
+    assert tf["lockedUntil"] is not None
+    assert plugin.table == "twoFactor"
+
+
+async def test_spent_budget_fails_closed_when_challenge_invalidation_fails() -> None:
+    # TS verify-two-factor.ts:164-174: a failed consume of the spent challenge is a 500.
+    auth, _box, _plugin = build()
+    _s, uid = await enroll(auth)
+    fresh = Session(auth)
+    await fresh.post("/sign-in/email", {"email": "user@example.com", "password": PW})
+    for _ in range(5):
+        await fresh.post("/two-factor/verify-totp", {"code": "000000"})
+    real = auth.internal.consume_verification_value
+
+    async def flaky(identifier: str) -> Any:
+        if not identifier.startswith("2fa-attempts-"):
+            raise RuntimeError("database unavailable")
+        return await real(identifier)
+
+    auth.internal.consume_verification_value = flaky
+    res = await fresh.post("/two-factor/verify-totp", {"code": await totp_for(auth, uid)})
+    assert res.status == 500
+    assert res.body == {
+        "code": "FAILED_TO_INVALIDATE_TWO_FACTOR_CHALLENGE",
+        "message": "Failed to invalidate two-factor challenge",
+    }

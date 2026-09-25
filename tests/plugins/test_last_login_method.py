@@ -356,3 +356,36 @@ async def test_before_store_cookie_false_still_stores_in_database():
         assert _last_method_cookie(response) is None
         session = (await client.get("/api/auth/get-session")).json()
         assert session["user"]["lastLoginMethod"] == "email"
+
+
+def test_default_resolver_email_otp():
+    # TS v1.7.6 last-login-method/index.ts:92 (74a736917).
+    assert _default_resolve_method("/sign-in/email-otp", {}) == "email-otp"
+
+
+async def test_email_otp_sign_in_records_method_for_new_user():
+    from better_auth.plugins_ext.email_otp import EmailOTPPlugin
+
+    sent: dict[str, Any] = {}
+
+    async def send(data: dict[str, Any], *_a: Any) -> None:
+        sent.update(data)
+
+    auth = make_auth(
+        plugins=[
+            LastLoginMethodPlugin(store_in_database=True),
+            EmailOTPPlugin(send_verification_otp=send),
+        ]
+    )
+    async with make_client(auth) as client:
+        await client.post(
+            "/api/auth/email-otp/send-verification-otp",
+            json={"email": "otp@example.com", "type": "sign-in"},
+        )
+        r = await client.post(
+            "/api/auth/sign-in/email-otp", json={"email": "otp@example.com", "otp": sent["otp"]}
+        )
+        assert r.status_code == 200, r.text
+        assert "better-auth.last_used_login_method=email-otp" in r.headers["set-cookie"]
+        session = (await client.get("/api/auth/get-session")).json()
+        assert session["user"]["lastLoginMethod"] == "email-otp"

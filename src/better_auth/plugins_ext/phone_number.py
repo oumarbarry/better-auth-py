@@ -119,6 +119,7 @@ class PhoneNumberPlugin(Plugin):
         self.require_verification = require_verification
         self.callback_on_verification = callback_on_verification
         self.sign_up_on_verification = sign_up_on_verification
+        self._auth: BetterAuth | None = None
 
     # --- init: contribute the disassociation databaseHook -----------------------------
 
@@ -140,6 +141,7 @@ class PhoneNumberPlugin(Plugin):
             return None
 
         auth.internal.hooks.append({"user": {"update": {"before": before_update}}})
+        self._auth = auth
 
     # --- TS BetterAuthPlugin surface --------------------------------------------------
 
@@ -196,7 +198,7 @@ class PhoneNumberPlugin(Plugin):
         except Exception:
             logger.exception("phone-number send callback failed")
 
-    async def _consume_otp(self, ctx: Ctx, identifier: str, provided_code: str) -> None:
+    async def _consume_otp(self, internal: Any, identifier: str, provided_code: str) -> None:
         """Atomic OTP verification against the stored ``"<code>:<attempts>"`` row.
 
         Mirrors TS ``verifyPhoneNumberOTP`` (routes.ts:849): expiry gate, attempt-budget
@@ -204,7 +206,6 @@ class PhoneNumberPlugin(Plugin):
         budget the row is recreated with the same value/expiry and ``attempts+1``; once
         the budget is spent the row is deleted and not recreated (locked out).
         """
-        internal = ctx.internal
         existing = await internal.find_verification_value(identifier)
         if existing is None:
             raise _err("OTP_NOT_FOUND", 400)
@@ -212,9 +213,8 @@ class PhoneNumberPlugin(Plugin):
             await internal.delete_verification_by_identifier(identifier)
             raise _err("OTP_EXPIRED", 400)
 
-        allowed = self.allowed_attempts or 3
-        peeked = _attempts_of(existing["value"])
-        if peeked and int(peeked) >= allowed:
+        allowed = 3 if self.allowed_attempts is None else self.allowed_attempts
+        if _parse_attempts(existing["value"]) >= allowed:
             await internal.delete_verification_by_identifier(identifier)
             raise _err("TOO_MANY_ATTEMPTS", 403)
 
@@ -222,18 +222,41 @@ class PhoneNumberPlugin(Plugin):
         if consumed is None:
             raise _err("INVALID_OTP", 400)
 
-        otp_value, _, raw_attempts = consumed["value"].partition(":")
-        if raw_attempts and int(raw_attempts) >= allowed:
+        otp_value = consumed["value"].partition(":")[0]
+        attempts = _parse_attempts(consumed["value"])
+        if attempts >= allowed:
             raise _err("TOO_MANY_ATTEMPTS", 403)
         if otp_value != provided_code:
             await internal.create_verification_value(
                 {
-                    "value": f"{otp_value}:{int(raw_attempts or '0') + 1}",
+                    "value": f"{otp_value}:{attempts + 1}",
                     "identifier": identifier,
                     "expiresAt": consumed["expiresAt"],
                 }
             )
             raise _err("INVALID_OTP", 400)
+
+    async def _verify_and_consume(
+        self, internal: Any, phone: str, code: str, ctx: Ctx | None
+    ) -> None:
+        """TS ``verifyAndConsumePhoneNumberOTP`` (v1.7.6 routes.ts:320-341): a custom
+        verifier bypasses the internal store but still clears any stored row."""
+        if self.verify_otp is not None:
+            if not await _maybe_await(self.verify_otp({"phoneNumber": phone, "code": code}, ctx)):
+                raise _err("INVALID_OTP", 400)
+            await internal.delete_verification_by_identifier(phone)
+            return
+        await self._consume_otp(internal, phone, code)
+
+    async def consume_phone_number_otp(
+        self, phone_number: str, code: str, ctx: Ctx | None = None
+    ) -> dict[str, Any]:
+        """TS server-only ``consumePhoneNumberOTP`` (v1.7.6 routes.ts:343-363): verify and
+        burn an OTP without updating a user or creating a session. Not mounted on the
+        HTTP router."""
+        assert self._auth is not None, "plugin.init() has not run yet"
+        await self._verify_and_consume(self._auth.internal, phone_number, code, ctx)
+        return {"status": True}
 
     async def _credential_account(self, ctx: Ctx, user_id: str) -> dict[str, Any] | None:
         return await ctx.adapter.find_one(
@@ -302,14 +325,7 @@ class PhoneNumberPlugin(Plugin):
         phone = _required_str(body, "phoneNumber")
         code = _required_str(body, "code")
 
-        if self.verify_otp is not None:
-            # Custom verifier bypasses the internal store but still cleans up any row.
-            if not await _maybe_await(self.verify_otp({"phoneNumber": phone, "code": code}, ctx)):
-                raise _err("INVALID_OTP", 400)
-            if await ctx.internal.find_verification_value(phone) is not None:
-                await ctx.internal.delete_verification_by_identifier(phone)
-        else:
-            await self._consume_otp(ctx, phone, code)
+        await self._verify_and_consume(ctx.internal, phone, code, ctx)
 
         if body.get("updatePhoneNumber"):
             return await self._verify_update_phone(ctx, phone)
@@ -412,7 +428,7 @@ class PhoneNumberPlugin(Plugin):
         phone = _required_str(body, "phoneNumber")
         new_password = _required_str(body, "newPassword")
         identifier = f"{phone}-request-password-reset"
-        await self._consume_otp(ctx, identifier, _required_str(body, "otp"))
+        await self._consume_otp(ctx.internal, identifier, _required_str(body, "otp"))
 
         user = await ctx.adapter.find_one("user", [Where("phoneNumber", phone)])
         if user is None:
@@ -446,8 +462,14 @@ class PhoneNumberPlugin(Plugin):
         return AuthResponse(body={"status": True})
 
 
-def _attempts_of(value: str) -> str | None:
-    """Second half of a ``"<code>:<attempts>"`` value, or ``None`` when colon-less
-    (the requireVerification sign-in path stores the bare code)."""
-    _, sep, attempts = value.partition(":")
-    return attempts if sep else None
+def _parse_attempts(value: str) -> int:
+    """Counter half of a ``"<code>:<attempts>"`` value (TS v1.7.6 routes.ts:919
+    ``parseVerificationAttempts``). A missing counter (the requireVerification sign-in
+    path stores the bare code) or a corrupt or negative one counts as 0."""
+    parts = value.split(":")
+    raw = parts[1] if len(parts) > 1 else "0"
+    try:
+        attempts = int(raw.strip() or "0") if "_" not in raw else 0
+    except ValueError:
+        return 0
+    return attempts if 0 < attempts <= 2**53 - 1 else 0

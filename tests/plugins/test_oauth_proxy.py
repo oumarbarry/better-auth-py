@@ -13,7 +13,7 @@ ported).
 
 Two-server flow (the real deployment shape): a *preview* instance starts the
 sign-in, a *production* instance completes the provider code exchange and replays
-an encrypted profile to the preview's ``/oauth-proxy-callback``.
+an encrypted profile to the preview's ``/callback/{provider}/oauth-proxy``.
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ async def test_no_op_when_current_equals_production():
         assert len(state) < 50
         response = await client.get(f"/api/auth/callback/github?code=abc&state={state}")
         location = response.headers["location"]
-        assert "/oauth-proxy-callback" not in location
+        assert "oauth-proxy" not in location
         assert "/dashboard" in location
 
 
@@ -152,7 +152,7 @@ async def test_before_hook_rewrites_callback_url_with_embedded_return():
         # the stored state carries the rewritten proxy callbackURL
         inner = json.loads(symmetric_decrypt(SECRET, package["stateCookie"]))
         assert inner["callbackURL"] == (
-            "http://preview.example.com/api/auth/oauth-proxy-callback?callbackURL=%2Fdashboard"
+            "http://preview.example.com/api/auth/callback/github/oauth-proxy?callbackURL=%2Fdashboard"
         )
 
 
@@ -173,7 +173,9 @@ async def test_production_callback_redirects_to_proxy_with_profile():
         response = await prod.get(f"/api/auth/callback/github?code=abc&state={state}")
         assert response.status_code == 302
         location = response.headers["location"]
-        assert location.startswith("http://preview.example.com/api/auth/oauth-proxy-callback")
+        assert location.startswith(
+            "http://preview.example.com/api/auth/callback/github/oauth-proxy"
+        )
         q = parse_qs(urlsplit(location).query)
         assert q["callbackURL"] == ["/dashboard"]
         assert q["profile"][0]
@@ -275,8 +277,9 @@ async def _full_round_trip(preview: BetterAuth, production: BetterAuth) -> str:
         location = prod_response.headers["location"]
         q = parse_qs(urlsplit(location).query)
         callback_url, profile = q["callbackURL"][0], q["profile"][0]
+        assert urlsplit(location).path == "/api/auth/callback/github/oauth-proxy"
         proxy_response = await pv.get(
-            f"/api/auth/oauth-proxy-callback"
+            f"{urlsplit(location).path}"
             f"?callbackURL={quote(callback_url, safe='')}&profile={quote(profile, safe='')}"
         )
         return proxy_response.headers["location"]
@@ -355,7 +358,7 @@ async def test_different_secrets_without_shared_secret_fail_closed():
         response = await prod.get(f"/api/auth/callback/github?code=abc&state={state}")
         location = response.headers["location"]
         # no passthrough; regular callback ran and failed on state
-        assert "/oauth-proxy-callback" not in location
+        assert "oauth-proxy" not in location
         assert "error=" in location
 
 
@@ -532,7 +535,7 @@ async def test_untrusted_request_origin_not_used_as_proxy_receiver():
     location = callback.redirect_to
     assert location is not None
     assert "untrusted.example" not in location
-    assert location.startswith("http://myapp.com/api/auth/oauth-proxy-callback")
+    assert location.startswith("http://myapp.com/api/auth/callback/github/oauth-proxy")
 
 
 async def test_trusted_request_origin_used_as_proxy_receiver():
@@ -562,7 +565,7 @@ async def test_trusted_request_origin_used_as_proxy_receiver():
         )
     )
     assert (callback.redirect_to or "").startswith(
-        "http://preview.myapp.com/api/auth/oauth-proxy-callback"
+        "http://preview.myapp.com/api/auth/callback/github/oauth-proxy"
     )
 
 
@@ -583,7 +586,7 @@ async def test_explicit_current_url_overrides_request_origin():
         package = json.loads(symmetric_decrypt(SECRET, state_of(url)))
         inner = json.loads(symmetric_decrypt(SECRET, package["stateCookie"]))
         assert inner["callbackURL"].startswith(
-            "http://preview.example.com/api/auth/oauth-proxy-callback"
+            "http://preview.example.com/api/auth/callback/github/oauth-proxy"
         )
 
 
@@ -616,7 +619,7 @@ async def test_vendor_env_fallback_when_request_origin_untrusted(monkeypatch: An
         )
     )
     assert (callback.redirect_to or "").startswith(
-        "https://vercel-preview.example.com/api/auth/oauth-proxy-callback"
+        "https://vercel-preview.example.com/api/auth/callback/github/oauth-proxy"
     )
 
 
@@ -647,7 +650,9 @@ async def test_bare_vendor_name_falls_back_to_base_url(monkeypatch: Any):
             query={"code": "abc", "state": state},
         )
     )
-    assert (callback.redirect_to or "").startswith("http://myapp.com/api/auth/oauth-proxy-callback")
+    assert (callback.redirect_to or "").startswith(
+        "http://myapp.com/api/auth/callback/github/oauth-proxy"
+    )
 
 
 # --- after /callback: unwrap same-origin proxy redirect (defensive branch) ----------------
@@ -662,7 +667,7 @@ async def test_after_callback_unwraps_same_origin_proxy_redirect():
     auth = make_instance("http://myapp.com", plugin)
     ctx = Ctx(auth=auth, request=AuthRequest(method="GET", path="/callback/github"))
     ctx.response = AuthResponse(
-        redirect_to="http://myapp.com/api/auth/oauth-proxy-callback?callbackURL=%2Fdashboard"
+        redirect_to="http://myapp.com/api/auth/callback/github/oauth-proxy?callbackURL=%2Fdashboard"
     )
     assert await plugin._after_callback(ctx) is None
     assert ctx.response.redirect_to == "/dashboard"
@@ -673,7 +678,7 @@ async def test_after_callback_leaves_cross_origin_redirect_untouched():
 
     plugin = OAuthProxyPlugin(production_url="http://myapp.com")
     auth = make_instance("http://myapp.com", plugin)
-    original = "http://preview.example.com/api/auth/oauth-proxy-callback?callbackURL=%2Fx"
+    original = "http://preview.example.com/api/auth/callback/github/oauth-proxy?callbackURL=%2Fx"
     ctx = Ctx(auth=auth, request=AuthRequest(method="GET", path="/callback/github"))
     ctx.response = AuthResponse(redirect_to=original)
     await plugin._after_callback(ctx)
@@ -703,3 +708,121 @@ async def test_signup_disabled_error_forwarded_verbatim():
     location = await _full_round_trip(preview, production)
     assert "error=signup_disabled" in location
     assert len(await preview.adapter.find_many("user")) == 0
+
+
+# --- v1.7.6: per-provider completion route, linking, callback hooks ----------------------
+
+
+async def _production_location(pv: AsyncClient, prod: AsyncClient, url: str) -> str:
+    response = await prod.get(f"/api/auth/callback/github?code=abc&state={state_of(url)}")
+    assert response.status_code == 302
+    return response.headers["location"]
+
+
+def _completion_path(location: str) -> str:
+    parts = urlsplit(location)
+    return f"{parts.path}?{parts.query}"
+
+
+async def test_payload_carries_profile_and_scopes():
+    # TS v1.7.6 index.ts:580-590: the passthrough payload carries the raw provider profile
+    # and the token scopes.
+    preview = make_instance(
+        "http://preview.example.com",
+        OAuthProxyPlugin(production_url="http://production.example.com"),
+    )
+    production = make_instance("http://production.example.com", OAuthProxyPlugin())
+    async with make_client(preview) as pv, make_client(production) as prod:
+        location = await _production_location(pv, prod, await start_sign_in(pv))
+        profile = parse_qs(urlsplit(location).query)["profile"][0]
+        payload = json.loads(symmetric_decrypt(SECRET, profile))
+        assert payload["profile"]["login"] == "octocat"
+        assert isinstance(payload["scopes"], list)
+        assert payload["userInfo"]["id"] == payload["account"]["accountId"] == "4242"
+
+
+async def test_completion_rejects_provider_mismatch():
+    # TS v1.7.6 index.ts:216-222.
+    auth = make_instance("http://preview.example.com", OAuthProxyPlugin())
+    async with make_client(auth) as client:
+        profile = _encrypt_payload(SECRET)  # account.providerId == "github"
+        response = await client.get(
+            "/api/auth/callback/google/oauth-proxy?callbackURL=%2Fdashboard"
+            f"&profile={quote(profile, safe='')}"
+        )
+        assert response.status_code == 302
+        assert "error=provider_mismatch" in response.headers["location"]
+
+
+async def test_callback_hooks_run_for_proxied_sign_in():
+    # TS 9fc749867: the completion runs under /callback/:id, so callback after-hooks such
+    # as last-login-method see the provider id.
+    from better_auth.plugins_ext.last_login_method import LastLoginMethodPlugin
+
+    preview = BetterAuth(
+        secret=SECRET,
+        base_url="http://preview.example.com",
+        adapter=MemoryAdapter(),
+        social_providers={"github": GitHub(client_id="cid", client_secret="csecret")},
+        http_client=github_http(),
+        plugins=[
+            OAuthProxyPlugin(production_url="http://production.example.com"),
+            LastLoginMethodPlugin(),
+        ],
+    )
+    production = make_instance("http://production.example.com", OAuthProxyPlugin())
+    async with make_client(preview) as pv, make_client(production) as prod:
+        location = await _production_location(pv, prod, await start_sign_in(pv))
+        done = await pv.get(_completion_path(location))
+        assert done.status_code == 302
+        assert "error=" not in done.headers["location"]
+        cookies = done.headers.get_list("set-cookie")
+        assert any(c.startswith("better-auth.last_used_login_method=github;") for c in cookies)
+
+
+async def test_link_social_through_proxy_links_account_on_preview():
+    # TS 2fa501cdf (index.ts:237-253): a proxied /link-social attaches the provider account
+    # to the signed-in preview user without minting a new session.
+    from better_auth import EmailAndPassword
+
+    preview = make_instance(
+        "http://preview.example.com",
+        OAuthProxyPlugin(production_url="http://production.example.com"),
+        email_and_password=EmailAndPassword(enabled=True),
+    )
+    production = make_instance("http://production.example.com", OAuthProxyPlugin())
+    async with make_client(preview) as pv, make_client(production) as prod:
+        signed_up = await pv.post(
+            "/api/auth/sign-up/email",
+            json={"email": "octo@example.com", "password": "s3cret-password", "name": "Octo"},
+        )
+        assert signed_up.status_code == 200, signed_up.text
+        user_id = signed_up.json()["user"]["id"]
+        linked = await pv.post(
+            "/api/auth/link-social", json={"provider": "github", "callbackURL": "/settings"}
+        )
+        assert linked.status_code == 200, linked.text
+        sessions_before = await preview.adapter.find_many("session")
+
+        location = await _production_location(pv, prod, linked.json()["url"])
+        assert urlsplit(location).path == "/api/auth/callback/github/oauth-proxy"
+        done = await pv.get(_completion_path(location))
+        assert done.status_code == 302
+        assert done.headers["location"] == "http://preview.example.com/settings"
+        accounts = await preview.adapter.find_many("account", [Where("providerId", "github")])
+        assert [a["userId"] for a in accounts] == [user_id]
+        assert len(await preview.adapter.find_many("session")) == len(sessions_before)
+        assert len(await production.adapter.find_many("account")) == 0
+
+
+async def test_after_callback_unwraps_legacy_proxy_redirect():
+    plugin = OAuthProxyPlugin(production_url="http://myapp.com")
+    auth = make_instance("http://myapp.com", plugin)
+    from better_auth import AuthRequest, AuthResponse, Ctx
+
+    ctx = Ctx(auth=auth, request=AuthRequest(method="GET", path="/callback/github"))
+    ctx.response = AuthResponse(
+        redirect_to="http://myapp.com/api/auth/oauth-proxy-callback?callbackURL=%2Fdashboard"
+    )
+    await plugin._after_callback(ctx)
+    assert ctx.response.redirect_to == "/dashboard"

@@ -23,6 +23,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   and SQLite.
 - Custom rate-limit storages can implement `consume(key, rule)` to decide a
   request in one atomic step.
+- Two-factor: `/two-factor/enable` takes `method: "otp"` to turn on email
+  or SMS codes without an authenticator app. OTP-only accounts can sign in
+  without a `twoFactor` row.
+- Phone number: `consume_phone_number_otp(phone_number, code)` checks and
+  burns an OTP on the server without a session.
+- Captcha: Vercel BotID provider (`provider="vercel-botid"`), and `*` and
+  `**` wildcards in `endpoints`.
+- Have I Been Pwned: `is_password_compromised(password)` helper.
+- oauth-proxy: social account linking through `/link-social`.
+- SIWE: `accept_legacy_wallet_fields=True` accepts and ignores the
+  `walletAddress`, `address` and `chainId` fields older clients send.
 
 ### Changed
 
@@ -80,6 +91,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   older non-atomic path and logs a warning once.
 - `increment_one` raises `BetterAuthError` instead of `ValueError` when both
   `increment` and `set` are empty.
+- Captcha `endpoints` rules match full paths instead of substrings. A rule
+  such as `/sign-up` no longer covers `/sign-up/email`; write
+  `/sign-up/email` or `/sign-up/**`. Check custom rules before upgrading, or
+  those routes stop requiring a captcha. The default rules are unaffected.
+- SIWE: nonces are issued before the wallet is known and stored as
+  `siwe:<nonce>`; address and chain id come from the signed message. The
+  nonce and verify endpoints reject unknown body fields (see
+  `accept_legacy_wallet_fields`). Nonces issued before the upgrade stop
+  working. New wallet users get `<address>@siwe.placeholder.invalid` unless
+  `email_domain_name` is set.
+- oauth-proxy: proxied sign-ins complete on `/callback/{provider}/oauth-proxy`,
+  so callback hooks run. `/oauth-proxy-callback` still works but is
+  deprecated. Generic OAuth `/sign-in/oauth2` is no longer proxied.
+- Two-factor: enabling TOTP again after it is verified returns
+  `TOTP_ALREADY_ENABLED`. An unfinished enrollment is restarted in place.
+- Phone number: `allowed_attempts=0` now means zero attempts.
+- last-login-method records `"email-otp"` for email OTP sign-ins.
+- Have I Been Pwned: an empty password is checked too, and a failed lookup
+  reports the HTTP status.
 
 ### Fixed
 
@@ -104,6 +134,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   and retries up to five times.
 - A failed memory adapter transaction no longer erases writes made
   concurrently outside it.
+- Two-factor: the account lock is written only while the failure count is
+  still at the limit, and a challenge that cannot be cancelled returns
+  `FAILED_TO_INVALIDATE_TWO_FACTOR_CHALLENGE` instead of being ignored.
+- Phone number: a corrupt attempt counter no longer causes a server error.
+- SIWE: a caller email is claimed through a short reservation, so two
+  wallets cannot take the same email at once.
+- Have I Been Pwned: padded zero-count entries no longer flag a password.
+- Magic link: a refused user creation redirects to the error URL with the
+  error code.
 
 ## [1.0.3] - 2026-09-25
 
