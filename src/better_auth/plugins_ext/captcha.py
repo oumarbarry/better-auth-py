@@ -1,7 +1,7 @@
 """Captcha plugin — verify a CAPTCHA token (``x-captcha-response`` header) against a
 provider before protected sign-up/sign-in endpoints run.
 
-Port of better-auth's ``plugins/captcha`` (v1.6.23; index.ts, constants.ts,
+Port of better-auth's ``plugins/captcha`` (v1.7.6; index.ts, constants.ts,
 error-codes.ts, verify-handlers/*.ts). Runs in ``on_request`` — i.e. after core rate
 limiting and before route dispatch (see ``BetterAuth._dispatch``) — so a rejected
 captcha never reaches the endpoint handler, and an exhausted rate limit short-circuits
@@ -14,12 +14,17 @@ provider's siteverify endpoint is treated as an unknown error (500), never as a 
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
+import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 
 from ..ip import get_request_ip
+from ..origin import _wildcard_to_regex
 from ..plugins import Plugin
 from ..types import AuthResponse, Ctx
 
@@ -29,9 +34,6 @@ logger = logging.getLogger("better_auth.captcha")
 CAPTCHA_VERIFY_TIMEOUT = 10.0
 
 DEFAULT_ENDPOINTS: list[str] = ["/sign-up/email", "/sign-in/email", "/request-password-reset"]
-
-#: exempt unless the caller's custom ``endpoints`` list names it verbatim (index.ts:42-51).
-_EXEMPT_BY_DEFAULT = ["/sign-in/email-otp"]
 
 SITE_VERIFY_MAP: dict[str, str] = {
     "cloudflare-turnstile": "https://challenges.cloudflare.com/turnstile/v0/siteverify",
@@ -51,6 +53,25 @@ INTERNAL_ERROR_CODES: dict[str, str] = {
     "MISSING_SECRET_KEY": "Missing secret key",
     "SERVICE_UNAVAILABLE": "CAPTCHA service unavailable",
 }
+
+
+def _normalize_path(path: str) -> str:
+    """TS ``normalizeEndpointPath`` (v1.7.6 index.ts:22-34); the base path and a trailing
+    slash are already stripped by dispatch, so only duplicate slashes remain."""
+    return re.sub(r"/{2,}", "/", path)
+
+
+def _endpoint_matches(endpoint: str, pathname: str) -> bool:
+    """Full-path rule: exact, or a ``*``/``**`` wildcard (TS v1.7.6 index.ts:51-55)."""
+    if "*" in endpoint:
+        return bool(_wildcard_to_regex(endpoint).match(pathname))
+    return endpoint == pathname
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _verification_failed() -> AuthResponse:
@@ -90,8 +111,11 @@ class CaptchaPlugin(Plugin):
     """Gate protected endpoints behind a CAPTCHA provider (TS ``plugins/captcha``).
 
     Constructor kwargs mirror the TS ``CaptchaOptions`` union (snake_case) with identical
-    defaults, flattened across all four providers — only the fields relevant to the
-    configured ``provider`` are read.
+    defaults, flattened across all providers; only the fields relevant to the configured
+    ``provider`` are read. ``provider="vercel-botid"`` needs no secret key: it calls
+    ``check_bot_id()`` (returning the BotID verdict dict, ``{"isBot": ...}``) and allows
+    the request when ``isBot`` is ``False``, or when ``validate_request({"request",
+    "verification"})`` returns true.
     """
 
     id = "captcha"
@@ -101,13 +125,15 @@ class CaptchaPlugin(Plugin):
         self,
         *,
         provider: str,
-        secret_key: str,
+        secret_key: str = "",
         endpoints: list[str] | None = None,
         site_verify_url_override: str | None = None,
         min_score: float = 0.5,
         expected_action: str | None = None,
         allowed_hostnames: list[str] | None = None,
         site_key: str | None = None,
+        check_bot_id: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+        validate_request: Callable[[dict[str, Any]], bool | Awaitable[bool]] | None = None,
     ) -> None:
         self.provider = provider
         self.secret_key = secret_key
@@ -117,22 +143,18 @@ class CaptchaPlugin(Plugin):
         self.expected_action = expected_action
         self.allowed_hostnames = allowed_hostnames
         self.site_key = site_key
-
-    def _exempt_paths(self) -> list[str]:
-        endpoints = self.endpoints or []
-        return [p for p in _EXEMPT_BY_DEFAULT if not (endpoints and p in endpoints)]
+        self.check_bot_id = check_bot_id
+        self.validate_request = validate_request
 
     async def on_request(self, ctx: Ctx) -> AuthResponse | None:
         try:
             endpoints = self.endpoints if self.endpoints else DEFAULT_ENDPOINTS
-            pathname = ctx.request.path
-            exempt_paths = self._exempt_paths()
-            matched = any(
-                endpoint in pathname and not any(p in pathname for p in exempt_paths)
-                for endpoint in endpoints
-            )
-            if not matched:
+            pathname = _normalize_path(ctx.request.path)
+            if not any(_endpoint_matches(endpoint, pathname) for endpoint in endpoints):
                 return None
+
+            if self.provider == "vercel-botid":
+                return await self._verify_botid(ctx)
 
             if not self.secret_key:
                 raise RuntimeError(INTERNAL_ERROR_CODES["MISSING_SECRET_KEY"])
@@ -176,6 +198,31 @@ class CaptchaPlugin(Plugin):
                 status=500,
                 body={"code": "UNKNOWN_ERROR", "message": EXTERNAL_ERROR_CODES["UNKNOWN_ERROR"]},
             )
+
+    async def _verify_botid(self, ctx: Ctx) -> AuthResponse | None:
+        """TS ``vercelBotId`` (v1.7.6 verify-handlers/vercel-botid.ts): the check and any
+        custom validation share the provider timeout and fail closed."""
+        check_bot_id = self.check_bot_id
+        if check_bot_id is None:
+            raise RuntimeError("vercel-botid requires check_bot_id")
+
+        async def decide() -> bool:
+            verification = await check_bot_id()
+            if self.validate_request is not None:
+                return bool(
+                    await _maybe_await(
+                        self.validate_request(
+                            {"request": ctx.request, "verification": verification}
+                        )
+                    )
+                )
+            return verification.get("isBot") is False
+
+        try:
+            is_valid = await asyncio.wait_for(decide(), CAPTCHA_VERIFY_TIMEOUT)
+        except Exception as exc:
+            raise RuntimeError(INTERNAL_ERROR_CODES["SERVICE_UNAVAILABLE"]) from exc
+        return None if is_valid else _verification_failed()
 
     async def _verify_turnstile(
         self, http: httpx.AsyncClient, url: str, captcha_response: str, remote_ip: str | None

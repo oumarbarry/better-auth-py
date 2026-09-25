@@ -1,7 +1,7 @@
 """siwe plugin — Sign-In with Ethereum (ERC-4361) wallet authentication.
 
 Verified against TS ``packages/better-auth/src/plugins/siwe/`` (``index.ts``,
-``parse-message.ts``, ``schema.ts``, ``types.ts``) and ``siwe.test.ts`` at v1.6.23.
+``parse-message.ts``, ``schema.ts``, ``types.ts``) and ``siwe.test.ts`` at v1.7.6.
 
 The ERC-4361 parser (``parse_siwe_message`` / ``normalize_siwe_domain``) is a
 verbatim port of ``parse-message.ts`` — same grammar, same tolerant rejects.
@@ -78,19 +78,13 @@ def siwe_auth(**kwargs):
     return make_auth(plugins=[SiwePlugin(**kwargs)])
 
 
-async def _issue_nonce(client, address=WALLET, chain_id=CHAIN_ID):
-    return await client.post(
-        "/api/auth/siwe/nonce", json={"walletAddress": address, "chainId": chain_id}
-    )
+async def _issue_nonce(client):
+    # TS v1.7.6 (973fdde79): nonces are issued before the wallet is known.
+    return await client.post("/api/auth/siwe/nonce", json={})
 
 
 async def _verify(client, **overrides):
-    body = {
-        "message": siwe_message(),
-        "signature": "valid_signature",
-        "walletAddress": WALLET,
-        "chainId": CHAIN_ID,
-    }
+    body = {"message": siwe_message(), "signature": "valid_signature"}
     body.update(overrides)
     return await client.post("/api/auth/siwe/verify", json=body)
 
@@ -286,47 +280,62 @@ def test_checksum_from_uppercase():
 # --- /siwe/nonce ------------------------------------------------------------------
 
 
-async def test_nonce_returns_string_for_valid_address():
-    async with make_client(siwe_auth()) as client:
+async def test_nonce_issued_without_wallet_and_stored_under_nonce_key():
+    # TS v1.7.6 siwe/index.ts:62-88: identifier `siwe:<nonce>`, value the nonce.
+    auth = siwe_auth()
+    async with make_client(auth) as client:
         r = await _issue_nonce(client)
         assert r.status_code == 200
-        nonce = r.json()["nonce"]
-        assert isinstance(nonce, str)
-        assert re.fullmatch(r"[a-zA-Z0-9]{17}", nonce)
+        assert r.json() == {"nonce": NONCE}
+        row = await auth.internal.find_verification_value(f"siwe:{NONCE}")
+        assert row is not None and row["value"] == NONCE
 
 
-async def test_nonce_default_chain_id():
+async def test_nonce_allows_missing_body():
     async with make_client(siwe_auth()) as client:
-        r = await client.post("/api/auth/siwe/nonce", json={"walletAddress": WALLET})
+        r = await client.post("/api/auth/siwe/nonce")
         assert r.status_code == 200
         assert re.fullmatch(r"[a-zA-Z0-9]{17}", r.json()["nonce"])
 
 
-async def test_get_nonce_alias_with_address_input():
+async def test_get_nonce_alias():
     async with make_client(siwe_auth()) as client:
-        r = await client.post(
-            "/api/auth/siwe/get-nonce", json={"address": WALLET, "chainId": CHAIN_ID}
-        )
+        r = await client.post("/api/auth/siwe/get-nonce", json={})
         assert r.status_code == 200
         assert r.json()["nonce"] == NONCE
 
 
-async def test_nonce_rejects_invalid_public_key():
+async def test_nonce_rejects_obsolete_wallet_bound_inputs():
+    # TS v1.7.6 siwe/index.ts:59 `z.object({}).strict().optional()`.
     async with make_client(siwe_auth()) as client:
-        r = await client.post("/api/auth/siwe/nonce", json={"walletAddress": "invalid"})
+        r = await client.post(
+            "/api/auth/siwe/nonce", json={"walletAddress": WALLET, "chainId": CHAIN_ID}
+        )
         assert r.status_code == 400
 
 
-async def test_nonce_rejects_invalid_wallet_format():
-    async with make_client(siwe_auth()) as client:
-        r = await client.post("/api/auth/siwe/nonce", json={"walletAddress": "not_a_valid_key"})
-        assert r.status_code == 400
+@pytest.mark.parametrize("bad", ["short1", "has-dash-12345", "x" * 251])
+async def test_nonce_rejects_non_erc4361_server_nonce(bad):
+    # TS v1.7.6 siwe/index.ts:70-77: 8 to 250 alphanumerics, else 500 SIWE_INVALID_NONCE.
+    async with make_client(siwe_auth(get_nonce=lambda: bad)) as client:
+        r = await _issue_nonce(client)
+        assert r.status_code == 500
+        assert r.json() == {
+            "code": "SIWE_INVALID_NONCE",
+            "message": "SIWE getNonce must return an ERC-4361 nonce: "
+            "8-250 alphanumeric characters.",
+        }
 
 
-async def test_nonce_requires_wallet_or_address():
-    async with make_client(siwe_auth()) as client:
-        r = await client.post("/api/auth/siwe/nonce", json={"chainId": 1})
-        assert r.status_code == 400
+async def test_legacy_wallet_fields_accepted_when_opted_in():
+    auth = siwe_auth(accept_legacy_wallet_fields=True)
+    async with make_client(auth) as client:
+        r = await client.post(
+            "/api/auth/siwe/nonce", json={"walletAddress": WALLET, "chainId": CHAIN_ID}
+        )
+        assert r.status_code == 200
+        v = await _verify(client, walletAddress=WALLET, chainId=CHAIN_ID)
+        assert v.status_code == 200, v.text
 
 
 # --- /siwe/verify: nonce gate -----------------------------------------------------
@@ -353,10 +362,33 @@ async def test_verify_rejects_arbitrary_message_without_nonce():
         assert r.status_code == 401
 
 
+async def test_verify_rejects_obsolete_wallet_bound_inputs():
+    async with make_client(siwe_auth()) as client:
+        await _issue_nonce(client)
+        r = await _verify(client, walletAddress=WALLET, chainId=CHAIN_ID)
+        assert r.status_code == 400
+
+
+async def test_verify_rejects_message_without_valid_address():
+    async with make_client(siwe_auth()) as client:
+        await _issue_nonce(client)
+        r = await _verify(client, message=siwe_message(address="not-an-address"))
+        assert r.status_code == 401
+        assert r.json()["code"] == "UNAUTHORIZED_SIWE_MESSAGE_MISMATCH"
+
+
+async def test_verify_rejects_message_without_positive_chain_id():
+    async with make_client(siwe_auth()) as client:
+        await _issue_nonce(client)
+        r = await _verify(client, message=siwe_message(chain_id=0))
+        assert r.status_code == 401
+        assert r.json()["code"] == "UNAUTHORIZED_SIWE_MESSAGE_MISMATCH"
+
+
 async def test_expired_nonce_rejected_and_row_consumed():
     auth = siwe_auth()
     async with make_client(auth) as client:
-        identifier = f"siwe:{WALLET}:{CHAIN_ID}"
+        identifier = f"siwe:{NONCE}"
         await auth.internal.create_verification_value(
             {
                 "identifier": identifier,
@@ -413,7 +445,7 @@ async def test_mint_exactly_one_session_when_nonce_verified_concurrently():
 # --- /siwe/verify: message binding ------------------------------------------------
 
 
-async def test_binding_rejects_non_matching_nonce():
+async def test_binding_rejects_non_erc4361_nonce():
     async with make_client(siwe_auth()) as client:
         await _issue_nonce(client)
         r = await _verify(client, message=siwe_message(nonce="some-other-nonce"))
@@ -421,18 +453,18 @@ async def test_binding_rejects_non_matching_nonce():
         assert r.json()["code"] == "UNAUTHORIZED_SIWE_MESSAGE_MISMATCH"
 
 
+async def test_binding_rejects_unknown_nonce():
+    async with make_client(siwe_auth()) as client:
+        await _issue_nonce(client)
+        r = await _verify(client, message=siwe_message(nonce="UnknownNonce123"))
+        assert r.status_code == 401
+        assert r.json()["code"] == "UNAUTHORIZED_INVALID_OR_EXPIRED_NONCE"
+
+
 async def test_binding_rejects_different_domain():
     async with make_client(siwe_auth()) as client:
         await _issue_nonce(client)
         r = await _verify(client, message=siwe_message(domain="other.example.com"))
-        assert r.status_code == 401
-        assert r.json()["code"] == "UNAUTHORIZED_SIWE_MESSAGE_MISMATCH"
-
-
-async def test_binding_rejects_different_chain_id():
-    async with make_client(siwe_auth()) as client:
-        await _issue_nonce(client)
-        r = await _verify(client, message=siwe_message(chain_id=137))
         assert r.status_code == 401
         assert r.json()["code"] == "UNAUTHORIZED_SIWE_MESSAGE_MISMATCH"
 
@@ -544,12 +576,9 @@ async def test_case_variant_email_treated_as_existing():
         assert u1["email"] == "mixed@case.com"
 
         # a different wallet presenting the lowercase variant must not claim it
-        await _issue_nonce(client, address=OTHER_WALLET)
+        await _issue_nonce(client)
         second = await _verify(
-            client,
-            message=siwe_message(address=OTHER_WALLET),
-            walletAddress=OTHER_WALLET,
-            email="mixed@case.com",
+            client, message=siwe_message(address=OTHER_WALLET), email="mixed@case.com"
         )
         assert second.status_code == 200
         u2 = await auth.adapter.find_one("user", [Where("id", second.json()["user"]["id"])])
@@ -580,8 +609,8 @@ async def test_stores_wallet_address_in_checksum_format():
     auth = siwe_auth()
     async with make_client(auth) as client:
         # lowercase input is checksummed on the way in
-        await _issue_nonce(client, address=WALLET.lower())
-        r = await _verify(client, walletAddress=WALLET.lower())
+        await _issue_nonce(client)
+        r = await _verify(client, message=siwe_message(address=WALLET.lower()))
         assert r.json()["success"] is True
 
         wallets = await auth.adapter.find_many("walletAddress", [Where("address", WALLET)])
@@ -590,8 +619,8 @@ async def test_stores_wallet_address_in_checksum_format():
 
         # uppercase input resolves to the same address — no new row
         upper = "0x" + WALLET[2:].upper()
-        await _issue_nonce(client, address=upper)
-        r2 = await _verify(client, walletAddress=upper)
+        await _issue_nonce(client)
+        r2 = await _verify(client, message=siwe_message(address=upper))
         assert r2.json()["success"] is True
         after = await auth.adapter.find_many("walletAddress", [Where("address", WALLET)])
         assert len(after) == 1
@@ -624,12 +653,12 @@ async def test_duplicate_wallet_reuses_same_user():
 async def test_same_address_different_chains_same_user():
     auth = siwe_auth()
     async with make_client(auth) as client:
-        await _issue_nonce(client, chain_id=1)
-        eth = await _verify(client, message=siwe_message(chain_id=1), chainId=1)
+        await _issue_nonce(client)
+        eth = await _verify(client, message=siwe_message(chain_id=1))
         assert eth.json()["success"] is True
 
-        await _issue_nonce(client, chain_id=137)
-        poly = await _verify(client, message=siwe_message(chain_id=137), chainId=137)
+        await _issue_nonce(client)
+        poly = await _verify(client, message=siwe_message(chain_id=137))
         assert poly.json()["success"] is True
         assert poly.json()["user"]["id"] == eth.json()["user"]["id"]  # same user
 
@@ -689,11 +718,81 @@ async def test_email_domain_name_shapes_wallet_derived_email():
         assert user["email"] == f"{WALLET.lower()}@wallet.example"
 
 
-async def test_wallet_derived_email_defaults_to_base_url_origin():
-    # No emailDomainName -> getOrigin(baseURL); the test base_url is http://testserver.
+async def test_wallet_derived_email_defaults_to_namespaced_placeholder():
+    # TS v1.7.6 siwe/index.ts:295-300 (b4ad5a110): createPlaceholderEmail namespace siwe.
     auth = siwe_auth()
     async with make_client(auth) as client:
         await _issue_nonce(client)
         r = await _verify(client)
         user = await auth.adapter.find_one("user", [Where("id", r.json()["user"]["id"])])
-        assert user["email"] == f"{WALLET.lower()}@http://testserver"
+        assert user["email"] == f"{WALLET.lower()}@siwe.placeholder.invalid"
+
+
+# --- email claim reservation (TS v1.7.6 siwe/index.ts:305-370) ---------------------
+
+
+async def test_email_claim_is_released_after_user_creation():
+    auth = siwe_auth(anonymous=False)
+    async with make_client(auth) as client:
+        await _issue_nonce(client)
+        r = await _verify(client, email="claim@example.com")
+        user = await auth.adapter.find_one("user", [Where("id", r.json()["user"]["id"])])
+        assert user["email"] == "claim@example.com"
+        claim = await auth.adapter.find_many(
+            "verification", [Where("identifier", "siwe-email-claim-claim@example.com")]
+        )
+        assert claim == []
+
+
+async def test_email_claim_held_elsewhere_falls_back_to_wallet_email(monkeypatch):
+    # The memory adapter does not enforce primary keys, so a lost reservation is stubbed.
+    auth = siwe_auth(anonymous=False)
+    seen: list[tuple[str, str]] = []
+
+    async def lost(identifier, value, expires_at):
+        seen.append((identifier, value))
+        return False
+
+    monkeypatch.setattr(auth.internal, "reserve_verification_value", lost)
+    async with make_client(auth) as client:
+        await _issue_nonce(client)
+        r = await _verify(client, email="busy@example.com")
+        assert r.status_code == 200
+        user = await auth.adapter.find_one("user", [Where("id", r.json()["user"]["id"])])
+        assert user["email"] == f"{WALLET.lower()}@siwe.placeholder.invalid"
+        assert seen == [("siwe-email-claim-busy@example.com", WALLET)]
+
+
+async def test_email_claim_reservation_error_is_best_effort(monkeypatch):
+    auth = siwe_auth(anonymous=False)
+
+    async def broken(*_a, **_kw):
+        raise RuntimeError("reservation store down")
+
+    monkeypatch.setattr(auth.internal, "reserve_verification_value", broken)
+    async with make_client(auth) as client:
+        await _issue_nonce(client)
+        r = await _verify(client, email="down@example.com")
+        assert r.status_code == 200
+        user = await auth.adapter.find_one("user", [Where("id", r.json()["user"]["id"])])
+        assert user["email"] == f"{WALLET.lower()}@siwe.placeholder.invalid"
+
+
+async def test_email_taken_during_creation_retries_with_wallet_email(monkeypatch):
+    auth = siwe_auth(anonymous=False)
+    real_create = auth.internal.create_user
+    calls: list[str] = []
+
+    async def racing_create(data, **kw):
+        calls.append(data["email"])
+        if data["email"] == "race@example.com":
+            await real_create({"name": "Racer", "email": "race@example.com"})
+            raise RuntimeError("unique constraint")
+        return await real_create(data, **kw)
+
+    monkeypatch.setattr(auth.internal, "create_user", racing_create)
+    async with make_client(auth) as client:
+        await _issue_nonce(client)
+        r = await _verify(client, email="race@example.com")
+        assert r.status_code == 200, r.text
+        assert calls == ["race@example.com", f"{WALLET}@siwe.placeholder.invalid"]

@@ -403,16 +403,9 @@ SIWE_MESSAGE = (
 
 
 async def test_siwe_nonce_verify_roundtrip(client: Any, res: Any) -> None:
-    nonce = await res(client.siwe.nonce(walletAddress=SIWE_WALLET, chainId=1))
+    nonce = await res(client.siwe.nonce())
     assert nonce == {"nonce": SIWE_NONCE}
-    verified = await res(
-        client.siwe.verify(
-            message=SIWE_MESSAGE,
-            signature="valid_signature",
-            walletAddress=SIWE_WALLET,
-            chainId=1,
-        )
-    )
+    verified = await res(client.siwe.verify(message=SIWE_MESSAGE, signature="valid_signature"))
     assert verified["success"] is True
     assert await res(client.get_session()) is not None
 

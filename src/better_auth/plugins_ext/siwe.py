@@ -1,7 +1,7 @@
 """siwe plugin — Sign-In with Ethereum (ERC-4361) wallet authentication.
 
 A faithful port of TS ``packages/better-auth/src/plugins/siwe/`` (``index.ts``,
-``parse-message.ts``, ``schema.ts``, ``types.ts``) at v1.6.23.
+``parse-message.ts``, ``schema.ts``, ``types.ts``) at v1.7.6.
 
 The plugin owns a self-contained ERC-4361 parser (``parse_siwe_message`` /
 ``normalize_siwe_domain``, ported verbatim from ``parse-message.ts``): it does NOT
@@ -17,6 +17,7 @@ used here.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import re
 from collections.abc import Awaitable, Callable
@@ -28,7 +29,6 @@ from Crypto.Hash import keccak
 
 from ..adapters.base import Where
 from ..endpoints import validate_email
-from ..origin import _get_origin
 from ..plugins import Plugin, Route
 from ..schema import Field, Reference, Schema
 from ..session import create_session, utcnow
@@ -43,8 +43,20 @@ _HEADER_RE = re.compile(
 _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _FIELD_RE = re.compile(r"^([A-Za-z ]+): (.*)$")
 
-# Wallet-address body input (TS ``walletAddressInputSchema``): 0x + 40 hex, len 42.
-_WALLET_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
+# TS v1.7.6 index.ts:43-59: nonces are stored under ``siwe:<nonce>`` and must be
+# ERC-4361 nonces short enough for a 255-character verification identifier.
+_NONCE_PREFIX = "siwe:"
+_NONCE_MAX_LENGTH = 255 - len(_NONCE_PREFIX)
+_NONCE_RE = re.compile(r"^[a-zA-Z0-9]+$")
+# Pre-1.7 body fields, accepted and ignored only with ``accept_legacy_wallet_fields``.
+_LEGACY_FIELDS = frozenset({"walletAddress", "address", "chainId"})
+#: TS ``createPlaceholderEmail`` domain (core/utils/email.ts, RFC 6761 section 6.4).
+_PLACEHOLDER_EMAIL_DOMAIN = "placeholder.invalid"
+_MISMATCH = APIError(
+    401,
+    "UNAUTHORIZED_SIWE_MESSAGE_MISMATCH",
+    "Unauthorized: SIWE message does not match the expected nonce, domain, address, or chain ID",
+)
 
 
 @dataclass
@@ -181,30 +193,20 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-def _positive_int(value: Any, default: int = 1) -> int:
-    """TS ``z.number().int().positive().optional().default(1)`` for ``chainId``.
-    Accepts an integer or an integral float (JS has no int/float split); rejects
-    anything else or a non-positive value with a 400."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        raise APIError(400, "INVALID_BODY", "chainId must be a positive integer")
-    if isinstance(value, int):
-        number = value
-    elif isinstance(value, float) and value.is_integer():
-        number = int(value)
-    else:
-        raise APIError(400, "INVALID_BODY", "chainId must be a positive integer")
-    if number <= 0:
-        raise APIError(400, "INVALID_BODY", "chainId must be a positive integer")
-    return number
+def _is_valid_nonce(nonce: Any) -> bool:
+    """TS ``isValidSiweNonce`` (v1.7.6 index.ts:53-57)."""
+    return (
+        isinstance(nonce, str)
+        and 8 <= len(nonce) <= _NONCE_MAX_LENGTH
+        and bool(_NONCE_RE.match(nonce))
+    )
 
 
-def _validate_wallet_address(raw: Any) -> str:
-    """TS ``walletAddressInputSchema`` — 0x + 40 hex, length 42 (400 otherwise)."""
-    if not isinstance(raw, str) or not _WALLET_RE.match(raw):
-        raise APIError(400, "INVALID_BODY", "Invalid wallet address")
-    return raw
+def _reject_unknown_keys(body: dict[str, Any], allowed: frozenset[str]) -> None:
+    """TS zod ``.strict()``: an unrecognized body key is a 400."""
+    for key in body:
+        if key not in allowed:
+            raise APIError(400, "INVALID_BODY", f'Unrecognized key: "{key}"')
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -234,6 +236,7 @@ class SiwePlugin(Plugin):
         anonymous: bool = True,
         ens_lookup: Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
         | None = None,
+        accept_legacy_wallet_fields: bool = False,
     ) -> None:
         # ponytail: TS also accepts a per-instance `schema` override (field-name
         # remapping only). `Plugin.schema` is a ClassVar on the shared base, so an
@@ -245,6 +248,10 @@ class SiwePlugin(Plugin):
         self.email_domain_name = email_domain_name
         self.anonymous = anonymous
         self.ens_lookup = ens_lookup
+        #: Accept and ignore the pre-1.7 ``walletAddress``/``address``/``chainId`` body
+        #: fields on the nonce and verify endpoints, which TS 1.7 rejects with a 400. The
+        #: signed message is the only source of wallet identity either way.
+        self.accept_legacy_wallet_fields = accept_legacy_wallet_fields
 
     def routes(self) -> list[Route]:
         # ``/siwe/nonce`` and its ``/siwe/get-nonce`` alias share one handler
@@ -257,20 +264,23 @@ class SiwePlugin(Plugin):
 
     # --- /siwe/nonce (+ /siwe/get-nonce alias) -----------------------------------
 
-    async def get_nonce_route(self, ctx: Ctx) -> dict[str, str]:
-        body = ctx.body()
-        raw = body.get("walletAddress") or body.get("address")
-        if not raw:
-            raise APIError(400, "INVALID_BODY", "walletAddress or address is required")
-        raw = _validate_wallet_address(raw)
-        chain_id = _positive_int(body.get("chainId"))
-        wallet_address = to_checksum_address(raw)
-        nonce = await _maybe_await(self.get_nonce())
+    def _allowed(self, keys: frozenset[str]) -> frozenset[str]:
+        return keys | _LEGACY_FIELDS if self.accept_legacy_wallet_fields else keys
 
-        # Store the nonce keyed by (checksummed address, chain id); expires in 15 min.
+    async def get_nonce_route(self, ctx: Ctx) -> dict[str, str]:
+        _reject_unknown_keys(ctx.body(), self._allowed(frozenset()))
+        nonce = await _maybe_await(self.get_nonce())
+        if not _is_valid_nonce(nonce):
+            raise APIError(
+                500,
+                "SIWE_INVALID_NONCE",
+                "SIWE getNonce must return an ERC-4361 nonce: "
+                f"8-{_NONCE_MAX_LENGTH} alphanumeric characters.",
+            )
+        # Issued before the wallet is known (TS v1.7.6 index.ts:79-83); expires in 15 min.
         await ctx.internal.create_verification_value(
             {
-                "identifier": f"siwe:{wallet_address}:{chain_id}",
+                "identifier": f"{_NONCE_PREFIX}{nonce}",
                 "value": nonce,
                 "expiresAt": utcnow() + timedelta(minutes=15),
             }
@@ -281,14 +291,13 @@ class SiwePlugin(Plugin):
 
     async def verify(self, ctx: Ctx) -> AuthResponse:
         body = ctx.body()
+        _reject_unknown_keys(body, self._allowed(frozenset({"message", "signature", "email"})))
         message = body.get("message")
         signature = body.get("signature")
         if not isinstance(message, str) or not message:
             raise APIError(400, "INVALID_BODY", "message is required")
         if not isinstance(signature, str) or not signature:
             raise APIError(400, "INVALID_BODY", "signature is required")
-        wallet_address = to_checksum_address(_validate_wallet_address(body.get("walletAddress")))
-        chain_id = _positive_int(body.get("chainId"))
 
         # ``email`` is optional but, when present (even ``""``), must be a valid address
         # (TS ``z.email().optional()``); it is required when ``anonymous`` is disabled.
@@ -300,44 +309,39 @@ class SiwePlugin(Plugin):
             raise APIError(400, "INVALID_BODY", "Email is required when anonymous is disabled.")
 
         try:
+            # The signed ERC-4361 message is the source of truth for wallet identity:
+            # nonces are issued before the wallet is known, so address and chain id come
+            # from the signed message (TS v1.7.6 index.ts:126-138).
+            parsed = parse_siwe_message(message)
+            if not _is_valid_nonce(parsed.nonce):
+                raise _MISMATCH
+            nonce = parsed.nonce
             # Atomically consume the single-use nonce before any signature work or
             # state mutation: the first concurrent request wins, every racer gets
             # None, so the same nonce can never replay a login. Consuming here also
             # burns the record on a failed attempt and applies the expiry gate.
-            verification = await ctx.internal.consume_verification_value(
-                f"siwe:{wallet_address}:{chain_id}"
-            )
+            verification = await ctx.internal.consume_verification_value(f"{_NONCE_PREFIX}{nonce}")
             if verification is None:
                 raise APIError(
                     401,
                     "UNAUTHORIZED_INVALID_OR_EXPIRED_NONCE",
                     "Unauthorized: Invalid or expired nonce",
                 )
-            nonce = verification["value"]
 
-            # Bind the *signed* message to server state before accepting the signature.
             # Signature recovery alone (the documented viem verify_message) does NOT
-            # inspect the message body, so a previously produced signature (stale, for
-            # another domain, or over an arbitrary string) could otherwise be presented
-            # with a freshly minted nonce. Parse the ERC-4361 message ourselves and
-            # require nonce, address, chain id and domain to match, plus honor the
-            # signed time bounds.
-            parsed = parse_siwe_message(message)
-            nonce_matches = parsed.nonce == nonce
-            address_matches = bool(parsed.address) and (
-                parsed.address.lower() == wallet_address.lower()
+            # inspect the message body, so the signed address, chain id and domain are
+            # checked here, plus the signed time bounds.
+            wallet_address = (
+                to_checksum_address(parsed.address)
+                if parsed.address and _ADDRESS_RE.match(parsed.address)
+                else None
             )
-            chain_matches = parsed.chain_id == chain_id
+            chain_id = parsed.chain_id
             domain_matches = bool(parsed.domain) and (
                 normalize_siwe_domain(parsed.domain) == normalize_siwe_domain(self.domain)
             )
-            if not (nonce_matches and address_matches and chain_matches and domain_matches):
-                raise APIError(
-                    401,
-                    "UNAUTHORIZED_SIWE_MESSAGE_MISMATCH",
-                    "Unauthorized: SIWE message does not match the expected nonce, "
-                    "domain, address, or chain ID",
-                )
+            if not wallet_address or chain_id is None or chain_id <= 0 or not domain_matches:
+                raise _MISMATCH
 
             now = utcnow()
             if parsed.expiration_time:
@@ -432,27 +436,59 @@ class SiwePlugin(Plugin):
                 user = await ctx.adapter.find_one("user", [Where("id", any_wallet["userId"])])
 
         if user is None:
-            domain = self.email_domain_name or _get_origin(ctx.auth.base_url)
-            # SIWE proves wallet control, not email ownership: bind the caller email
-            # only when it is unclaimed, else keep the wallet-derived address. The
-            # silent fallback (no distinct error) avoids an enumeration oracle.
-            user_email = f"{wallet_address}@{domain}"
+            wallet_email = (
+                f"{wallet_address}@{self.email_domain_name}"
+                if self.email_domain_name
+                else f"{wallet_address}@siwe.{_PLACEHOLDER_EMAIL_DOMAIN}"
+            )
+            # SIWE proves wallet control, not email ownership: bind the caller email only
+            # when it is unclaimed and atomically reserved, else keep the wallet-derived
+            # address. The silent fallback (no distinct error) avoids an enumeration
+            # oracle (TS v1.7.6 index.ts:301-370).
+            user_email = wallet_email
+            claim_identifier: str | None = None
             if not is_anon and email:
-                existing_user = await ctx.adapter.find_one("user", [Where("email", email)])
-                if not existing_user:
-                    user_email = email
+                identifier = f"siwe-email-claim-{email}"
+                try:
+                    reserved = await ctx.internal.reserve_verification_value(
+                        identifier, wallet_address, utcnow() + timedelta(seconds=60)
+                    )
+                except Exception:
+                    # Email claims are opportunistic: without exclusivity keep the
+                    # wallet-derived email and let user creation surface adapter errors.
+                    reserved = False
+                if reserved:
+                    claim_identifier = identifier
+                    if not await ctx.adapter.find_one("user", [Where("email", email)]):
+                        user_email = email
             ens = (
                 (await _maybe_await(self.ens_lookup({"walletAddress": wallet_address})) or {})
                 if self.ens_lookup
                 else {}
             )
-            user = await ctx.internal.create_user(
-                {
-                    "name": ens.get("name") or wallet_address,
-                    "email": user_email,
-                    "image": ens.get("avatar") or "",
-                }
-            )
+
+            async def create(user_email: str) -> dict[str, Any]:
+                return await ctx.internal.create_user(
+                    {
+                        "name": ens.get("name") or wallet_address,
+                        "email": user_email,
+                        "image": ens.get("avatar") or "",
+                    }
+                )
+
+            try:
+                try:
+                    user = await create(user_email)
+                except Exception:
+                    if not email or user_email != email:
+                        raise
+                    if not await ctx.adapter.find_one("user", [Where("email", email)]):
+                        raise
+                    user = await create(wallet_email)
+            finally:
+                if claim_identifier:
+                    with contextlib.suppress(Exception):
+                        await ctx.internal.consume_verification_value(claim_identifier)
             await self._add_wallet(ctx, user["id"], wallet_address, chain_id, is_primary=True)
         elif not existing_wallet:
             # Existing user, new chain for this address: additional addresses are not

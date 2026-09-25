@@ -5,15 +5,16 @@ Preview/branch deployments get a rotating URL that an OAuth provider (which only
 ONE production ``redirect_uri``) will not accept. This plugin routes the provider callback
 through the fixed **production** deployment: production runs the code→token→userInfo
 exchange, encrypts the resulting profile under a **shared secret**, and 302s it back to the
-preview's ``/oauth-proxy-callback``, which creates the user/session locally.
+preview's ``/callback/{provider}/oauth-proxy``, which creates the user/session locally
+(or links the account, for ``/link-social``).
 
 The plugin is ALL hooks plus one endpoint (the proxy callback); it adds no schema.
 
 Flow (database state strategy — the only one this port has):
 
-1. ``before /sign-in/social|/sign-in/oauth2`` (preview): rewrite ``callbackURL`` to
-   ``{currentOrigin}{basePath}/oauth-proxy-callback?callbackURL={original}`` so the eventual
-   redirect lands back on the preview.
+1. ``before /sign-in/social|/link-social`` (preview): rewrite ``callbackURL`` to
+   ``{currentOrigin}{basePath}/callback/{provider}/oauth-proxy?callbackURL={original}`` so
+   the eventual redirect lands back on the preview.
 2. ``after`` sign-in (preview): read the freshly-written ``verification`` row, re-encrypt its
    value under the **proxy key** (``opts.secret ?? auth.secret``), wrap it in an
    ``OAuthProxyStatePackage`` and replace the provider URL's ``state`` param with it — so
@@ -22,9 +23,11 @@ Flow (database state strategy — the only one this port has):
    a proxy package, do the exchange, build the encrypted ``PassthroughPayload`` and 302 to
    the preview's proxy callback with a ``profile`` param. If it cannot decrypt (regular
    state / mismatched secrets) → fall through to the normal callback (fail closed).
-4. ``GET /oauth-proxy-callback`` (preview): origin-check ``callbackURL`` (open-redirect
-   guard), decrypt+validate the profile (required fields, replay window, consume the OAuth
-   state), then ``handle_oauth_user_info`` → session → redirect.
+4. ``GET /callback/{provider}/oauth-proxy`` (preview; ``/oauth-proxy-callback`` is the
+   deprecated alias): origin-check ``callbackURL`` (open-redirect guard), decrypt+validate
+   the profile (required fields, provider match, replay window, consume the OAuth state),
+   then link the account (state carries ``link``) or ``handle_oauth_user_info`` → session
+   → redirect.
 5. ``after /callback/:provider``: unwrap a same-origin proxy redirect back to the original
    destination (defensive; only reached when the before hook fell through).
 
@@ -62,6 +65,7 @@ from ..oauth.flow import (
     _error_redirect,
     _parse_callback_user,
     handle_oauth_user_info,
+    link_oauth_account,
 )
 from ..oauth.models import OAuthTokens, OAuthUserInfo
 from ..oauth.providers import ProviderConfig
@@ -130,6 +134,36 @@ def _parse_dt(value: Any) -> datetime | None:
         return None
 
 
+def _valid_payload(payload: Any) -> bool:
+    """TS v1.7.6 ``passthroughPayloadSchema`` (index.ts:111-131), reduced to the fields
+    this receiver reads.
+
+    ponytail: TS runs the full user/account zod schemas; the payload is sealed with the
+    shared proxy secret, so only field presence and types are checked here. Upgrade path:
+    validate every user/account column type if untrusted producers ever appear.
+    """
+    if not isinstance(payload, dict):
+        return False
+    user_info, account = payload.get("userInfo"), payload.get("account")
+    timestamp = payload.get("timestamp")
+    scopes = payload.get("scopes")
+    return (
+        isinstance(user_info, dict)
+        and user_info.get("id") not in (None, "")
+        and isinstance(account, dict)
+        and isinstance(account.get("providerId"), str)
+        and isinstance(account.get("accountId"), str)
+        and isinstance(payload.get("state"), str)
+        and bool(payload["state"])
+        and isinstance(payload.get("callbackURL"), str)
+        and bool(payload["callbackURL"])
+        and isinstance(timestamp, int | float)
+        and not isinstance(timestamp, bool)
+        and (scopes is None or isinstance(scopes, list))
+        and (payload.get("profile") is None or isinstance(payload["profile"], dict))
+    )
+
+
 def _set_query_param(url: str, key: str, value: str) -> str:
     """``URLSearchParams.set`` equivalent: replace/append ``key`` on ``url``'s query."""
     parts = urlsplit(url)
@@ -171,7 +205,13 @@ class OAuthProxyPlugin(Plugin):
     # --- wiring --------------------------------------------------------------------------
 
     def routes(self) -> list[Route]:
-        return [("GET", "/oauth-proxy-callback", self._proxy_callback)]
+        # TS v1.7.6 index.ts:172 ``/callback/:id/oauth-proxy``: the completion lives under
+        # /callback/ so callback hooks (last-login-method and friends) run for proxied
+        # sign-ins. ``/oauth-proxy-callback`` stays as the deprecated alias (index.ts:305).
+        return [
+            ("GET", "/callback/{provider}/oauth-proxy", self._proxy_callback),
+            ("GET", "/oauth-proxy-callback", self._proxy_callback),
+        ]
 
     def hooks(self) -> HookSet:
         return HookSet(
@@ -187,12 +227,16 @@ class OAuthProxyPlugin(Plugin):
 
     @staticmethod
     def _is_sign_in(ctx: Ctx) -> bool:
+        # TS v1.7.6 index.ts:362-366: social sign-in and social account linking.
         path = ctx.request.path or ""
-        return path.startswith("/sign-in/social") or path.startswith("/sign-in/oauth2")
+        return path.startswith("/sign-in/social") or path == "/link-social"
 
     @staticmethod
     def _is_callback(ctx: Ctx) -> bool:
-        return (ctx.request.path or "").startswith("/callback/")
+        # TS matches the route template ``/callback/:id`` exactly, so the completion
+        # route ``/callback/:id/oauth-proxy`` is not intercepted.
+        parts = (ctx.request.path or "").strip("/").split("/")
+        return len(parts) == 2 and parts[0] == "callback"
 
     # --- resolution (utils.ts) -----------------------------------------------------------
 
@@ -239,13 +283,17 @@ class OAuthProxyPlugin(Plugin):
     async def _before_sign_in(self, ctx: Ctx) -> AuthResponse | None:
         if self._check_skip_proxy(ctx):
             return None
-        current_origin = await self._resolve_current_origin(ctx)
         body = ctx.body()
+        provider_id = body.get("provider")
+        if not provider_id:
+            return None
+        current_origin = await self._resolve_current_origin(ctx)
         original_callback = body.get("callbackURL") or ctx.auth.base_url
         base_path = ctx.auth.base_path or "/api/auth"
         body["callbackURL"] = (
             f"{_strip_trailing_slash(current_origin)}{base_path}"
-            f"/oauth-proxy-callback?callbackURL={quote(original_callback, safe='')}"
+            f"/callback/{provider_id}/oauth-proxy"
+            f"?callbackURL={quote(original_callback, safe='')}"
         )
         return None
 
@@ -258,7 +306,7 @@ class OAuthProxyPlugin(Plugin):
         if not isinstance(response, AuthResponse) or not isinstance(response.body, dict):
             return None
         provider_url = response.body.get("url")
-        if not isinstance(provider_url, str):
+        if not isinstance(provider_url, str) or not provider_url:
             return None
         parts = urlsplit(provider_url)
         query_pairs = parse_qsl(parts.query, keep_blank_values=True)
@@ -363,6 +411,10 @@ class OAuthProxyPlugin(Plugin):
         if not info.email:
             logger.error("Provider did not return email")
             return _error_redirect(ctx, "email_not_found", error_url)
+        if not info.id:
+            # TS v1.7.6 index.ts:556-572: no provider account identity to carry.
+            logger.error("Unable to derive provider account identity")
+            return _error_redirect(ctx, "unable_to_get_user_info", error_url)
 
         # stateData.callbackURL is the rewritten proxy URL; the ORIGINAL destination is its
         # embedded `callbackURL` query param.
@@ -378,6 +430,8 @@ class OAuthProxyPlugin(Plugin):
                 "image": info.image,
                 "emailVerified": info.email_verified,
             },
+            "profile": info.raw,
+            "scopes": tokens.scopes,
             "account": {
                 "providerId": provider.provider_id,
                 "accountId": str(info.id),
@@ -403,9 +457,11 @@ class OAuthProxyPlugin(Plugin):
             redirect_to=_set_query_param(proxy_callback, "profile", encrypted_payload)
         )
 
-    # --- GET /oauth-proxy-callback (preview): decrypt + create session -------------------
+    # --- GET /callback/{provider}/oauth-proxy (preview): decrypt + create session ---------
 
     async def _proxy_callback(self, ctx: Ctx) -> AuthResponse:
+        """TS v1.7.6 ``oauthProxyCompletion`` (index.ts:172-298), also served on the
+        deprecated ``/oauth-proxy-callback`` path."""
         # originCheck((ctx) => ctx.query.callbackURL): open-redirect guard on the receiver.
         # GET requests skip the global CSRF/origin check, so validate here (relative allowed).
         query_callback = ctx.request.query.get("callbackURL")
@@ -430,32 +486,28 @@ class OAuthProxyPlugin(Plugin):
         except Exception as error:
             logger.error("Failed to parse OAuth proxy payload: %s", error)
             return _error_redirect(ctx, "invalid_payload", None)
-
-        timestamp = payload.get("timestamp") if isinstance(payload, dict) else None
-        if not (
-            isinstance(payload, dict)
-            and isinstance(timestamp, (int, float))
-            and not isinstance(timestamp, bool)
-            and payload.get("userInfo")
-            and payload.get("account")
-            and payload.get("state")
-            and payload.get("callbackURL")
-        ):
+        if not _valid_payload(payload):
             logger.error("Failed to parse OAuth proxy payload")
             return _error_redirect(ctx, "invalid_payload", None)
 
         error_url = payload.get("errorURL")
+        account = payload["account"]
+        if (ctx.request.path or "").startswith("/callback/") and ctx.params.get(
+            "provider"
+        ) != account["providerId"]:
+            logger.warning("OAuth proxy callback provider mismatch")
+            return _error_redirect(ctx, "provider_mismatch", error_url)
 
         # Replay window: allow up to 10s of future skew (TS clock-skew tolerance).
-        age = (time.time() * 1000 - timestamp) / 1000
+        age = (time.time() * 1000 - payload["timestamp"]) / 1000
         if age > self.max_age or age < -10:
             logger.error("OAuth proxy payload expired or invalid (age: %ss)", age)
             return _error_redirect(ctx, "payload_expired", error_url)
 
-        if not await self._consume_state(ctx, payload["state"]):
+        state_data = await self._restore_state(ctx, payload["state"])
+        if state_data is None:
             return _error_redirect(ctx, "state_mismatch", error_url)
 
-        account = payload["account"]
         provider = ctx.auth.social_providers.get(account["providerId"]) or ProviderConfig(
             client_id="", provider_id=account["providerId"]
         )
@@ -466,17 +518,28 @@ class OAuthProxyPlugin(Plugin):
             name=user_info.get("name") or "",
             image=user_info.get("image"),
             email_verified=bool(user_info.get("emailVerified")),
+            raw=payload.get("profile") or {},
         )
         scope = account.get("scope")
+        scopes = payload.get("scopes")
         tokens = OAuthTokens(
             access_token=account.get("accessToken"),
             refresh_token=account.get("refreshToken"),
             id_token=account.get("idToken"),
             scope=scope,
-            scopes=scope.split(",") if scope else [],
+            scopes=scopes if isinstance(scopes, list) else (scope.split(",") if scope else []),
             access_token_expires_at=_parse_dt(account.get("accessTokenExpiresAt")),
             refresh_token_expires_at=_parse_dt(account.get("refreshTokenExpiresAt")),
         )
+
+        link = state_data.get("link")
+        if link:
+            # Social account linking through the proxy (TS v1.7.6 index.ts:237-253).
+            link_error = await link_oauth_account(ctx, provider, info, tokens, link)
+            if link_error is not None:
+                return _error_redirect(ctx, link_error, error_url)
+            return AuthResponse(redirect_to=_absolute_url(ctx, payload["callbackURL"]))
+
         try:
             user_id, is_register = await handle_oauth_user_info(
                 ctx, provider, info, tokens, disable_sign_up=bool(payload.get("disableSignUp"))
@@ -495,17 +558,24 @@ class OAuthProxyPlugin(Plugin):
             response.set_cookie(cookie)
         return response
 
-    async def _consume_state(self, ctx: Ctx, state: str) -> bool:
-        """Consume the OAuth state row (TS ``parseGenericState`` with ``skipStateCookieCheck``):
-        the row must exist (was issued by this env's sign-in) and not be expired; consuming it
-        deletes it. Missing/expired → False → ``state_mismatch``."""
+    async def _restore_state(self, ctx: Ctx, state: str) -> dict[str, Any] | None:
+        """Consume the OAuth state row and return its data (TS ``restoreOAuthProxyState``,
+        ``parseGenericState`` with ``skipStateCookieCheck``): the row must exist (issued by
+        this env's sign-in) and not be expired; consuming it deletes it. Missing, expired
+        or unreadable -> None -> ``state_mismatch``."""
         row = await ctx.adapter.find_one("verification", [Where("identifier", state)])
         if row is None:
             logger.warning("OAuth proxy state missing or invalid")
-            return False
+            return None
         await ctx.adapter.delete_many("verification", [Where("identifier", state)])
         expires_at = row.get("expiresAt")
-        return expires_at is None or expires_at > utcnow()
+        if expires_at is not None and expires_at <= utcnow():
+            return None
+        try:
+            data = json.loads(row["value"])
+        except (TypeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
 
     # --- after /callback: unwrap same-origin proxy redirects -----------------------------
 
@@ -516,7 +586,10 @@ class OAuthProxyPlugin(Plugin):
         location = response.redirect_to
         if (
             not location
-            or "/oauth-proxy-callback?callbackURL" not in location
+            or (
+                "/oauth-proxy?callbackURL" not in location
+                and "/oauth-proxy-callback?callbackURL" not in location
+            )
             or not location.startswith("http")
         ):
             return None

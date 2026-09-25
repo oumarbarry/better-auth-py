@@ -67,11 +67,16 @@ def _resolve(origin: str, value: str) -> str:
     return urljoin(origin.rstrip("/") + "/", value)
 
 
-def _redirect_with_error(absolute_url: str, error: str) -> AuthResponse:
-    """302 to ``absolute_url`` with ``error=<code>`` added, preserving existing params."""
+def _redirect_with_error(
+    absolute_url: str, error: str, description: str | None = None
+) -> AuthResponse:
+    """302 to ``absolute_url`` with ``error=<code>`` (and ``error_description`` when
+    given, TS v1.7.6 index.ts:366-378) added, preserving existing params."""
     parts = urlsplit(absolute_url)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
     query["error"] = error
+    if description:
+        query["error_description"] = description
     target = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
     return AuthResponse(redirect_to=target)
 
@@ -210,9 +215,16 @@ class MagicLinkPlugin(Plugin):
         if user is None:
             if self.disable_sign_up:
                 return _redirect_with_error(error_callback_url, "new_user_signup_disabled")
-            user = await ctx.internal.create_user(
-                {"email": email, "emailVerified": True, "name": name or ""}
-            )
+            try:
+                user = await ctx.internal.create_user(
+                    {"email": email, "emailVerified": True, "name": name or ""}
+                )
+            except APIError as error:
+                # Browser flow: forward a rejection's code to the error URL instead of a
+                # raw API error (TS v1.7.6 index.ts:405-425).
+                if error.code:
+                    return _redirect_with_error(error_callback_url, error.code, error.message)
+                raise
             is_new_user = True
             if user is None:
                 return _redirect_with_error(error_callback_url, "failed_to_create_user")

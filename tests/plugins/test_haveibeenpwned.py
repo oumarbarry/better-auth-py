@@ -21,7 +21,12 @@ import httpx
 import pytest
 
 from better_auth import APIError
-from better_auth.plugins_ext.haveibeenpwned import DEFAULT_PATHS, ERROR_CODES, HaveIBeenPwnedPlugin
+from better_auth.plugins_ext.haveibeenpwned import (
+    DEFAULT_PATHS,
+    ERROR_CODES,
+    HaveIBeenPwnedPlugin,
+    is_password_compromised,
+)
 from conftest import make_auth, make_client
 
 
@@ -149,17 +154,15 @@ async def test_enabled_false_skips_check_entirely():
     await check(compromised, "/sign-up/email")  # must not raise despite being "breached"
 
 
-async def test_empty_password_is_a_no_op():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("HIBP must not be called for an empty password")
-
+async def test_empty_password_is_checked():
+    # TS v1.7.6 dropped the empty-password short circuit (a9d8c12d1).
     auth = make_auth(
-        plugins=[HaveIBeenPwnedPlugin()],
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        plugins=[HaveIBeenPwnedPlugin()], http_client=hibp_transport("", breached=True)
     )
     check = auth.password_checks[0]
 
-    await check("", "/sign-up/email")
+    with pytest.raises(APIError):
+        await check("", "/sign-up/email")
 
 
 # --- check callable: wire format + failure semantics --------------------------------------
@@ -225,6 +228,42 @@ async def test_non_2xx_response_raises_500_with_exact_message():
 
     with pytest.raises(APIError) as exc_info:
         await check("whatever-password", "/sign-up/email")
+    assert exc_info.value.status == 500
+    # TS haveibeenpwned/index.ts:71-74 reports the upstream status.
+    assert exc_info.value.message == "Failed to check password. Status: 503"
+
+
+# --- is_password_compromised (TS isPasswordCompromised, v1.7.6 index.ts:54) ----------------
+
+
+def range_client(body: str) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text=body))
+    )
+
+
+def suffix_of(password: str) -> str:
+    return hashlib.sha1(password.encode()).hexdigest().upper()[5:]
+
+
+async def test_is_password_compromised_reports_breach_and_safe():
+    assert await is_password_compromised("p", http=range_client(f"{suffix_of('p')}:42\n"))
+    assert not await is_password_compromised("p", http=range_client("0" * 35 + ":1\n"))
+
+
+async def test_is_password_compromised_ignores_zero_count_padding():
+    assert not await is_password_compromised("p", http=range_client(f"{suffix_of('p')}:0\n"))
+
+
+async def test_is_password_compromised_matches_lowercase_crlf():
+    body = f"{suffix_of('p').lower()}:1\r\n"
+    assert await is_password_compromised("p", http=range_client(body))
+
+
+@pytest.mark.parametrize("count", ["", "   ", "invalid", "007", "-1", "1e3"])
+async def test_is_password_compromised_rejects_invalid_count(count):
+    with pytest.raises(APIError) as exc_info:
+        await is_password_compromised("p", http=range_client(f"{suffix_of('p')}:{count}\n"))
     assert exc_info.value.status == 500
     assert exc_info.value.message == "Failed to check password. Please try again later."
 

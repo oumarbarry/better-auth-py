@@ -644,7 +644,7 @@ async def test_captchafox_sends_form_body_with_sitekey_and_camelcase_remoteip():
     }
 
 
-# --- /sign-in/email-otp exemption --------------------------------------------------------
+# --- /sign-in/email-otp is not a default endpoint ---------------------------------------
 
 
 async def test_email_otp_sign_in_exempt_by_default():
@@ -675,9 +675,8 @@ async def test_email_otp_sign_in_enforced_when_explicitly_opted_in():
 
 
 async def test_email_otp_still_exempt_when_custom_endpoints_omit_it():
-    """A custom ``endpoints`` list that doesn't literally name the exempt path leaves it
-    exempt — matching endpoints substring-matching a *different* protected path doesn't
-    revoke the exemption."""
+    """Endpoint rules match full paths (TS v1.7.6 index.ts:51-55), so ``/sign-in/email``
+    does not cover ``/sign-in/email-otp``."""
     plugin = CaptchaPlugin(
         provider="cloudflare-turnstile",
         secret_key="xx-secret-key",
@@ -724,3 +723,113 @@ async def test_rate_limit_applies_before_captcha_verification():
     assert first.status_code == 403
     assert second.status_code == 429
     assert len(calls) == 1  # captcha never re-dispatched once rate-limited
+
+
+# --- v1.7.6: full-path and wildcard endpoint rules (TS index.ts:22-60) -------------------
+
+
+@pytest.mark.parametrize(
+    ("endpoints", "path", "enforced"),
+    [
+        (None, "/sign-in/email/extra-segment", False),  # no more substring matches
+        (["/sign-in"], "/sign-in/email", False),  # partial paths are not matches
+        (None, "/sign-in//email", True),  # duplicate slashes collapse
+        (["/sign-in/*"], "/sign-in/email-otp", True),
+        (["/sign-in/*"], "/sign-in/social/google", False),
+        (["/sign-in/**"], "/sign-in/social/google", True),
+    ],
+)
+async def test_endpoint_rules_match_full_paths_and_wildcards(endpoints, path, enforced):
+    plugin = CaptchaPlugin(
+        provider="cloudflare-turnstile", secret_key="xx-secret-key", endpoints=endpoints
+    )
+    auth = make_auth(plugins=[plugin])
+    result = await plugin.on_request(ctx_for(auth, path, headers={}))
+    assert (result is not None and result.body["code"] == "MISSING_RESPONSE") is enforced
+
+
+# --- v1.7.6: Vercel BotID provider (TS verify-handlers/vercel-botid.ts, 3d0efa308) --------
+
+
+def botid(verdict: Any = None, **kwargs: Any) -> tuple[CaptchaPlugin, list[int]]:
+    calls: list[int] = []
+
+    async def check_bot_id() -> dict[str, Any]:
+        calls.append(1)
+        if isinstance(verdict, Exception):
+            raise verdict
+        return verdict
+
+    return CaptchaPlugin(provider="vercel-botid", check_bot_id=check_bot_id, **kwargs), calls
+
+
+@pytest.mark.parametrize("path", DEFAULT_ENDPOINTS)
+async def test_botid_rejects_bots_without_token_or_secret(path):
+    plugin, calls = botid({"isBot": True})
+    auth = make_auth(plugins=[plugin])
+    result = await plugin.on_request(ctx_for(auth, path, headers={}))
+    assert result is not None
+    assert result.status == 403
+    assert result.body == {"code": "VERIFICATION_FAILED", "message": "Captcha verification failed"}
+    assert calls == [1]
+
+
+async def test_botid_allows_humans():
+    plugin, _calls = botid({"isBot": False})
+    auth = make_auth(plugins=[plugin])
+    assert await plugin.on_request(ctx_for(auth, "/sign-in/email")) is None
+
+
+async def test_botid_custom_validation_can_allow_verified_bots_and_reject_humans():
+    seen: list[dict[str, Any]] = []
+
+    def trust_agent(data: dict[str, Any]) -> bool:
+        seen.append(data)
+        return data["verification"].get("verifiedBotName") == "trusted-agent"
+
+    plugin, _ = botid(
+        {"isBot": True, "isVerifiedBot": True, "verifiedBotName": "trusted-agent"},
+        validate_request=trust_agent,
+    )
+    auth = make_auth(plugins=[plugin])
+    ctx = ctx_for(auth, "/sign-in/email")
+    assert await plugin.on_request(ctx) is None
+    assert seen[0]["request"] is ctx.request
+
+    rejecting, _ = botid({"isBot": False}, validate_request=lambda _data: False)
+    auth = make_auth(plugins=[rejecting])
+    result = await rejecting.on_request(ctx_for(auth, "/sign-in/email"))
+    assert result is not None and result.status == 403
+
+
+async def test_botid_check_failure_is_generic_500():
+    plugin, _ = botid(RuntimeError("private BotID failure"))
+    auth = make_auth(plugins=[plugin])
+    result = await plugin.on_request(ctx_for(auth, "/sign-in/email"))
+    assert result is not None
+    assert result.status == 500
+    assert result.body == {"code": "UNKNOWN_ERROR", "message": "Something went wrong"}
+
+
+async def test_botid_skips_unprotected_routes():
+    plugin, calls = botid({"isBot": True})
+    auth = make_auth(plugins=[plugin])
+    assert await plugin.on_request(ctx_for(auth, "/ok")) is None
+    assert calls == []
+
+
+async def test_botid_fails_closed_on_timeout(monkeypatch):
+    import asyncio
+
+    import better_auth.plugins_ext.captcha as captcha_module
+
+    monkeypatch.setattr(captcha_module, "CAPTCHA_VERIFY_TIMEOUT", 0.01)
+
+    async def never() -> dict[str, Any]:
+        await asyncio.Event().wait()
+        return {}
+
+    plugin = CaptchaPlugin(provider="vercel-botid", check_bot_id=never)
+    auth = make_auth(plugins=[plugin])
+    result = await plugin.on_request(ctx_for(auth, "/sign-in/email"))
+    assert result is not None and result.status == 500

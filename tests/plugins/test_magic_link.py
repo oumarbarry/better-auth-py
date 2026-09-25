@@ -430,3 +430,23 @@ async def test_send_allows_cookieless_request_without_origin():
     r = await _sign_in_raw(_auth(holder), {}, email="s2s@test.com")
     assert r.status == 200, r.body
     assert holder["email"] == "s2s@test.com"
+
+
+async def test_verify_forwards_user_creation_rejection_to_error_url():
+    """TS v1.7.6 plugins/magic-link/index.ts:405-425: an APIError with a code raised while
+    creating the user redirects with ``error=<code>&error_description=<message>``."""
+    from better_auth.types import APIError
+
+    holder: dict[str, Any] = {}
+
+    def refuse(user: dict[str, Any], *_a: Any) -> None:
+        raise APIError(403, "SIGNUP_BLOCKED", "Sign up is closed")
+
+    auth = make_auth(plugins=[_mk(holder)], database_hooks={"user": {"create": {"before": refuse}}})
+    async with make_client(auth) as client:
+        await _sign_in(client, "blocked@test.com")
+        r = await _verify(client, holder["token"], errorCallbackURL="/oops")
+        assert r.status_code == 302
+        params = parse_qs(urlsplit(r.headers["location"]).query)
+        assert params["error"] == ["SIGNUP_BLOCKED"]
+        assert params["error_description"] == ["Sign up is closed"]
