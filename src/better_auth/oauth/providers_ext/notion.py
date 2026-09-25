@@ -3,8 +3,8 @@
 Quirks vs. the standard shape:
 - No default scopes at all (Notion's permission model lives in the integration's
   capabilities, not OAuth scopes).
-- ``owner=user`` is a mandatory authorize-URL param (``additionalParams`` in TS) —
-  modeled here via the generic ``authorize_params`` passthrough.
+- ``owner=user`` is a mandatory authorize-URL param that always wins over per-request
+  extras (TS v1.7.6 notion.ts:50-53 ``{...additionalParams, owner: "user"}``).
 - Token endpoint uses ``basic`` client auth (RFC 7617) — Notion rejects base64url.
 - Userinfo is a single ``GET /v1/users/me`` call requiring a ``Notion-Version`` header,
   with the actual profile nested three levels down (``bot.owner.user``) because the
@@ -35,6 +35,13 @@ class Notion(ProviderConfig):
     scopes: list[str] = field(default_factory=list)
     authentication: str = "basic"
     authorize_params: dict[str, str] = field(default_factory=lambda: {"owner": "user"})
+
+    def authorization_url(
+        self, *, additional_params: dict[str, str] | None = None, **kwargs: Any
+    ) -> str:
+        return super().authorization_url(
+            additional_params={**(additional_params or {}), "owner": "user"}, **kwargs
+        )
 
     async def fetch_user(self, tokens: OAuthTokens, http: httpx.AsyncClient) -> OAuthUserInfo:
         response = await oauth_fetch(

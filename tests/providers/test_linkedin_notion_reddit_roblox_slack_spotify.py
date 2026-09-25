@@ -8,6 +8,7 @@ against the provider classes themselves -- no FastAPI app/DB needed for these ch
 
 from __future__ import annotations
 
+import base64
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -17,7 +18,7 @@ from better_auth.oauth.machinery import OAuthFetchError
 from better_auth.oauth.models import OAuthTokens
 from better_auth.oauth.providers_ext.linkedin import LinkedIn
 from better_auth.oauth.providers_ext.notion import Notion
-from better_auth.oauth.providers_ext.reddit import Reddit
+from better_auth.oauth.providers_ext.reddit import Reddit, create_placeholder_email
 from better_auth.oauth.providers_ext.roblox import Roblox
 from better_auth.oauth.providers_ext.slack import Slack
 from better_auth.oauth.providers_ext.spotify import Spotify
@@ -187,7 +188,7 @@ async def test_reddit_token_exchange_basic_auth_and_headers():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/access_token"
         assert request.headers["accept"] == "text/plain"
-        assert request.headers["user-agent"] == "better-auth-py"
+        assert request.headers["user-agent"] == "better-auth"  # TS v1.7.6 reddit.ts:64-67
         assert request.headers["authorization"].startswith("Basic ")
         body = request.content.decode()
         assert "grant_type=authorization_code" in body
@@ -212,14 +213,15 @@ async def test_reddit_profile_mapping_synthesizes_placeholder_email():
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/me"
-        assert request.headers["user-agent"] == "better-auth-py"
+        assert request.headers["user-agent"] == "better-auth"  # TS v1.7.6 reddit.ts:89-92
         assert request.headers["authorization"] == "Bearer tok"
         return httpx.Response(200, json=profile)
 
     async with mock_http(handler) as http:
         info = await p.fetch_user(tokens(), http)
     assert info.id == "8xwlg"
-    assert info.email == "8xwlg@reddit.invalid"  # RFC 2606 placeholder, not a real address
+    # TS v1.7.6 reddit.ts:105-110 + utils/email.ts:6,30 (b4ad5a110)
+    assert info.email == "8xwlg@reddit.placeholder.invalid"
     assert info.email_verified is False
     assert info.image == "https://img/reddit.png"  # query string stripped
 
@@ -264,7 +266,8 @@ async def test_roblox_profile_mapping_no_real_email():
         info = await p.fetch_user(tokens(), http)
     assert info.id == "123456"  # str-coerced
     assert info.name == "Builder"
-    assert info.email == "builder123"  # username used as placeholder, per TS
+    # TS v1.7.6 roblox.ts:105-108 (b4ad5a110): placeholder keyed to sub, not the username
+    assert info.email == "123456@roblox.placeholder.invalid"
     assert info.email_verified is False
 
 
@@ -392,3 +395,91 @@ async def test_spotify_token_exchange_sends_code_verifier():
             http, code="abc", redirect_uri="https://app.example/cb", code_verifier="verifier123"
         )
     assert result.access_token == "sp_tok"
+
+
+# --- v1.7.6: per-request additionalParams (e7eb45b06) ------------------------------------
+
+
+@pytest.mark.parametrize("cls", [LinkedIn, Notion, Reddit, Roblox, Slack, Spotify])
+def test_authorization_url_forwards_request_additional_params(cls):
+    # TS v1.7.6 linkedin.ts:41, notion.ts:37, reddit.ts:42, roblox.ts:46, slack.ts:50,
+    # spotify.ts:33: caller extras are forwarded, reserved keys are never overridden.
+    p = cls(client_id="cid", client_secret="secret")
+    url = p.authorization_url(
+        state="st",
+        redirect_uri="https://app.example/cb",
+        additional_params={"audience": "x", "state": "evil"},
+    )
+    q = parse_qs(urlsplit(url).query)
+    assert q["audience"] == ["x"]
+    assert q["state"] == ["st"]
+
+
+def test_notion_owner_param_wins_over_request_params():
+    # TS v1.7.6 notion.ts:50-53: `{...additionalParams, owner: "user"}`
+    p = Notion(client_id="cid", client_secret="secret")
+    url = p.authorization_url(
+        state="st", redirect_uri="https://app.example/cb", additional_params={"owner": "workspace"}
+    )
+    assert parse_qs(urlsplit(url).query)["owner"] == ["user"]
+
+
+def test_request_params_win_over_reddit_duration_and_roblox_prompt():
+    # create-authorization-url.ts:108-112 sets additionalParams after duration/prompt
+    reddit = Reddit(client_id="cid", client_secret="s", authorize_params={"duration": "permanent"})
+    url = reddit.authorization_url(
+        state="st",
+        redirect_uri="https://app.example/cb",
+        additional_params={"duration": "temporary"},
+    )
+    assert parse_qs(urlsplit(url).query)["duration"] == ["temporary"]
+    roblox = Roblox(client_id="cid", client_secret="s")
+    url = roblox.authorization_url(
+        state="st", redirect_uri="https://app.example/cb", additional_params={"prompt": "login"}
+    )
+    assert parse_qs(urlsplit(url).query)["prompt"] == ["login"]
+
+
+# --- v1.7.6: Reddit shared token flow (a2bae0cad) ----------------------------------------
+
+
+async def test_reddit_token_requests_use_form_encoded_basic_credentials():
+    # TS v1.7.6 reddit.ts:34-36 client_secret_basic for both exchange and refresh; the
+    # credentials are form-url-encoded before base64 (basic-credentials.ts:38-44).
+    p = Reddit(client_id="c:id", client_secret="s cret")
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"access_token": "r_tok"})
+
+    async with mock_http(handler) as http:
+        await p.exchange(http, code="abc", redirect_uri="https://app.example/cb")
+        await p.refresh(http, "rt")
+    expected = "Basic " + base64.b64encode(b"c%3Aid:s+cret").decode()
+    assert [r.headers["authorization"] for r in seen] == [expected, expected]
+    refresh = seen[1]
+    assert refresh.url == "https://www.reddit.com/api/v1/access_token"
+    assert parse_qs(refresh.content.decode()) == {
+        "grant_type": ["refresh_token"],
+        "refresh_token": ["rt"],
+    }
+    # refresh sends no Reddit-specific headers (reddit.ts:74-79)
+    assert refresh.headers["accept"] == "application/json"
+
+
+async def test_reddit_token_request_without_secret_fails():
+    # token-endpoint-auth.ts: client_secret_basic requires clientSecret
+    p = Reddit(client_id="cid")
+    async with mock_http(lambda r: httpx.Response(200, json={"access_token": "x"})) as http:
+        with pytest.raises(OAuthFetchError):
+            await p.exchange(http, code="abc", redirect_uri="https://app.example/cb")
+
+
+def test_placeholder_email_rejects_invalid_identifier():
+    # TS v1.7.6 utils/email.ts:28-33 throws TypeError when the address fails z.email()
+    with pytest.raises(TypeError, match="Invalid placeholder email"):
+        create_placeholder_email(identifier="a b", namespace="reddit")
+    assert create_placeholder_email(identifier="42", namespace="roblox") == (
+        "42@roblox.placeholder.invalid"
+    )

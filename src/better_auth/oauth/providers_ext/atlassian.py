@@ -40,3 +40,11 @@ class Atlassian(ProviderConfig):
     def __post_init__(self) -> None:
         if self.profile_mapper is None:
             self.profile_mapper = _map
+
+    def authorization_url(
+        self, *, additional_params: dict[str, str] | None = None, **kw: Any
+    ) -> str:
+        # TS v1.7.6 atlassian.ts:68-70 `{...additionalParams, audience}`: a request extra
+        # never replaces the audience.
+        extras = {k: v for k, v in (additional_params or {}).items() if k != "audience"}
+        return super().authorization_url(additional_params=extras, **kw)

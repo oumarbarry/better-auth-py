@@ -227,15 +227,17 @@ async def test_apple_verify_id_token_mismatched_nonce():
     assert await provider.verify_id_token(http, token, "different") is None
 
 
-async def test_apple_verify_coerces_email_verified_to_bool():
+async def test_apple_verify_keeps_string_email_verified():
+    """TS v1.7.6 apple.ts:125-136 declares an ``idToken`` config: the shared verifier no
+    longer rewrites claims, so a string ``"false"`` stays unverified (apple.ts:168-171)."""
     key = _ec_key()
     token = _sign(
         _now_claims(
             sub="u",
             aud="com.example.app",
             iss="https://appleid.apple.com",
-            email_verified="true",
-            is_private_email="false",
+            email="u@x.com",
+            email_verified="false",
         ),
         key,
         "ES256",
@@ -248,9 +250,33 @@ async def test_apple_verify_coerces_email_verified_to_bool():
     http = _jwks_http("/auth/keys", [_ec_jwk(key)])
     claims = await provider.verify_id_token(http, token)
     assert claims is not None
-    # both coerced to real bools (matches TS Boolean(): any non-empty string -> True)
-    assert claims["email_verified"] is True
-    assert claims["is_private_email"] is True
+    assert claims["email_verified"] == "false"
+    assert provider.user_info_from_id_token(claims).email_verified is False
+
+
+def test_apple_authorization_url_forwards_additional_params():
+    # TS v1.7.6 apple.ts:112 forwards the per-request additionalParams (e7eb45b06).
+    provider = Apple(client_id="svc", client_secret="s", authorize_params={"a": "config"})
+    url = provider.authorization_url(
+        state="st", redirect_uri="https://app/cb", additional_params={"a": "req", "b": "2"}
+    )
+    query = parse_qs(urlsplit(url).query)
+    assert query["a"] == ["req"]
+    assert query["b"] == ["2"]
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        Apple(client_id="c", client_secret="s", disable_id_token_sign_in=True),
+        Facebook(client_id="c", client_secret="s", disable_id_token_sign_in=True),
+        MicrosoftEntraId(client_id="c", disable_id_token_sign_in=True),
+    ],
+)
+def test_disable_id_token_sign_in_reports_unsupported(provider):
+    # TS v1.7.6 oauth2/verify-id-token.ts:41-47 supportsIdTokenSignIn: the route answers
+    # ID_TOKEN_NOT_SUPPORTED instead of INVALID_TOKEN.
+    assert provider.supports_id_token is False
 
 
 def test_apple_user_info_mapping():
@@ -374,32 +400,95 @@ async def test_facebook_verify_limited_login_jwt():
     assert claims["sub"] == "fb-user"
 
 
-async def test_facebook_verify_opaque_access_token_via_debug_token():
+def _graph_routes(user_id="g-9", app_id="fbapp"):
     def debug_token(request: httpx.Request) -> httpx.Response:
         q = parse_qs(request.url.query.decode())
-        assert q["input_token"] == ["opaque-abc"]
-        assert q["access_token"] == ["fbapp|secret"]
+        assert q["input_token"] == ["real-access"]
         return httpx.Response(
-            200,
-            json={"data": {"is_valid": True, "app_id": "fbapp", "user_id": "u-42"}},
+            200, json={"data": {"is_valid": True, "app_id": app_id, "user_id": user_id}}
         )
 
-    provider = Facebook(client_id="fbapp", client_secret="secret")
-    http = _jwks_http("/__none__", [], routes={"/debug_token": debug_token})
-    result = await provider.verify_id_token(http, "opaque-abc")
-    assert result == {"user_id": "u-42"}
-
-
-async def test_facebook_verify_opaque_rejects_wrong_app():
-    def debug_token(request: httpx.Request) -> httpx.Response:
+    def me(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer real-access"
         return httpx.Response(
             200,
-            json={"data": {"is_valid": True, "app_id": "other-app", "user_id": "u-1"}},
+            json={
+                "id": user_id,
+                "name": "Graph User",
+                "email": "g@x.com",
+                "picture": {"data": {"url": "http://avatar"}},
+            },
         )
 
+    return {"/debug_token": debug_token, "/me": me}
+
+
+async def _facebook_id_token_sign_in(id_token, app_id="fbapp"):
+    from conftest import make_auth, make_client
+
+    auth = make_auth(
+        social_providers={"facebook": Facebook(client_id="fbapp", client_secret="secret")},
+        http_client=_jwks_http("/__none__", [], routes=_graph_routes(app_id=app_id)),
+    )
+    async with make_client(auth) as client:
+        r = await client.post(
+            "/api/auth/sign-in/social", json={"provider": "facebook", "idToken": id_token}
+        )
+    return auth, r
+
+
+async def test_facebook_opaque_token_resolves_identity_from_access_token():
+    """TS v1.7.6 facebook.ts:151-162 ``allowOpaqueToken``: an opaque idToken passes the
+    verifier and identity comes from ``idToken.accessToken`` through debug_token + Graph
+    ``/me`` (sign-in.ts:296-302, facebook.ts:208-250)."""
+    auth, r = await _facebook_id_token_sign_in(
+        {"token": "opaque-abc", "accessToken": "real-access"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["email"] == "g@x.com"
+    assert r.json()["user"]["image"] == "http://avatar"
+    [account] = await auth.adapter.find_many("account")
+    assert account["accountId"] == "g-9"  # accountSubject: `"sub" in profile ? sub : id`
+
+
+@pytest.mark.parametrize(
+    ("id_token", "app_id"),
+    [
+        ({"token": "opaque-abc"}, "fbapp"),
+        ({"token": "opaque-abc", "accessToken": "real-access"}, "other-app"),
+    ],
+)
+async def test_facebook_opaque_token_without_valid_access_token_fails(id_token, app_id):
+    # TS v1.7.6 sign-in.ts:302-310: getUserInfo returns null -> FAILED_TO_GET_USER_INFO.
+    _, r = await _facebook_id_token_sign_in(id_token, app_id=app_id)
+    assert r.status_code == 401
+    assert r.json()["code"] == "FAILED_TO_GET_USER_INFO"
+
+
+async def test_facebook_limited_login_pins_rs256():
+    # TS v1.7.6 facebook.ts:158 `algorithms: ["RS256"]`: an HS256 token signed with a
+    # symmetric JWK is refused even though the key matches.
+    secret = "k" * 32
+    oct_jwk = {
+        "kty": "oct",
+        "kid": KID,
+        "k": base64.urlsafe_b64encode(secret.encode()).decode().rstrip("="),
+    }
+    token = _sign(
+        _now_claims(sub="x", aud="fbapp", iss="https://www.facebook.com"), secret, "HS256"
+    )
     provider = Facebook(client_id="fbapp", client_secret="secret")
-    http = _jwks_http("/__none__", [], routes={"/debug_token": debug_token})
-    assert await provider.verify_id_token(http, "opaque-abc") is None
+    http = _jwks_http("/.well-known/oauth/openid/jwks/", [oct_jwk])
+    assert await provider.verify_id_token(http, token) is None
+
+
+def test_facebook_additional_params_override_config_id():
+    # TS v1.7.6 facebook.ts:137-140 `{config_id, ...additionalParams}`.
+    provider = Facebook(client_id="c", client_secret="s", config_id="cfg")
+    url = provider.authorization_url(
+        state="st", redirect_uri="https://app/cb", additional_params={"config_id": "req"}
+    )
+    assert parse_qs(urlsplit(url).query)["config_id"] == ["req"]
 
 
 async def test_facebook_fetch_user_limited_login():
@@ -564,6 +653,65 @@ def test_microsoft_account_id_claim_option_keeps_sub():
 # ===================================================================================
 
 
+async def test_microsoft_verify_tries_every_key_sharing_the_kid():
+    # Shared verifier (TS v1.7.6 microsoft-entra-id.ts:229-272 `idToken`): a rotated key
+    # sharing the kid must not shadow the one that signed the token.
+    key, stale = _rsa_key(), _rsa_key()
+    tid = "my-tenant"
+    iss = f"https://login.microsoftonline.com/{tid}/v2.0"
+    token = _sign(_now_claims(sub="u", oid="o", aud="msapp", tid=tid, iss=iss), key, "RS256")
+    provider = MicrosoftEntraId(client_id="msapp", tenant_id=tid)
+    http = _jwks_http(f"/{tid}/discovery/v2.0/keys", [_rsa_jwk(stale), _rsa_jwk(key)])
+    assert await provider.verify_id_token(http, token) is not None
+
+
+def test_microsoft_client_assertion_cannot_combine_with_secret():
+    # TS v1.7.6 microsoft-entra-id.ts:175-179
+    with pytest.raises(ValueError, match="cannot be combined with clientSecret"):
+        MicrosoftEntraId(client_id="msapp", client_secret="s", client_assertion=lambda c: "x")
+
+
+async def test_microsoft_client_assertion_sent_as_private_key_jwt():
+    # TS v1.7.6 microsoft-entra-id.ts:180-186, :226 and :358 (7fe0e2b16).
+    seen: list[dict[str, list[str]]] = []
+    contexts: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(parse_qs(request.content.decode()))
+        return httpx.Response(200, json={"access_token": "at"})
+
+    def assertion(context: dict[str, str]) -> str:
+        contexts.append(context)
+        return "signed-jwt"
+
+    provider = MicrosoftEntraId(client_id="msapp", tenant_id="t1", client_assertion=assertion)
+    http = _mock_http(handler)
+    await provider.exchange(http, code="c", redirect_uri="https://app/cb", code_verifier="v")
+    await provider.refresh(http, "rt")
+    for body in seen:
+        assert body["client_assertion"] == ["signed-jwt"]
+        assert body["client_assertion_type"] == [
+            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        ]
+        assert body["client_id"] == ["msapp"]
+        assert "client_secret" not in body
+    assert [c["grantType"] for c in contexts] == ["authorization_code", "refresh_token"]
+    assert contexts[0]["tokenEndpoint"] == "https://login.microsoftonline.com/t1/oauth2/v2.0/token"
+
+
+async def test_microsoft_refresh_sends_scope():
+    # TS v1.7.6 microsoft-entra-id.ts:343-357: the default scopes ride on every refresh.
+    seen: dict[str, list[str]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(parse_qs(request.content.decode()))
+        return httpx.Response(200, json={"access_token": "at"})
+
+    await MicrosoftEntraId(client_id="msapp", client_secret="s").refresh(_mock_http(handler), "rt")
+    assert seen["scope"] == ["openid profile email User.Read offline_access"]
+    assert seen["client_secret"] == ["s"]
+
+
 def test_paypal_authorization_url_sandbox_empty_scope():
     provider = Paypal(client_id="ppclient", client_secret="secret")  # sandbox default
     url = provider.authorization_url(
@@ -573,8 +721,9 @@ def test_paypal_authorization_url_sandbox_empty_scope():
     query = parse_qs(parts.query, keep_blank_values=True)
     assert parts.netloc == "www.sandbox.paypal.com"
     assert parts.path == "/signin/authorize"
-    # empty scope param (permissions live in the PayPal dashboard)
-    assert query["scope"] == [""]
+    # no scope param: permissions live in the PayPal dashboard and v1.7.6
+    # create-authorization-url.ts only sets `scope` when `scopes?.length`
+    assert "scope" not in query
     assert query["code_challenge_method"] == ["S256"]
 
 
@@ -597,7 +746,7 @@ async def test_paypal_verify_rs256_via_jwks():
         key,
         "RS256",
     )
-    provider = Paypal(client_id="ppclient", client_secret="secret")
+    provider = Paypal(client_id="ppclient", client_secret="secret", legacy_id_token_sign_in=True)
     http = _jwks_http("/v1/oauth2/certs", [_rsa_jwk(key)])
     claims = await provider.verify_id_token(http, token)
     assert claims is not None
@@ -611,7 +760,7 @@ async def test_paypal_verify_hs256_via_client_secret():
         secret,
         "HS256",
     )
-    provider = Paypal(client_id="ppclient", client_secret=secret)
+    provider = Paypal(client_id="ppclient", client_secret=secret, legacy_id_token_sign_in=True)
     http = _mock_http(lambda r: httpx.Response(404))  # no JWKS fetch for HS256
     claims = await provider.verify_id_token(http, token)
     assert claims is not None
@@ -625,17 +774,19 @@ async def test_paypal_verify_rejects_unlisted_algorithm():
         key,
         "ES256",
     )
-    provider = Paypal(client_id="ppclient", client_secret="secret")
+    provider = Paypal(client_id="ppclient", client_secret="secret", legacy_id_token_sign_in=True)
     http = _jwks_http("/v1/oauth2/certs", [_ec_jwk(key)])
     assert await provider.verify_id_token(http, token) is None
 
 
-async def test_paypal_exchange_basic_auth_no_code_verifier():
+async def test_paypal_exchange_uses_shared_token_flow():
+    """TS v1.7.6 paypal.ts:132-145 (9e36635eb): validateAuthorizationCode with
+    ``client_secret_basic``; the verifier is sent and credentials are form-encoded."""
     captured = {}
 
     def token_endpoint(request: httpx.Request) -> httpx.Response:
-        captured["auth"] = request.headers.get("authorization")
-        captured["body"] = request.content.decode()
+        captured["headers"] = request.headers
+        captured["body"] = parse_qs(request.content.decode())
         return httpx.Response(
             200,
             json={
@@ -646,17 +797,59 @@ async def test_paypal_exchange_basic_auth_no_code_verifier():
             },
         )
 
-    provider = Paypal(client_id="ppclient", client_secret="secret")
+    provider = Paypal(client_id="pp client", client_secret="se:cret")
     http = _jwks_http("/__none__", [], routes={"/v1/oauth2/token": token_endpoint})
     tokens = await provider.exchange(
         http, code="the-code", redirect_uri="https://app/cb", code_verifier="v123"
     )
     assert tokens.access_token == "pp-access"
     assert tokens.id_token == "pp-id"
-    assert captured["auth"].startswith("Basic ")
-    # PayPal's exchange body deliberately omits code_verifier.
-    assert "code_verifier" not in captured["body"]
-    assert "grant_type=authorization_code" in captured["body"]
+    creds = base64.b64encode(b"pp+client:se%3Acret").decode()
+    assert captured["headers"]["authorization"] == f"Basic {creds}"
+    assert "accept-language" not in captured["headers"]
+    assert captured["body"] == {
+        "grant_type": ["authorization_code"],
+        "code": ["the-code"],
+        "code_verifier": ["v123"],
+        "redirect_uri": ["https://app/cb"],
+    }
+
+
+async def test_paypal_refresh_uses_client_secret_basic():
+    # TS v1.7.6 paypal.ts:148-162
+    captured = {}
+
+    def token_endpoint(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("authorization")
+        captured["body"] = parse_qs(request.content.decode())
+        return httpx.Response(200, json={"access_token": "new"})
+
+    provider = Paypal(client_id="ppclient", client_secret="secret", environment="live")
+    http = _jwks_http("/__none__", [], routes={"/v1/oauth2/token": token_endpoint})
+    assert (await provider.refresh(http, "rt")).access_token == "new"
+    assert captured["auth"] == "Basic " + base64.b64encode(b"ppclient:secret").decode()
+    assert captured["body"] == {"grant_type": ["refresh_token"], "refresh_token": ["rt"]}
+
+
+def test_paypal_id_token_sign_in_unsupported_by_default():
+    # TS v1.7.6 paypal.ts declares no `idToken` config (removed by 4f53b61f4), so
+    # supportsIdTokenSignIn is false. The port keeps the old verifier behind an option.
+    assert Paypal(client_id="c", client_secret="s").supports_id_token is False
+    assert Paypal(client_id="c", client_secret="s", legacy_id_token_sign_in=True).supports_id_token
+    assert not Paypal(
+        client_id="c",
+        client_secret="s",
+        legacy_id_token_sign_in=True,
+        disable_id_token_sign_in=True,
+    ).supports_id_token
+
+
+def test_paypal_authorization_url_forwards_additional_params():
+    # TS v1.7.6 paypal.ts:127
+    url = Paypal(client_id="c", client_secret="s").authorization_url(
+        state="st", redirect_uri="https://app/cb", additional_params={"flowEntry": "static"}
+    )
+    assert parse_qs(urlsplit(url).query)["flowEntry"] == ["static"]
 
 
 async def test_paypal_fetch_user_sub_binding():

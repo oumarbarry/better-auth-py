@@ -50,6 +50,7 @@ class Vercel(ProviderConfig):
         extra_scopes: list[str] | None = None,
         login_hint: str | None = None,
         nonce: str | None = None,
+        additional_params: dict[str, str] | None = None,
     ) -> str:
         if not code_verifier:
             raise ValueError("codeVerifier is required for Vercel")
@@ -60,4 +61,5 @@ class Vercel(ProviderConfig):
             extra_scopes=extra_scopes,
             login_hint=login_hint,
             nonce=nonce,
+            additional_params=additional_params,
         )

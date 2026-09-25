@@ -96,7 +96,7 @@ async def test_twitter_fetch_user_two_calls_and_email():
     assert info.image == "http://img/x.png"
 
 
-async def test_twitter_falls_back_to_username_when_no_email():
+async def test_twitter_placeholder_email_when_no_email():
     def handler(request: httpx.Request) -> httpx.Response:
         if "confirmed_email" in request.url.query.decode():
             return httpx.Response(200, json={"data": {}})
@@ -105,7 +105,8 @@ async def test_twitter_falls_back_to_username_when_no_email():
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     p = Twitter(client_id="i", client_secret="s")
     info = await p.fetch_user(OAuthTokens(access_token="at"), http)
-    assert info.email == "handle"
+    # TS v1.7.6 twitter.ts:193-197 (b4ad5a110): placeholder keyed to the X id
+    assert info.email == "1@twitter.placeholder.invalid"
     assert info.email_verified is False
 
 
@@ -126,19 +127,21 @@ def test_tiktok_authorization_url_hand_built():
 def test_tiktok_scopes_comma_joined():
     p = TikTok(client_secret="ts", client_key="ck")
     url = p.authorization_url(state="s", redirect_uri="http://app/cb", extra_scopes=["video.list"])
-    assert "scope=user.info.profile,video.list" in url
+    # tiktok.ts:158 sets the param through URLSearchParams, which encodes the comma
+    assert "scope=user.info.profile%2Cvideo.list" in url
 
 
 async def test_tiktok_exchange_sends_client_key_not_client_id():
     http = capturing({"/v2/oauth/token/": {"access_token": "at"}})
     p = TikTok(client_secret="ts", client_key="ck123")
-    await p.exchange(http, code="c", redirect_uri="http://app/cb/tiktok")
+    await p.exchange(http, code="c", redirect_uri="http://app/cb/tiktok", code_verifier="ver")
     body = http.requests[0].content.decode()
-    assert "client_key=ck123" in body
-    assert "client_secret=ts" in body
-    assert "grant_type=authorization_code" in body
-    # No PKCE for tiktok.
-    assert "code_verifier" not in body
+    # TS v1.7.6 tiktok.ts:173-182 (baa08f4ee): the verifier is forwarded and the custom
+    # strategy puts client_key + client_secret in the body, never client_id
+    assert body == (
+        "grant_type=authorization_code&code=c&code_verifier=ver"
+        "&redirect_uri=http%3A%2F%2Fapp%2Fcb%2Ftiktok&client_key=ck123&client_secret=ts"
+    )
 
 
 async def test_tiktok_fetch_user_profile_mapping():
@@ -160,14 +163,39 @@ async def test_tiktok_fetch_user_profile_mapping():
     info = await p.fetch_user(OAuthTokens(access_token="at"), http)
     assert info.id == "oid_1"
     assert info.name == "Dancer"
-    # TikTok has no email; falls back to username.
-    assert info.email == "dancer99"
+    # TS v1.7.6 tiktok.ts:219-224 (b4ad5a110): placeholder keyed to open_id
+    assert info.email == "oid_1@tiktok.placeholder.invalid"
     assert info.image == "http://tt/av.png"
     assert info.email_verified is False
     # fields query is exact.
     assert (
         http.requests[0].url.query.decode()
         == "fields=open_id,avatar_large_url,display_name,username"
+    )
+
+
+async def test_tiktok_refresh_body_uses_client_key():
+    http = capturing({"/v2/oauth/token/": {"access_token": "at"}})
+    p = TikTok(client_secret="ts", client_key="ck123")
+    await p.refresh(http, "rt")
+    # tiktok.ts:183-191: refresh goes through the same custom strategy
+    assert http.requests[0].content.decode() == (
+        "grant_type=refresh_token&refresh_token=rt&client_key=ck123&client_secret=ts"
+    )
+
+
+def test_tiktok_additional_params_skip_reserved_and_client_key():
+    p = TikTok(client_secret="ts", client_key="ck123")
+    url = p.authorization_url(
+        state="STATE",
+        redirect_uri="http://app/cb/tiktok",
+        additional_params={"disable_auto_auth": "1", "client_key": "evil", "state": "x"},
+    )
+    # tiktok.ts:163-169 (e7eb45b06)
+    assert url == (
+        "https://www.tiktok.com/v2/auth/authorize?scope=user.info.profile"
+        "&response_type=code&client_key=ck123"
+        "&redirect_uri=http%3A%2F%2Fapp%2Fcb%2Ftiktok&state=STATE&disable_auto_auth=1"
     )
 
 
@@ -239,7 +267,8 @@ async def test_wechat_fetch_user_needs_openid_and_synthesizes_email():
     info = await p.fetch_user(tokens, http)
     # id prefers unionid; email is the .invalid placeholder keyed to the id.
     assert info.id == "UNION_1"
-    assert info.email == "UNION_1@wechat.invalid"
+    # TS v1.7.6 wechat.ts:209-218 (b4ad5a110)
+    assert info.email == "UNION_1@wechat.placeholder.invalid"
     assert info.name == "小明"
     assert info.image == "http://wx/av.png"
     assert info.email_verified is False
@@ -255,6 +284,30 @@ async def test_wechat_fetch_user_missing_openid_raises():
     p = WeChat(client_id="a", client_secret="b")
     with pytest.raises(OAuthFetchError):
         await p.fetch_user(OAuthTokens(access_token="at", raw={}), http)
+
+
+def test_wechat_additional_params_skip_reserved_and_appid():
+    p = WeChat(client_id="wxappid", client_secret="wxsecret")
+    url = p.authorization_url(
+        state="STATE",
+        redirect_uri="http://app/cb/wechat",
+        additional_params={"href": "css", "appid": "evil", "scope": "x"},
+    )
+    # wechat.ts:78-85 (e7eb45b06): extras land before the fragment
+    assert url.endswith("&lang=cn&href=css#wechat_redirect")
+    q = parse_qs(urlsplit(url).query)
+    assert q["appid"] == ["wxappid"]
+    assert q["scope"] == ["snsapi_login"]
+
+
+async def test_wechat_account_id_is_profile_unionid_or_openid_only():
+    http = capturing({"/sns/userinfo": {"nickname": "n"}})
+    p = WeChat(client_id="a", client_secret="b")
+    info = await p.fetch_user(OAuthTokens(access_token="at", raw={"openid": "TOKEN_OID"}), http)
+    # wechat.ts:63 accountSubject reads the profile only; the email still falls back to
+    # the token openid (wechat.ts:209)
+    assert info.id == ""
+    assert info.email == "TOKEN_OID@wechat.placeholder.invalid"
 
 
 # ------------------------------------------------------------------------- salesforce
@@ -316,3 +369,23 @@ async def test_salesforce_fetch_user_maps_user_id_and_photos():
     assert info.image == "http://sf/pic.png"
     # standard bearer auth on the userinfo call.
     assert http.requests[0].headers["authorization"] == "Bearer at"
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        Twitter(client_id="i", client_secret="s"),  # twitter.ts:127
+        Salesforce(client_id="i", client_secret="s"),  # salesforce.ts:99
+    ],
+    ids=lambda p: p.provider_id,
+)
+def test_authorization_url_forwards_additional_params(provider):
+    url = provider.authorization_url(
+        state="st",
+        redirect_uri="http://cb",
+        code_verifier="v" * 43,
+        additional_params={"foo": "bar", "redirect_uri": "http://evil"},
+    )
+    q = parse_qs(urlsplit(url).query)
+    assert q["foo"] == ["bar"]
+    assert q["redirect_uri"] == ["http://cb"]

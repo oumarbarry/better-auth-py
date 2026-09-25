@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..machinery import oauth_fetch
+from ..machinery import create_placeholder_email, oauth_fetch
 from ..models import OAuthUserInfo
 from ..providers import ProviderConfig
 
@@ -67,7 +67,9 @@ class Twitter(ProviderConfig):
 
         return OAuthUserInfo(
             id=str(data["id"]),
-            email=email or data.get("username") or None,
+            # twitter.ts:193-197 (b4ad5a110)
+            email=email
+            or create_placeholder_email(identifier=str(data["id"]), namespace="twitter"),
             name=data.get("name") or "",
             image=data.get("profile_image_url"),
             email_verified=email_verified,

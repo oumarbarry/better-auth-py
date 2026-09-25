@@ -4,11 +4,13 @@ Quirks vs. the generic :class:`ProviderConfig`:
   * Endpoints are built from a configurable ``authority`` (trailing slashes trimmed)
     and ``tenant`` (``common`` by default). No client secret required — public
     clients (SPA/native + PKCE) are supported.
-  * Multi-tenant issuer validation is hand-rolled: ``common``/``organizations``/
-    ``consumers`` can't have a single expected ``iss``, so jose's issuer check is
-    skipped for them and the token's own ``tid`` is cross-checked against ``iss``,
-    plus the organizations (not the fixed consumer tenant) / consumers (must be it)
+  * Multi-tenant issuer validation: ``common``/``organizations``/``consumers`` can't
+    have a single expected ``iss``, so the issuer check is skipped for them and the
+    token's own ``tid`` is cross-checked against ``iss`` (``verify_claims``), plus the
+    organizations (not the fixed consumer tenant) / consumers (must be it)
     account-class rules.
+  * ``client_assertion`` (TS ``clientAssertion``) authenticates token requests with
+    ``private_key_jwt`` instead of ``client_secret``.
   * Profile photo is fetched from Microsoft Graph and inlined as a ``data:`` URI.
   * ``email_verified`` is defaulted from ``verified_primary_email`` /
     ``verified_secondary_email`` when the optional claim is absent.
@@ -20,17 +22,16 @@ from __future__ import annotations
 
 import base64
 import logging
-import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import jwt
-from jwt import PyJWK
 
-from ..machinery import OAuthFetchError, oauth_fetch
+from ..machinery import OAuthFetchError, TokenEndpointAuth, oauth_fetch, refresh_access_token
 from ..models import OAuthUserInfo
 from ..providers import ProviderConfig
-from ..verify import _cache as _jwks_cache
+from ..verify import verify_id_token as _verify_id_token
 
 if TYPE_CHECKING:
     import httpx
@@ -80,6 +81,11 @@ class MicrosoftEntraId(ProviderConfig):
     #: Claim used as ``account.accountId``. ``"oid"`` matches TS v1.7.6; ``"sub"`` keeps
     #: the ids stored before 1.1 until they are migrated.
     account_id_claim: str = "oid"
+    #: TS ``clientAssertion`` (7fe0e2b16): returns the signed JWT for each token request,
+    #: given ``{"clientId", "tokenEndpoint", "grantType"}``; may be async.
+    client_assertion: Callable[[dict[str, str]], Any] | None = None
+    #: TS v1.7.6 microsoft-entra-id.ts:231 ``maxTokenAge: "1h"``
+    id_token_max_age: int | None = 3600
 
     def __post_init__(self) -> None:
         self._tenant = self.tenant_id or "common"
@@ -92,6 +98,33 @@ class MicrosoftEntraId(ProviderConfig):
         self.jwks_url = f"{authority}/{self._tenant}/discovery/v2.0/keys"
         if self.prompt:
             self.authorize_params = {**self.authorize_params, "prompt": self.prompt}
+        # TS v1.7.6 microsoft-entra-id.ts:175-186
+        if self.client_secret and self.client_assertion:
+            raise ValueError(
+                "Microsoft Entra ID clientAssertion cannot be combined with clientSecret"
+            )
+        if self.client_assertion and self.token_endpoint_auth is None:
+            self.token_endpoint_auth = TokenEndpointAuth(
+                "private_key_jwt", get_client_assertion=self.client_assertion
+            )
+
+    @property
+    def supports_id_token(self) -> bool:
+        return not self.disable_id_token_sign_in
+
+    async def refresh(self, http: httpx.AsyncClient, refresh_token: str) -> OAuthTokens:
+        # TS v1.7.6 microsoft-entra-id.ts:343-357: the scopes ride on every refresh.
+        scopes = [] if self.disable_default_scope else list(self.scopes)
+        return await refresh_access_token(
+            http,
+            token_endpoint=self.token_endpoint,
+            refresh_token=refresh_token,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            authentication=self.authentication,
+            extra_params={"scope": " ".join(scopes)},
+            token_endpoint_auth=self.token_endpoint_auth,
+        )
 
     async def verify_id_token(
         self,
@@ -102,44 +135,29 @@ class MicrosoftEntraId(ProviderConfig):
     ) -> dict[str, Any] | None:
         if self.disable_id_token_sign_in:
             return None
-        try:
-            header = jwt.get_unverified_header(token)
-        except jwt.PyJWTError:
-            return None
-        kid, alg = header.get("kid"), header.get("alg")
-        if not kid or not alg:
-            return None
-        jwk = await _jwks_cache.find(http, self.jwks_url, kid)
-        if jwk is None:
-            return None
-        try:
-            key = PyJWK.from_dict(jwk).key
-            decode_kwargs: dict[str, Any] = {
-                "algorithms": [alg],
-                "audience": self.client_id,
-            }
-            # Issuer varies per tenant for the multi-tenant endpoints — validate it
-            # via jose only for a specific tenant; otherwise cross-check tid below.
-            if self._tenant not in _MULTI_TENANT:
-                decode_kwargs["issuer"] = f"{self._authority}/{self._tenant}/v2.0"
-            claims = jwt.decode(token, key, **decode_kwargs)
-        except jwt.PyJWTError:
-            return None
-        # maxTokenAge "1h"
-        iat = claims.get("iat")
-        if iat is None or time.time() - int(iat) > 3600:
-            return None
-        if nonce and claims.get("nonce") != nonce:
-            return None
-        # Explicit tenant binding for the multi-tenant endpoints.
+        # TS v1.7.6 microsoft-entra-id.ts:229-272 `idToken`: the issuer is only fixed for
+        # a specific tenant; the multi-tenant endpoints bind it through verifyClaims.
+        specific = self._tenant not in _MULTI_TENANT
+        return await _verify_id_token(
+            http,
+            token,
+            jwks_uri=self.jwks_url,
+            audience=self.client_id,
+            issuers=[f"{self._authority}/{self._tenant}/v2.0"] if specific else [],
+            nonce=nonce,
+            max_age=self.id_token_max_age,
+            algorithms=self.id_token_algorithms,
+            nonce_comparison=self.id_token_nonce_comparison,
+            verify_claims=self._tenant_bound,
+        )
+
+    def _tenant_bound(self, claims: dict[str, Any]) -> bool:
         tid = claims.get("tid")
         if not isinstance(tid, str) or claims.get("iss") != f"{self._authority}/{tid}/v2.0":
-            return None
+            return False
         if self._tenant == "organizations" and tid == _CONSUMER_TENANT_ID:
-            return None
-        if self._tenant == "consumers" and tid != _CONSUMER_TENANT_ID:
-            return None
-        return claims
+            return False
+        return not (self._tenant == "consumers" and tid != _CONSUMER_TENANT_ID)
 
     def _map(self, user: dict[str, Any]) -> OAuthUserInfo:
         # TS v1.7.6 microsoft-entra-id.ts:281-286: no usable oid, no account identity.

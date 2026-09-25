@@ -207,7 +207,9 @@ def auth(outbox: dict[str, Any]) -> BetterAuth:
                         user_info_url=f"{IDP}/userinfo",
                         scopes=["openid", "email"],
                     )
-                ]
+                ],
+                # the client's sign_in.oauth2 / oauth2.link target the pre-1.7 routes
+                legacy_routes=True,
             ),
             SSOPlugin(domain_verification={"enabled": True}, dns_resolver=resolve_txt),
             OAuthProviderPlugin(

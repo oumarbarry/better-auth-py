@@ -1,1080 +1,699 @@
-"""Tests for the generic-oauth plugin (user-configured OAuth2/OIDC providers).
+"""generic-oauth at better-auth v1.7.6: providers registered as first-class social providers.
 
-Ports better-auth's plugins/generic-oauth. TS source verified against:
-  packages/better-auth/src/plugins/generic-oauth/index.ts
-  packages/better-auth/src/plugins/generic-oauth/routes.ts
-  packages/better-auth/src/plugins/generic-oauth/types.ts
-  packages/better-auth/src/plugins/generic-oauth/error-codes.ts
-  packages/better-auth/src/plugins/generic-oauth/providers/*.ts
-
-Drives the full authorize -> callback -> session flow through a real HTTP round trip
-(``make_client`` / FastAPI ASGI); outbound OAuth calls (discovery/token/userinfo) are
-stubbed with ``httpx.MockTransport`` injected via ``BetterAuth(http_client=...)`` — the
-same idiom as tests/test_oauth_machinery.py and tests/plugins/test_captcha.py.
+TS sources: packages/better-auth/src/plugins/generic-oauth/{index,types,error-codes}.ts,
+providers/*.ts and generic-oauth.test.ts. Flows go through the core routes
+(``/sign-in/social``, ``/callback/:id``, ``/link-social``); outbound calls are stubbed with
+``httpx.MockTransport`` injected via ``BetterAuth(http_client=...)``.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import time
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import jwt
+import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 
-from better_auth import BetterAuth, Where
+from better_auth import BetterAuth, EmailVerification, GitHub, Where
+from better_auth.config import UserOptions
+from better_auth.oauth import verify
+from better_auth.oauth.machinery import TokenEndpointAuth
+from better_auth.oauth.models import OAuthTokens
 from better_auth.plugins_ext.generic_oauth import (
     GENERIC_OAUTH_ERROR_CODES,
     GenericOAuthConfig,
     GenericOAuthPlugin,
     auth0,
+    gumroad,
+    hubspot,
     keycloak,
+    line,
+    microsoft_entra_id,
     okta,
+    patreon,
+    slack,
+    yandex,
 )
-from conftest import make_auth, make_client
+from conftest import SIGNUP, make_auth, make_client, sign_up
 
 IDP = "https://idp.example.com"
 DISCOVERY = f"{IDP}/.well-known/openid-configuration"
-
-
-def discovery_doc(issuer: str = IDP, **overrides: Any) -> dict[str, Any]:
-    doc = {
-        "issuer": issuer,
-        "authorization_endpoint": f"{IDP}/authorize",
-        "token_endpoint": f"{IDP}/token",
-        "userinfo_endpoint": f"{IDP}/userinfo",
-    }
-    doc.update(overrides)
-    return doc
-
-
-def oidc_http(
-    *,
-    token: dict[str, Any] | None = None,
-    userinfo: dict[str, Any] | None = None,
-    discovery: dict[str, Any] | None = None,
-    record: list[dict[str, Any]] | None = None,
-) -> httpx.AsyncClient:
-    """MockTransport routing by path: discovery / token / userinfo."""
-    disc = discovery if discovery is not None else discovery_doc()
-    tok = token if token is not None else {"access_token": "at", "token_type": "bearer"}
-    ui = userinfo if userinfo is not None else {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if record is not None:
-            record.append(
-                {
-                    "path": path,
-                    "headers": dict(request.headers),
-                    "body": request.content.decode() if request.content else "",
-                }
-            )
-        if path.endswith("/.well-known/openid-configuration"):
-            return httpx.Response(200, json=disc)
-        if path == "/token":
-            return httpx.Response(200, json=tok)
-        if path == "/userinfo":
-            return httpx.Response(200, json=ui)
-        return httpx.Response(404, json={"error": "not_found"})
-
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-
-def make_id_token(**claims: Any) -> str:
-    # generic-oauth decodes the id token WITHOUT verifying its signature (TS `decodeJwt`),
-    # so any signing key works here (key length only needs to appease the encoder).
-    return jwt.encode(claims, "x" * 32, algorithm="HS256")
-
-
-def plugin_auth(configs: list[GenericOAuthConfig], **overrides: Any) -> BetterAuth:
-    return make_auth(plugins=[GenericOAuthPlugin(config=configs)], **overrides)
-
-
-async def start_signin(client: httpx.AsyncClient, provider_id: str, **body: Any) -> httpx.Response:
-    payload = {"providerId": provider_id, "callbackURL": "http://testserver/dashboard"}
-    payload.update(body)
-    return await client.post("/api/auth/sign-in/oauth2", json=payload)
-
-
-def state_of(signin_response: httpx.Response) -> str:
-    url = signin_response.json()["url"]
-    return parse_qs(urlsplit(url).query)["state"][0]
-
-
-async def run_flow(
-    auth: BetterAuth, provider_id: str, *, code: str = "the-code", **body: Any
-) -> tuple[httpx.Response, httpx.Response, httpx.AsyncClient]:
-    async with make_client(auth) as client:
-        signin = await start_signin(client, provider_id, **body)
-        assert signin.status_code == 200, signin.text
-        state = state_of(signin)
-        callback = await client.get(
-            f"/api/auth/oauth2/callback/{provider_id}?code={code}&state={state}",
-            follow_redirects=False,
-        )
-        return signin, callback, client
-
-
-VERIFIED_PROFILE = {
+PROFILE = {
     "sub": "generic-1",
     "email": "generic@test.com",
     "name": "Generic User",
     "picture": "https://test.com/pic.png",
     "email_verified": True,
 }
+KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+JWK = {**json.loads(RSAAlgorithm.to_jwk(KEY.public_key(), as_dict=False)), "kid": "k1"}
 
 
-# --- error codes (exact TS strings) ------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _reset_jwks_cache():
+    verify._cache._cache.clear()
+    verify._cache._last_miss.clear()
+    yield
+
+
+def discovery_doc(**overrides: Any) -> dict[str, Any]:
+    doc = {
+        "issuer": IDP,
+        "authorization_endpoint": f"{IDP}/authorize",
+        "token_endpoint": f"{IDP}/token",
+        "userinfo_endpoint": f"{IDP}/userinfo",
+    }
+    doc.update(overrides)
+    return {k: v for k, v in doc.items() if v is not None}
+
+
+def idp_http(
+    *,
+    token: dict[str, Any] | None = None,
+    userinfo: dict[str, Any] | None = None,
+    discovery: dict[str, Any] | None = None,
+    record: list[httpx.Request] | None = None,
+    discovery_status: int = 200,
+) -> httpx.AsyncClient:
+    disc = discovery if discovery is not None else discovery_doc()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if record is not None:
+            record.append(request)
+        path = request.url.path
+        if path.endswith("/.well-known/openid-configuration"):
+            return httpx.Response(discovery_status, json=disc)
+        if path == "/token":
+            return httpx.Response(200, json=token or {"access_token": "at", "token_type": "bearer"})
+        if path == "/userinfo":
+            return httpx.Response(200, json=PROFILE if userinfo is None else userinfo)
+        if path == "/jwks":
+            return httpx.Response(200, json={"keys": [JWK]})
+        return httpx.Response(404, json={"error": "not_found"})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def cfg(**over: Any) -> GenericOAuthConfig:
+    base: dict[str, Any] = {
+        "provider_id": "acme",
+        "client_id": "cid",
+        "client_secret": "sec",
+        "authorization_url": f"{IDP}/authorize",
+        "token_url": f"{IDP}/token",
+        "user_info_url": f"{IDP}/userinfo",
+    }
+    base.update(over)
+    return GenericOAuthConfig(**base)
+
+
+def plugin_auth(*configs: GenericOAuthConfig, legacy: bool = False, **over: Any) -> BetterAuth:
+    over.setdefault("http_client", idp_http())
+    return make_auth(
+        plugins=[GenericOAuthPlugin(config=list(configs), legacy_routes=legacy)], **over
+    )
+
+
+async def sign_in(client: httpx.AsyncClient, provider: str = "acme", **body: Any) -> httpx.Response:
+    return await client.post(
+        "/api/auth/sign-in/social",
+        json={"provider": provider, "callbackURL": "http://testserver/dashboard", **body},
+    )
+
+
+def query_of(response: httpx.Response) -> dict[str, list[str]]:
+    return parse_qs(urlsplit(response.json()["url"]).query)
+
+
+async def run_flow(
+    auth: BetterAuth, provider: str = "acme", extra: str = "", **body: Any
+) -> tuple[httpx.Response, httpx.Response, Any]:
+    async with make_client(auth) as client:
+        started = await sign_in(client, provider, **body)
+        assert started.status_code == 200, started.text
+        state = query_of(started)["state"][0]
+        callback = await client.get(f"/api/auth/callback/{provider}?code=c&state={state}{extra}")
+        session = (await client.get("/api/auth/get-session")).json()
+        return started, callback, session
+
+
+async def acme_account(auth: BetterAuth) -> dict[str, Any]:
+    account = await auth.adapter.find_one("account", [Where("providerId", "acme")])
+    assert account is not None
+    return account
+
+
+def signed_id_token(**claims: Any) -> str:
+    now = int(time.time())
+    payload = {"iss": IDP, "aud": "cid", "iat": now, "exp": now + 600, **PROFILE}
+    payload.update(claims)
+    return jwt.encode(payload, KEY, algorithm="RS256", headers={"kid": "k1"})
+
+
+# --- plugin surface -----------------------------------------------------------------------
 
 
 def test_error_codes_exact_strings():
+    # error-codes.ts at v1.7.6 keeps only the two provider-configuration codes
     assert GENERIC_OAUTH_ERROR_CODES == {
         "INVALID_OAUTH_CONFIGURATION": "Invalid OAuth configuration",
         "TOKEN_URL_NOT_FOUND": "Invalid OAuth configuration. Token URL not found.",
-        "PROVIDER_CONFIG_NOT_FOUND": "No config found for provider",
-        "PROVIDER_ID_REQUIRED": "Provider ID is required",
-        "INVALID_OAUTH_CONFIG": "Invalid OAuth configuration.",
-        "SESSION_REQUIRED": "Session is required",
-        "ISSUER_MISMATCH": (
-            "OAuth issuer mismatch. The authorization server issuer does not match "
-            "the expected value (RFC 9207)."
-        ),
-        "ISSUER_MISSING": (
-            "OAuth issuer parameter missing. The authorization server did not include "
-            "the required iss parameter (RFC 9207)."
-        ),
     }
 
 
-def test_error_codes_surface_on_auth_instance():
-    auth = plugin_auth([GenericOAuthConfig(provider_id="p", client_id="cid")])
-    assert auth.error_codes["SESSION_REQUIRED"] == "Session is required"
-
-
-def test_duplicate_provider_ids_warn_but_do_not_throw(caplog):
-    import logging
-
+def test_duplicate_provider_ids_warn(caplog):
     with caplog.at_level(logging.WARNING, logger="better_auth"):
-        plugin = GenericOAuthPlugin(
-            config=[
-                GenericOAuthConfig(provider_id="dup", client_id="a"),
-                GenericOAuthConfig(provider_id="dup", client_id="b"),
-            ]
+        GenericOAuthPlugin(config=[cfg(), cfg(), cfg(provider_id="b"), cfg(provider_id="b")])
+    assert "Duplicate provider IDs found: acme, b" in caplog.text
+
+
+def test_shadowing_a_builtin_provider_warns(caplog):
+    with caplog.at_level(logging.WARNING, logger="better_auth"):
+        auth = make_auth(
+            social_providers={"github": GitHub(client_id="x", client_secret="y")},
+            plugins=[GenericOAuthPlugin(config=[cfg(provider_id="github")])],
         )
-    assert plugin is not None
-    assert any("dup" in r.message for r in caplog.records)
+    assert 'Generic OAuth provider "github" shadows a built-in social provider' in caplog.text
+    assert type(auth.social_providers["github"]).__name__ == "_GenericProvider"
 
 
-def test_init_registers_providers_into_social_providers():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", token_url=f"{IDP}/token")]
-    )
-    assert "acme" in auth.social_providers
-    assert auth.social_providers["acme"].provider_id == "acme"
+async def test_no_plugin_routes_by_default():
+    # c7d22539e: providers use signIn.social + callback/:id, no dedicated endpoints
+    async with make_client(plugin_auth(cfg())) as client:
+        r = await client.post("/api/auth/sign-in/oauth2", json={"providerId": "acme"})
+        assert r.status_code == 404
 
 
-# --- sign-in endpoint: authorization URL construction ------------------------------------
-
-
-async def test_signin_returns_authorization_url_and_redirect_true():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(),
-    )
-    async with make_client(auth) as client:
-        r = await start_signin(client, "acme")
-    assert r.status_code == 200
-    data = r.json()
-    assert data["redirect"] is True
-    assert data["url"].startswith(f"{IDP}/authorize?")
-    q = dict(parse_qsl(urlsplit(data["url"]).query))
-    assert q["response_type"] == "code"
-    assert q["client_id"] == "cid"
-    assert q["redirect_uri"] == "http://testserver/api/auth/oauth2/callback/acme"
-    assert "state" in q
-
-
-async def test_signin_disable_redirect_sets_redirect_false():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(),
-    )
-    async with make_client(auth) as client:
-        r = await start_signin(client, "acme", disableRedirect=True)
-    assert r.json()["redirect"] is False
-
-
-async def test_signin_unknown_provider_returns_provider_config_not_found():
-    auth = plugin_auth([GenericOAuthConfig(provider_id="acme", client_id="cid")])
-    async with make_client(auth) as client:
-        r = await start_signin(client, "nope")
-    assert r.status_code == 400
-    assert "No config found for provider" in r.json()["message"]
-
-
-async def test_signin_missing_endpoints_returns_invalid_oauth_configuration():
-    # no discoveryUrl and no authorizationUrl/tokenUrl -> INVALID_OAUTH_CONFIGURATION
-    auth = plugin_auth([GenericOAuthConfig(provider_id="acme", client_id="cid")])
-    async with make_client(auth) as client:
-        r = await start_signin(client, "acme")
-    assert r.status_code == 400
-    assert r.json()["message"] == "Invalid OAuth configuration"
-
-
-async def test_signin_pkce_adds_code_challenge_s256():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme", client_id="cid", discovery_url=DISCOVERY, pkce=True
-            )
-        ],
-        http_client=oidc_http(),
-    )
-    async with make_client(auth) as client:
-        r = await start_signin(client, "acme")
-    q = dict(parse_qsl(urlsplit(r.json()["url"]).query))
-    assert q["code_challenge_method"] == "S256"
-    assert q["code_challenge"]
-
-
-async def test_signin_no_pkce_omits_code_challenge():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(),
-    )
-    async with make_client(auth) as client:
-        r = await start_signin(client, "acme")
-    q = dict(parse_qsl(urlsplit(r.json()["url"]).query))
-    assert "code_challenge" not in q
-
-
-async def test_signin_merges_body_scopes_before_config_scopes_and_passes_extras():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                authorization_url=f"{IDP}/authorize",
-                token_url=f"{IDP}/token",
-                scopes=["email"],
-                prompt="consent",
-                access_type="offline",
-                authorization_url_params={"audience": "urn:api"},
-            )
-        ],
-    )
-    async with make_client(auth) as client:
-        r = await start_signin(client, "acme", scopes=["profile"])
-    q = dict(parse_qsl(urlsplit(r.json()["url"]).query))
-    assert q["scope"] == "profile email"
-    assert q["prompt"] == "consent"
-    assert q["access_type"] == "offline"
-    assert q["audience"] == "urn:api"
-
-
-async def test_signin_explicit_redirect_uri_overrides_computed():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                authorization_url=f"{IDP}/authorize",
-                token_url=f"{IDP}/token",
-                redirect_uri="https://app.example.com/cb",
-            )
-        ],
-    )
-    async with make_client(auth) as client:
-        r = await start_signin(client, "acme")
-    q = dict(parse_qsl(urlsplit(r.json()["url"]).query))
-    assert q["redirect_uri"] == "https://app.example.com/cb"
-
-
-# --- full flow: userinfo path ------------------------------------------------------------
-
-
-async def test_full_flow_existing_user_signs_in_and_redirects_callback():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme", client_id="cid", discovery_url=DISCOVERY, pkce=True
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer", "expires_in": 3600},
-            userinfo=VERIFIED_PROFILE,
-        ),
-    )
-    # seed the user so this is a sign-in (not a register)
-    await auth.internal.create(
-        "user",
-        {
-            "id": "u1",
-            "email": "generic@test.com",
-            "name": "Generic User",
-            "emailVerified": True,
-        },
-    )
-    _signin, callback, _client = await run_flow(auth, "acme")
-    assert callback.status_code in (302, 307)
-    assert callback.headers["location"] == "http://testserver/dashboard"
-    assert any(h.lower() == "set-cookie" for h, _ in callback.headers.multi_items())
-
-
-async def test_ambiguous_account_redirects_to_default_error_page():
-    """TS v1.7.6 oauth2/link-account.ts:191-204: handleOAuthUserInfo sends a failed
-    account lookup to ``${baseURL}/error``, not to the flow's errorCallbackURL."""
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(userinfo=VERIFIED_PROFILE),
-    )
-    for email in ("one@test.com", "two@test.com"):
-        user = await auth.internal.create_user({"name": "U", "email": email})
-        assert user is not None
-        await auth.internal.create_account(
-            {"userId": user["id"], "providerId": "acme", "accountId": "generic-1"}
+def test_secretless_auth_with_secret_is_a_config_error():
+    with pytest.raises(ValueError, match='"none" cannot be combined with clientSecret'):
+        plugin_auth(cfg(token_endpoint_auth=TokenEndpointAuth("none")))
+    with pytest.raises(ValueError, match="requires clientSecret"):
+        plugin_auth(
+            cfg(client_secret="", token_endpoint_auth=TokenEndpointAuth("client_secret_post"))
         )
-    _signin, callback, _client = await run_flow(
-        auth, "acme", errorCallbackURL="http://testserver/flow-error"
-    )
-    assert callback.headers["location"] == (
-        "http://testserver/api/auth/error?error=internal_server_error"
-    )
+    with pytest.raises(ValueError, match='authentication "basic" requires clientSecret'):
+        plugin_auth(cfg(client_secret="", authentication="basic"))
 
 
-async def test_full_flow_new_user_redirects_new_user_url():
+def test_required_id_token_verification_without_discovery_is_a_config_error():
+    with pytest.raises(ValueError, match="requires verified ID tokens"):
+        plugin_auth(cfg(require_id_token_verification=True))
+
+
+# --- authorization URL --------------------------------------------------------------------
+
+
+async def test_sign_in_builds_authorize_url_with_pkce_by_default():
+    async with make_client(plugin_auth(cfg(scopes=["email"]))) as client:
+        r = await sign_in(client, scopes=["extra"])
+        q = query_of(r)
+        assert r.json()["redirect"] is True
+        assert urlsplit(r.json()["url"]).path == "/authorize"
+        assert q["client_id"] == ["cid"]
+        assert q["redirect_uri"] == ["http://testserver/api/auth/callback/acme"]
+        assert q["scope"] == ["extra email"]
+        assert q["code_challenge_method"] == ["S256"]  # pkce ?? true
+
+
+async def test_pkce_false_omits_challenge():
+    async with make_client(plugin_auth(cfg(pkce=False))) as client:
+        assert "code_challenge" not in query_of(await sign_in(client))
+
+
+async def test_authorization_url_params_and_request_params_merge():
+    auth = plugin_auth(cfg(authorization_url_params={"a": "1", "b": "cfg", "nonce": "x"}))
+    async with make_client(auth) as client:
+        q = query_of(await sign_in(client, additionalParams={"b": "req"}, loginHint="u@x"))
+        assert q["a"] == ["1"] and q["b"] == ["req"] and q["login_hint"] == ["u@x"]
+        assert "nonce" not in q  # reserved keys are dropped
+
+
+async def test_oidc_discovery_adds_openid_scope():
+    http = idp_http(discovery=discovery_doc(id_token_signing_alg_values_supported=["RS256"]))
+    auth = plugin_auth(cfg(discovery_url=DISCOVERY, scopes=["email"]), http_client=http)
+    async with make_client(auth) as client:
+        assert query_of(await sign_in(client))["scope"] == ["openid email"]
+
+
+async def test_unknown_provider_is_not_found():
+    async with make_client(plugin_auth(cfg())) as client:
+        r = await sign_in(client, "nope")
+        assert r.status_code == 404
+        assert r.json()["code"] == "PROVIDER_NOT_FOUND"
+
+
+async def test_unreachable_discovery_skips_only_that_provider():
+    # 5fe5bc21d: a provider whose discovery fails is skipped; the API keeps working
+    http = idp_http(discovery_status=500)
     auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme", client_id="cid", discovery_url=DISCOVERY, pkce=True
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer", "expires_in": 3600},
-            userinfo=VERIFIED_PROFILE,
-        ),
-    )
-    _signin, callback, _client = await run_flow(
-        auth, "acme", newUserCallbackURL="http://testserver/welcome"
-    )
-    assert callback.headers["location"] == "http://testserver/welcome"
-    user = await auth.adapter.find_one("user", [Where("email", "generic@test.com")])
-    assert user is not None
-
-
-async def test_callback_accepts_post_form_body_response_mode():
-    # GET+POST /oauth2/callback: a form_post provider POSTs code/state as urlencoded body,
-    # and _callback_params merges them. NB: core origin.check_origin JSON-parses any POST
-    # body (origin.py:202), so a form-encoded callback POST is blocked at the core layer for
-    # BOTH built-in and generic OAuth (a pre-existing core seam, outside this plugin's files);
-    # disable_origin_check for this path isolates the plugin's own form-body handling.
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
-        disable_origin_check=["/oauth2/callback"],
+        cfg(provider_id="broken", discovery_url=DISCOVERY, authorization_url=None, token_url=None),
+        cfg(),
+        http_client=http,
     )
     async with make_client(auth) as client:
-        signin = await start_signin(client, "acme")
-        state = state_of(signin)
-        cb = await client.post(
-            "/api/auth/oauth2/callback/acme",
-            content=f"code=abc&state={state}",
-            headers={"content-type": "application/x-www-form-urlencoded"},
-            follow_redirects=False,
-        )
-    assert cb.status_code in (302, 307)
+        assert (await sign_in(client, "broken")).status_code == 404
+        assert (await sign_in(client, "acme")).status_code == 200
+
+
+async def test_discovery_is_fetched_once_and_headers_forwarded():
+    record: list[httpx.Request] = []
+    http = idp_http(record=record)
+    auth = plugin_auth(
+        cfg(
+            discovery_url=DISCOVERY,
+            authorization_url=None,
+            token_url=None,
+            discovery_headers={"Epic-Client-ID": "e"},
+        ),
+        http_client=http,
+    )
+    async with make_client(auth) as client:
+        await sign_in(client)
+        await sign_in(client)
+    discoveries = [r for r in record if r.url.path.endswith("openid-configuration")]
+    assert len(discoveries) == 1
+    assert discoveries[0].headers["epic-client-id"] == "e"
+
+
+# --- callback: identity, profile and sign-up -----------------------------------------------
+
+
+async def test_full_flow_new_user_then_returning_user():
+    auth = plugin_auth(cfg(), http_client=idp_http(userinfo={**PROFILE, "id": "u1"}))
+    _s, cb, session = await run_flow(auth, newUserCallbackURL="http://testserver/welcome")
+    assert cb.headers["location"] == "http://testserver/welcome"
+    assert session["user"]["email"] == "generic@test.com"
+    account = await acme_account(auth)
+    assert account["accountId"] == "u1"  # plain OAuth reads `id`
+    _s, cb, _ = await run_flow(auth)
     assert cb.headers["location"] == "http://testserver/dashboard"
 
 
-async def test_account_row_uses_generic_provider_id_and_sub_account_id():
+async def test_plain_oauth_uses_id_even_when_sub_is_present():
+    # index.ts:311-313: plain OAuth reads `id`, OIDC reads `sub`; never switches at runtime
+    http = idp_http(userinfo={**PROFILE, "id": 42})
+    auth = plugin_auth(cfg(), http_client=http)
+    await run_flow(auth)
+    account = await acme_account(auth)
+    assert account["accountId"] == "42"
+
+
+async def test_oidc_uses_sub_even_when_id_is_present():
+    http = idp_http(
+        userinfo={**PROFILE, "id": 42},
+        discovery=discovery_doc(id_token_signing_alg_values_supported=["RS256"]),
+    )
+    auth = plugin_auth(cfg(discovery_url=DISCOVERY), http_client=http)
+    await run_flow(auth)
+    account = await acme_account(auth)
+    assert account["accountId"] == "generic-1"
+
+
+async def test_account_subject_and_map_profile_to_user():
+    def subject(context: dict[str, Any]) -> int:
+        assert isinstance(context["tokens"], OAuthTokens)
+        return context["profile"]["athlete"]["id"]
+
+    async def mapper(profile: dict[str, Any]) -> dict[str, Any]:
+        return {"id": "ignored", "name": "Mapped", "email": "mapped@test.com"}
+
+    http = idp_http(userinfo={"athlete": {"id": 7}, "email": "raw@test.com"})
+    auth = plugin_auth(cfg(account_subject=subject, map_profile_to_user=mapper), http_client=http)
+    _s, _cb, session = await run_flow(auth)
+    assert session["user"]["name"] == "Mapped"
+    assert session["user"]["email"] == "mapped@test.com"
+    account = await acme_account(auth)
+    assert account["accountId"] == "7"
+
+
+async def test_missing_subject_is_unable_to_get_user_info():
+    http = idp_http(userinfo={"email": "x@test.com", "id": None})
+    _s, cb, _ = await run_flow(plugin_auth(cfg(), http_client=http))
+    assert cb.headers["location"].endswith("error=unable_to_get_user_info")
+
+
+async def test_missing_email_is_email_not_found():
+    http = idp_http(userinfo={"id": "1", "name": "No Mail"})
+    _s, cb, _ = await run_flow(plugin_auth(cfg(), http_client=http))
+    assert cb.headers["location"].endswith("error=email_not_found")
+
+
+async def test_token_exchange_failure_is_invalid_code():
+    auth = plugin_auth(cfg(token_url=f"{IDP}/missing"))
+    _s, cb, _ = await run_flow(auth)
+    assert cb.headers["location"].endswith("error=invalid_code")
+
+
+async def test_disable_sign_up_and_implicit_sign_up():
+    http = idp_http(userinfo={**PROFILE, "id": "u1"})
+    _s, cb, _ = await run_flow(plugin_auth(cfg(disable_sign_up=True), http_client=http))
+    assert cb.headers["location"].endswith("error=signup_disabled")
+    auth = plugin_auth(cfg(disable_implicit_sign_up=True), http_client=http)
+    _s, cb, _ = await run_flow(auth)
+    assert cb.headers["location"].endswith("error=signup_disabled")
+    _s, cb, session = await run_flow(auth, requestSignUp=True)
+    assert session["user"]["email"] == "generic@test.com"
+
+
+async def test_require_email_verification_blocks_the_session():
+    sent: list[str] = []
+
+    async def send(user, url, token):
+        sent.append(url)
+
     auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
+        cfg(require_email_verification=True),
+        http_client=idp_http(userinfo={**PROFILE, "email_verified": False, "id": "u1"}),
+        email_verification=EmailVerification(send_verification_email=send),
+    )
+    _s, cb, session = await run_flow(auth)
+    assert cb.headers["location"].endswith("error=email_not_verified")
+    assert session is None
+    assert len(sent) == 1
+
+
+async def test_validate_user_info_sees_generic_provider_and_raw_profile():
+    calls: list[dict[str, Any]] = []
+
+    def validate(data, ctx):
+        calls.append(data)
+        return {"error": "blocked"}
+
+    auth = plugin_auth(
+        cfg(),
+        http_client=idp_http(userinfo={**PROFILE, "id": "u1"}),
+        user=UserOptions(validate_user_info=validate),
+    )
+    _s, cb, _ = await run_flow(auth)
+    assert "error=blocked" in cb.headers["location"]
+    assert calls[0]["source"]["oauth"]["providerId"] == "acme"
+    assert calls[0]["source"]["oauth"]["profile"]["sub"] == "generic-1"
+
+
+# --- token endpoint ------------------------------------------------------------------------
+
+
+async def test_token_request_basic_auth_headers_and_params():
+    record: list[httpx.Request] = []
+    auth = plugin_auth(
+        cfg(
+            authentication="basic",
+            authorization_headers={"X-Qonto": "t"},
+            token_url_params={"audience": "api", "client_id": "evil"},
+            pkce=False,
         ),
+        http_client=idp_http(record=record, userinfo={**PROFILE, "id": "u1"}),
     )
-    await run_flow(auth, "acme")
-    accounts = await auth.adapter.find_many("account")
-    assert len(accounts) == 1
-    assert accounts[0]["providerId"] == "acme"
-    assert accounts[0]["accountId"] == "generic-1"
+    await run_flow(auth)
+    (token_request,) = [r for r in record if r.url.path == "/token"]
+    body = parse_qs(token_request.content.decode())
+    assert token_request.headers["authorization"].startswith("Basic ")
+    assert token_request.headers["x-qonto"] == "t"
+    assert body["audience"] == ["api"]
+    assert "client_id" in body and body["client_id"] == ["evil"]  # additional param kept
+    assert "client_secret" not in body and "code_verifier" not in body
 
 
-# --- id_token path -----------------------------------------------------------------------
+async def test_custom_get_token_and_default_expiry():
+    seen: dict[str, Any] = {}
 
+    async def get_token(data: dict[str, Any]) -> dict[str, Any]:
+        seen.update(data)
+        return {"access_token": "custom", "refresh_token": "r"}
 
-async def test_id_token_path_signs_in_without_userinfo_fetch():
-    record: list[dict[str, Any]] = []
-    id_token = make_id_token(
-        sub="idt-1",
-        email="idtoken@test.com",
-        email_verified=True,
-        name="Id Token User",
-        picture="https://test.com/idt.png",
-    )
     auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer", "id_token": id_token},
-            userinfo={"should": "not be fetched"},
+        cfg(get_token=get_token, token_url=None, access_token_expires_in=3600),
+        http_client=idp_http(userinfo={**PROFILE, "id": "u1"}),
+    )
+    await run_flow(auth)
+    assert seen["code"] == "c"
+    assert seen["redirectURI"] == "http://testserver/api/auth/callback/acme"
+    assert seen["codeVerifier"]
+    account = await acme_account(auth)
+    assert account["accessTokenExpiresAt"] is not None
+
+
+async def test_refresh_token_params_static_and_per_request():
+    record: list[httpx.Request] = []
+    seen_ctx: list[Any] = []
+
+    def params(ctx):
+        seen_ctx.append(ctx)
+        return {"scope": f"org:{ctx.request.headers.get('x-org')}", "grant_type": "password"}
+
+    auth = plugin_auth(
+        cfg(refresh_token_params=params),
+        http_client=idp_http(
             record=record,
+            token={"access_token": "at", "refresh_token": "rt"},
+            userinfo={**PROFILE, "id": "u1"},
         ),
     )
-    _signin, callback, _client = await run_flow(auth, "acme")
-    assert callback.headers["location"] == "http://testserver/dashboard"
-    accounts = await auth.adapter.find_many("account")
-    assert accounts[0]["accountId"] == "idt-1"
-    # userinfo endpoint must not be hit when the id token already carries sub+email
-    assert not any(c["path"] == "/userinfo" for c in record)
-
-
-# --- iss (RFC 9207) validation -----------------------------------------------------------
-
-
-async def _flow_with_iss(auth: BetterAuth, provider_id: str, iss: str | None):
     async with make_client(auth) as client:
-        signin = await start_signin(client, provider_id)
-        state = state_of(signin)
-        q = f"code=abc&state={state}"
-        if iss is not None:
-            q += f"&iss={httpx.QueryParams({'iss': iss})['iss']}"
-        return await client.get(
-            f"/api/auth/oauth2/callback/{provider_id}?{q}", follow_redirects=False
+        started = await sign_in(client)
+        await client.get(f"/api/auth/callback/acme?code=c&state={query_of(started)['state'][0]}")
+        r = await client.post(
+            "/api/auth/refresh-token", json={"providerId": "acme"}, headers={"x-org": "9"}
         )
+        assert r.status_code == 200, r.text
+    refresh = parse_qs([r for r in record if r.url.path == "/token"][-1].content.decode())
+    assert refresh["scope"] == ["org:9"]
+    assert refresh["grant_type"] == ["refresh_token"]
+    assert seen_ctx
 
 
-async def test_iss_match_allows_callback():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                issuer=IDP,
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
-    )
-    cb = await _flow_with_iss(auth, "acme", IDP)
+# --- RFC 9207 issuer -------------------------------------------------------------------------
+
+
+async def test_discovered_issuer_is_enforced():
+    http = idp_http(discovery=discovery_doc(), userinfo={**PROFILE, "id": "u1"})
+    auth = plugin_auth(cfg(discovery_url=DISCOVERY), http_client=http)
+    _s, cb, _ = await run_flow(auth, extra="&iss=https://evil.example.com")
+    assert cb.headers["location"].endswith("error=issuer_mismatch")
+    _s, cb, _ = await run_flow(auth, extra=f"&iss={IDP}")
     assert cb.headers["location"] == "http://testserver/dashboard"
 
 
-async def test_iss_mismatch_redirects_error():
+async def test_deprecated_issuer_options_still_apply():
     auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                issuer=IDP,
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
+        cfg(issuer=IDP, require_issuer_validation=True),
+        http_client=idp_http(userinfo={**PROFILE, "id": "u1"}),
     )
-    cb = await _flow_with_iss(auth, "acme", "https://evil.example.com")
-    assert "error=issuer_mismatch" in cb.headers["location"]
+    _s, cb, _ = await run_flow(auth)
+    assert cb.headers["location"].endswith("error=issuer_missing")
 
 
-async def test_iss_missing_with_require_issuer_validation_redirects_error():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                issuer=IDP,
-                require_issuer_validation=True,
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
-    )
-    cb = await _flow_with_iss(auth, "acme", None)
-    assert "error=issuer_missing" in cb.headers["location"]
+# --- id_token verification against the discovery JWKS (ec8a38c08, 27b5d8022) ---------------
 
 
-async def test_iss_missing_without_require_issuer_validation_allowed():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                issuer=IDP,
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
-    )
-    cb = await _flow_with_iss(auth, "acme", None)
-    assert cb.headers["location"] == "http://testserver/dashboard"
+def jwks_http(id_token_factory) -> tuple[httpx.AsyncClient, dict[str, Any]]:
+    doc = discovery_doc(jwks_uri="/jwks", id_token_signing_alg_values_supported=["RS256"])
+    state: dict[str, Any] = {}
 
-
-async def test_iss_from_discovery_when_not_configured():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                require_issuer_validation=True,
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
-    )
-    # issuer comes from the discovery doc (IDP); a mismatching iss must be rejected
-    cb = await _flow_with_iss(auth, "acme", "https://evil.example.com")
-    assert "error=issuer_mismatch" in cb.headers["location"]
-
-
-# --- sign-up gating ----------------------------------------------------------------------
-
-
-async def test_disable_implicit_sign_up_blocks_new_user():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                disable_implicit_sign_up=True,
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
-    )
-    async with make_client(auth) as client:
-        signin = await start_signin(client, "acme", errorCallbackURL="http://testserver/error")
-        state = state_of(signin)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
-            follow_redirects=False,
-        )
-    assert cb.headers["location"] == "http://testserver/error?error=signup_disabled"
-
-
-async def test_disable_implicit_sign_up_with_request_sign_up_creates_user():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                disable_implicit_sign_up=True,
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
-    )
-    _signin, cb, _client = await run_flow(auth, "acme", requestSignUp=True)
-    assert cb.headers["location"] == "http://testserver/dashboard"
-    accounts = await auth.adapter.find_many("account")
-    assert len(accounts) == 1
-
-
-async def test_disable_sign_up_blocks_even_with_request_sign_up():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                disable_sign_up=True,
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"}, userinfo=VERIFIED_PROFILE
-        ),
-    )
-    async with make_client(auth) as client:
-        signin = await start_signin(
-            client, "acme", errorCallbackURL="http://testserver/error", requestSignUp=True
-        )
-        state = state_of(signin)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
-            follow_redirects=False,
-        )
-    assert "error=signup_disabled" in cb.headers["location"]
-
-
-# --- callback error paths ----------------------------------------------------------------
-
-
-async def test_callback_missing_code_redirects_default_error():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(userinfo=VERIFIED_PROFILE),
-    )
-    async with make_client(auth) as client:
-        signin = await start_signin(client, "acme")
-        state = state_of(signin)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?state={state}", follow_redirects=False
-        )
-    assert "error=oAuth_code_missing" in cb.headers["location"]
-
-
-async def test_callback_provider_error_redirects_that_error():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(userinfo=VERIFIED_PROFILE),
-    )
-    async with make_client(auth) as client:
-        signin = await start_signin(client, "acme")
-        state = state_of(signin)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?error=access_denied&state={state}",
-            follow_redirects=False,
-        )
-    assert "error=access_denied" in cb.headers["location"]
-
-
-async def test_callback_missing_email_redirects_email_is_missing():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo={"sub": "no-email", "name": "No Email"},
-        ),
-    )
-    async with make_client(auth) as client:
-        signin = await start_signin(client, "acme", errorCallbackURL="http://testserver/err")
-        state = state_of(signin)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
-            follow_redirects=False,
-        )
-    assert "error=email_is_missing" in cb.headers["location"]
-
-
-async def test_callback_token_exchange_failure_redirects_verification_failed():
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/.well-known/openid-configuration"):
-            return httpx.Response(200, json=discovery_doc())
-        if request.url.path == "/token":
-            return httpx.Response(400, json={"error": "invalid_grant"})
+        path = request.url.path
+        if path.endswith("openid-configuration"):
+            return httpx.Response(200, json=doc)
+        if path == "/authorize":
+            return httpx.Response(200)
+        if path == "/token":
+            return httpx.Response(
+                200, json={"access_token": "at", "id_token": id_token_factory(state)}
+            )
+        if path == "/jwks":
+            return httpx.Response(200, json={"keys": [JWK]})
         return httpx.Response(404)
 
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), state
+
+
+async def _jwks_flow(factory, **cfg_over: Any):
+    http, state = jwks_http(factory)
+    auth = plugin_auth(cfg(discovery_url=DISCOVERY, **cfg_over), http_client=http)
     async with make_client(auth) as client:
-        signin = await start_signin(client, "acme", errorCallbackURL="http://testserver/err")
-        state = state_of(signin)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
-            follow_redirects=False,
-        )
-    assert "error=oauth_code_verification_failed" in cb.headers["location"]
+        started = await sign_in(client)
+        q = query_of(started)
+        state["nonce"] = q.get("nonce", [None])[0]
+        cb = await client.get(f"/api/auth/callback/acme?code=c&state={q['state'][0]}")
+        return q, cb
 
 
-# --- token endpoint authentication (basic vs post) ---------------------------------------
-
-
-async def test_token_exchange_defaults_to_post_client_auth():
-    record: list[dict[str, Any]] = []
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme", client_id="cid", client_secret="sec", discovery_url=DISCOVERY
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo=VERIFIED_PROFILE,
-            record=record,
-        ),
-    )
-    await run_flow(auth, "acme")
-    token_call = next(c for c in record if c["path"] == "/token")
-    body = dict(parse_qsl(token_call["body"]))
-    assert body["client_id"] == "cid"
-    assert body["client_secret"] == "sec"
-    assert "authorization" not in {k.lower() for k in token_call["headers"]}
-
-
-async def test_token_exchange_basic_auth_sends_authorization_header():
-    record: list[dict[str, Any]] = []
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                client_secret="sec",
-                discovery_url=DISCOVERY,
-                authentication="basic",
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo=VERIFIED_PROFILE,
-            record=record,
-        ),
-    )
-    await run_flow(auth, "acme")
-    token_call = next(c for c in record if c["path"] == "/token")
-    assert token_call["headers"]["authorization"].startswith("Basic ")
-
-
-# --- PKCE round-trip ---------------------------------------------------------------------
-
-
-async def test_pkce_code_verifier_reaches_token_endpoint():
-    record: list[dict[str, Any]] = []
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme", client_id="cid", discovery_url=DISCOVERY, pkce=True
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo=VERIFIED_PROFILE,
-            record=record,
-        ),
-    )
-    await run_flow(auth, "acme")
-    token_call = next(c for c in record if c["path"] == "/token")
-    body = dict(parse_qsl(token_call["body"]))
-    assert body.get("code_verifier")
-
-
-async def test_no_pkce_omits_code_verifier_at_token_endpoint():
-    record: list[dict[str, Any]] = []
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo=VERIFIED_PROFILE,
-            record=record,
-        ),
-    )
-    await run_flow(auth, "acme")
-    token_call = next(c for c in record if c["path"] == "/token")
-    body = dict(parse_qsl(token_call["body"]))
-    assert "code_verifier" not in body
-
-
-# --- mapProfileToUser / getUserInfo overrides --------------------------------------------
-
-
-async def test_map_profile_to_user_derives_id_from_custom_field():
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                map_profile_to_user=lambda p: {
-                    "id": p["custom_id"],
-                    "email": p["mail"],
-                    "name": p["display"],
-                },
-            )
-        ],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo={"custom_id": "strava-9", "mail": "strava@test.com", "display": "Strava"},
-        ),
-    )
-    _signin, cb, _client = await run_flow(auth, "acme")
+async def test_discovery_id_token_bound_to_nonce_signs_in():
+    q, cb = await _jwks_flow(lambda s: signed_id_token(nonce=s["nonce"]))
+    assert q["nonce"][0]
     assert cb.headers["location"] == "http://testserver/dashboard"
-    accounts = await auth.adapter.find_many("account")
-    assert accounts[0]["accountId"] == "strava-9"
 
 
-async def test_custom_get_user_info_used_and_empty_id_rejected():
-    async def get_user_info(_tokens: Any) -> dict[str, Any]:
-        return {"id": "", "email": "x@test.com", "name": "X"}
+async def test_discovery_id_token_with_wrong_or_missing_nonce_is_refused():
+    _q, cb = await _jwks_flow(lambda s: signed_id_token(nonce="other"))
+    assert cb.headers["location"].endswith("error=unable_to_get_user_info")
+    _q, cb = await _jwks_flow(lambda s: signed_id_token())
+    assert cb.headers["location"].endswith("error=unable_to_get_user_info")
 
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                get_user_info=get_user_info,
-            )
-        ],
-        http_client=oidc_http(token={"access_token": "at", "token_type": "bearer"}),
+
+async def test_discovery_id_token_not_signed_by_jwks_is_refused():
+    _q, cb = await _jwks_flow(
+        lambda s: jwt.encode({**PROFILE, "nonce": s["nonce"]}, "x" * 32, algorithm="HS256")
     )
-    async with make_client(auth) as client:
-        signin = await start_signin(client, "acme", errorCallbackURL="http://testserver/err")
-        state = state_of(signin)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
-            follow_redirects=False,
-        )
-    assert "error=id_is_missing" in cb.headers["location"]
+    assert cb.headers["location"].endswith("error=unable_to_get_user_info")
 
 
-async def test_custom_get_user_info_numeric_id_stringified():
-    async def get_user_info(_tokens: Any) -> dict[str, Any]:
-        return {"id": 12345, "email": "num@test.com", "name": "Numeric"}
-
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                get_user_info=get_user_info,
-            )
-        ],
-        http_client=oidc_http(token={"access_token": "at", "token_type": "bearer"}),
-    )
-    await run_flow(auth, "acme")
-    accounts = await auth.adapter.find_many("account")
-    assert accounts[0]["accountId"] == "12345"
-
-
-async def test_userinfo_sub_fallback_for_account_id():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo={"sub": "sub-only", "email": "sub@test.com", "name": "Sub"},
-        ),
-    )
-    await run_flow(auth, "acme")
-    accounts = await auth.adapter.find_many("account")
-    assert accounts[0]["accountId"] == "sub-only"
-
-
-# --- custom getToken ---------------------------------------------------------------------
-
-
-async def test_custom_get_token_bypasses_token_exchange():
-    record: list[dict[str, Any]] = []
-
-    async def get_token(_data: Any) -> dict[str, Any]:
-        return {"access_token": "custom-at", "token_type": "bearer"}
-
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                get_token=get_token,
-            )
-        ],
-        http_client=oidc_http(userinfo=VERIFIED_PROFILE, record=record),
-    )
-    _signin, cb, _client = await run_flow(auth, "acme")
+async def test_nonce_binding_can_be_disabled():
+    q, cb = await _jwks_flow(lambda s: signed_id_token(), disable_id_token_nonce_binding=True)
+    assert "nonce" not in q
     assert cb.headers["location"] == "http://testserver/dashboard"
-    assert not any(c["path"] == "/token" for c in record)
 
 
-# --- discovery: one fetch per endpoint call ----------------------------------------------
-
-
-async def test_discovery_fetched_once_per_signin_call():
-    record: list[dict[str, Any]] = []
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(userinfo=VERIFIED_PROFILE, record=record),
-    )
-    async with make_client(auth) as client:
-        await start_signin(client, "acme")
-    discovery_hits = [c for c in record if c["path"].endswith("/.well-known/openid-configuration")]
-    # sign-in needs both authorization + token endpoints but resolves them from ONE fetch
-    assert len(discovery_hits) == 1
-
-
-async def test_discovery_headers_forwarded():
-    record: list[dict[str, Any]] = []
-    auth = plugin_auth(
-        [
-            GenericOAuthConfig(
-                provider_id="acme",
-                client_id="cid",
-                discovery_url=DISCOVERY,
-                discovery_headers={"x-epic-client-id": "epic-123"},
-            )
-        ],
-        http_client=oidc_http(userinfo=VERIFIED_PROFILE, record=record),
-    )
-    async with make_client(auth) as client:
-        await start_signin(client, "acme")
-    disc = next(c for c in record if c["path"].endswith("/.well-known/openid-configuration"))
-    assert disc["headers"]["x-epic-client-id"] == "epic-123"
-
-
-# --- /oauth2/link ------------------------------------------------------------------------
-
-
-async def _sign_up(client: httpx.AsyncClient, email: str = "linker@test.com") -> None:
-    r = await client.post(
-        "/api/auth/sign-up/email",
-        json={"name": "Linker", "email": email, "password": "s3cret-password"},
-    )
-    assert r.status_code == 200, r.text
-
-
-async def test_link_requires_session():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(),
-    )
+async def test_client_submitted_id_token_for_discovery_provider():
+    http, _ = jwks_http(lambda s: "")
+    auth = plugin_auth(cfg(discovery_url=DISCOVERY), http_client=http)
     async with make_client(auth) as client:
         r = await client.post(
-            "/api/auth/oauth2/link",
-            json={"providerId": "acme", "callbackURL": "http://testserver/done"},
+            "/api/auth/sign-in/social",
+            json={"provider": "acme", "idToken": {"token": signed_id_token()}},
         )
-    assert r.status_code == 401
-    assert r.json()["message"] == "Session is required"
+        assert r.status_code == 200, r.text
+        assert r.json()["user"]["email"] == "generic@test.com"
 
 
-async def test_link_returns_authorization_url():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(),
-    )
+async def test_required_id_token_verification_skips_provider_without_jwks():
+    auth = plugin_auth(cfg(discovery_url=DISCOVERY, require_id_token_verification=True))
     async with make_client(auth) as client:
-        await _sign_up(client)
+        assert (await sign_in(client)).status_code == 404
+
+
+# --- IdP-initiated bounce, link, legacy routes, logout ---------------------------------------
+
+
+async def test_idp_initiated_callback_bounces():
+    auth = plugin_auth(cfg(allow_idp_initiated=True))
+    async with make_client(auth) as client:
+        r = await client.get("/api/auth/callback/acme?code=c")
+        assert r.headers["location"].startswith(f"{IDP}/authorize?")
+    async with make_client(plugin_auth(cfg())) as client:
+        r = await client.get("/api/auth/callback/acme?code=c")
+        assert r.headers["location"].endswith("error=state_not_found")
+
+
+async def test_link_social_attaches_generic_account():
+    http = idp_http(userinfo={**PROFILE, "id": "u1", "email": SIGNUP["email"]})
+    auth = plugin_auth(cfg(), http_client=http)
+    async with make_client(auth) as client:
+        user = (await sign_up(client))["user"]
         r = await client.post(
-            "/api/auth/oauth2/link",
-            json={"providerId": "acme", "callbackURL": "http://testserver/done"},
+            "/api/auth/link-social", json={"provider": "acme", "callbackURL": "/settings"}
         )
-    assert r.status_code == 200
-    data = r.json()
-    assert data["redirect"] is True
-    assert data["url"].startswith(f"{IDP}/authorize?")
+        state = query_of(r)["state"][0]
+        cb = await client.get(f"/api/auth/callback/acme?code=c&state={state}")
+        assert cb.headers["location"] == "http://testserver/settings"
+    account = await acme_account(auth)
+    assert account["userId"] == user["id"]
 
 
-async def test_link_unknown_provider_404():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(),
-    )
+async def test_legacy_routes_keep_the_pre_17_paths():
+    auth = plugin_auth(cfg(), legacy=True, http_client=idp_http(userinfo={**PROFILE, "id": "u"}))
     async with make_client(auth) as client:
-        await _sign_up(client)
         r = await client.post(
-            "/api/auth/oauth2/link",
-            json={"providerId": "ghost", "callbackURL": "http://testserver/done"},
+            "/api/auth/sign-in/oauth2", json={"providerId": "acme", "callbackURL": "/dash"}
         )
-    assert r.status_code == 404
+        q = query_of(r)
+        assert q["redirect_uri"] == ["http://testserver/api/auth/oauth2/callback/acme"]
+        cb = await client.get(f"/api/auth/oauth2/callback/acme?code=c&state={q['state'][0]}")
+        assert cb.headers["location"] == "http://testserver/dash"
+        linked = await client.post(
+            "/api/auth/oauth2/link", json={"providerId": "acme", "callbackURL": "/s"}
+        )
+        assert linked.status_code == 200 and "state=" in linked.json()["url"]
 
 
-async def test_link_attaches_account_to_current_user():
+async def test_end_session_url_from_discovery():
+    http = idp_http(discovery=discovery_doc(end_session_endpoint=f"{IDP}/logout"))
     auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo={
-                "sub": "link-1",
-                "email": "linker@test.com",
-                "name": "Linker",
-                "email_verified": True,
-            },
-        ),
+        cfg(discovery_url=DISCOVERY, post_logout_redirect_uri="/bye"), http_client=http
     )
-    async with make_client(auth) as client:
-        await _sign_up(client, "linker@test.com")
-        link = await client.post(
-            "/api/auth/oauth2/link",
-            json={"providerId": "acme", "callbackURL": "http://testserver/done"},
+    provider: Any = auth.social_providers["acme"]
+    assert await provider.ensure_ready(auth.http)
+    url = await provider.create_end_session_url(id_token="idt", state="s")
+    q = parse_qs(urlsplit(url).query)
+    assert url.startswith(f"{IDP}/logout?")
+    assert q == {
+        "id_token_hint": ["idt"],
+        "post_logout_redirect_uri": ["http://testserver/bye"],
+        "client_id": ["cid"],
+        "state": ["s"],
+    }
+    # index.ts:354-356: no id_token and no post-logout URI only sends client_id
+    bare: Any = plugin_auth(cfg(end_session_endpoint=f"{IDP}/logout")).social_providers["acme"]
+    assert await bare.ensure_ready(auth.http)
+    assert parse_qs(urlsplit(await bare.create_end_session_url()).query) == {"client_id": ["cid"]}
+    disabled = plugin_auth(cfg(end_session_endpoint=f"{IDP}/logout", disable_provider_logout=True))
+    assert await disabled.social_providers["acme"].create_end_session_url(id_token="x") is None
+
+
+# --- presets (providers/*.ts) ----------------------------------------------------------------
+
+
+def test_discovery_presets():
+    assert okta(issuer="https://o.okta.com/oauth2/default/", client_id="c").discovery_url == (
+        "https://o.okta.com/oauth2/default/.well-known/openid-configuration"
+    )
+    assert keycloak(issuer="https://k/realms/r", client_id="c").scopes == [
+        "openid",
+        "profile",
+        "email",
+    ]
+    # c47b76517: only the host of the Auth0 domain is kept
+    for domain in ("tenant.auth0.com", "https://tenant.auth0.com/extra/path"):
+        assert auth0(domain=domain, client_id="c").discovery_url == (
+            "https://tenant.auth0.com/.well-known/openid-configuration"
         )
-        state = state_of(link)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
-            follow_redirects=False,
-        )
-    assert cb.headers["location"] == "http://testserver/done"
-    accounts = await auth.adapter.find_many("account", [Where("providerId", "acme")])
-    assert len(accounts) == 1
+    custom = okta(issuer="https://o", client_id="c", scopes=["openid"], pkce=False)
+    assert custom.scopes == ["openid"] and custom.pkce is False
 
 
-async def test_link_email_mismatch_redirects_error():
-    auth = plugin_auth(
-        [GenericOAuthConfig(provider_id="acme", client_id="cid", discovery_url=DISCOVERY)],
-        http_client=oidc_http(
-            token={"access_token": "at", "token_type": "bearer"},
-            userinfo={
-                "sub": "link-2",
-                "email": "different@test.com",
-                "name": "Other",
-                "email_verified": True,
-            },
-        ),
+def test_endpoint_presets():
+    assert slack(client_id="c").token_url == "https://slack.com/api/openid.connect.token"
+    assert hubspot(client_id="c").scopes == ["oauth"]
+    assert gumroad(client_id="c").scopes == ["view_profile"]
+    assert patreon(client_id="c").scopes == ["identity[email]"]
+    assert yandex(client_id="c").scopes == ["login:info", "login:email", "login:avatar"]
+    assert line(client_id="c", provider_id="line-jp").provider_id == "line-jp"
+
+
+def test_microsoft_entra_id_preset_requires_a_tenant_guid():
+    with pytest.raises(ValueError, match="concrete Microsoft Entra tenant GUID"):
+        microsoft_entra_id(tenant_id="common", client_id="c")
+    tenant = "0000aaaa-11bb-22cc-33dd-444444eeeeee"
+    config = microsoft_entra_id(tenant_id=tenant.upper(), client_id="c")
+    assert config.require_id_token_verification is True
+    assert config.discovery_url == (
+        f"https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration"
     )
-    async with make_client(auth) as client:
-        await _sign_up(client, "linker@test.com")
-        link = await client.post(
-            "/api/auth/oauth2/link",
-            json={
-                "providerId": "acme",
-                "callbackURL": "http://testserver/done",
-                "errorCallbackURL": "http://testserver/err",
-            },
-        )
-        state = state_of(link)
-        cb = await client.get(
-            f"/api/auth/oauth2/callback/acme?code=abc&state={state}",
-            follow_redirects=False,
-        )
-    assert "error=email_doesn" in cb.headers["location"]
+    subject: Any = config.account_subject
+    assert subject({"profile": {"oid": "o-1", "sub": "s"}}) == "o-1"
 
 
-# --- provider presets --------------------------------------------------------------------
+async def test_microsoft_entra_id_preset_profile_uses_oid_placeholder():
+    config = microsoft_entra_id(tenant_id="0000aaaa-11bb-22cc-33dd-444444eeeeee", client_id="c")
+    token = jwt.encode({"oid": "o-1", "sub": "s", "given_name": "Ada"}, "k" * 32)
+    async with httpx.AsyncClient() as http:
+        getter: Any = config.get_user_info
+        profile = await getter.fetch(OAuthTokens(id_token=token), http)
+    assert profile["email"] == "o-1@microsoft-entra-id.placeholder.invalid"
+    assert profile["emailVerified"] is False
+    assert profile["name"] == "Ada"
 
 
-def test_okta_preset_builds_discovery_url():
-    cfg = okta(
-        client_id="cid", client_secret="sec", issuer="https://dev-12345.okta.com/oauth2/default"
+async def test_yandex_preset_without_email_returns_none():
+    config = yandex(client_id="c")
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"id": "1", "login": "l"}))
     )
-    assert cfg.provider_id == "okta"
-    assert cfg.discovery_url == (
-        "https://dev-12345.okta.com/oauth2/default/.well-known/openid-configuration"
-    )
-    assert cfg.scopes == ["openid", "profile", "email"]
-
-
-def test_okta_preset_strips_trailing_slash_on_issuer():
-    cfg = okta(
-        client_id="cid", client_secret="sec", issuer="https://dev-12345.okta.com/oauth2/default/"
-    )
-    assert cfg.discovery_url == (
-        "https://dev-12345.okta.com/oauth2/default/.well-known/openid-configuration"
-    )
-
-
-def test_auth0_preset_builds_discovery_url():
-    cfg = auth0(client_id="cid", client_secret="sec", domain="dev-xxx.eu.auth0.com")
-    assert cfg.provider_id == "auth0"
-    assert cfg.discovery_url == "https://dev-xxx.eu.auth0.com/.well-known/openid-configuration"
-
-
-def test_keycloak_preset_builds_discovery_url():
-    cfg = keycloak(
-        client_id="cid", client_secret="sec", issuer="https://my-domain.com/realms/MyRealm"
-    )
-    assert cfg.provider_id == "keycloak"
-    assert cfg.discovery_url == (
-        "https://my-domain.com/realms/MyRealm/.well-known/openid-configuration"
-    )
-
-
-def test_preset_passes_through_disable_implicit_sign_up():
-    cfg = okta(
-        client_id="cid",
-        client_secret="sec",
-        issuer="https://dev.okta.com",
-        disable_implicit_sign_up=True,
-    )
-    assert cfg.disable_implicit_sign_up is True
+    getter: Any = config.get_user_info
+    assert await getter.fetch(OAuthTokens(access_token="a"), http) is None

@@ -1,16 +1,16 @@
 """Reddit provider (port of ``social-providers/reddit.ts``).
 
 Quirks vs. the standard shape (Reddit's API is unusually hostile to default HTTP clients):
-- Token exchange bypasses the shared body-builder's normal ``accept: application/json`` —
-  Reddit wants ``basic`` client auth (RFC 7617) plus ``accept: text/plain`` and a mandatory
-  non-default ``User-Agent`` (Reddit blocks/rate-limits requests carrying no or a generic
-  UA). Still routed through :func:`exchange_code`/:func:`oauth_fetch` for the SSRF guard.
+- Token requests go through the shared flow with ``client_secret_basic`` client auth
+  (TS v1.7.6 reddit.ts:34-36, a2bae0cad). The code exchange also sends
+  ``accept: text/plain`` and a non-default ``User-Agent`` (Reddit blocks or rate-limits
+  requests with no or a generic UA); the refresh sends neither (reddit.ts:74-79).
 - Userinfo (``GET /api/v1/me``) also requires the same ``User-Agent`` header.
-- The ``identity`` scope never returns an email — a stable, non-routable placeholder
-  (``{id}@reddit.invalid``, RFC 2606) is synthesized so the (email-required) callback flow
-  doesn't reject the sign-in; always unverified.
+- The ``identity`` scope never returns an email, so a stable, non-routable placeholder
+  (``{id}@reddit.placeholder.invalid``, RFC 6761) is synthesized so the (email-required)
+  callback flow doesn't reject the sign-in; always unverified.
 - ``duration`` (Reddit's ``permanent``/``temporary`` authorize param, for refresh-token
-  issuance) isn't a named kwarg here — pass it via the inherited ``authorize_params``
+  issuance) isn't a named kwarg here: pass it via the inherited ``authorize_params``
   passthrough, e.g. ``Reddit(..., authorize_params={"duration": "permanent"})``.
 """
 
@@ -19,14 +19,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..machinery import exchange_code, oauth_fetch
+from ..machinery import TokenEndpointAuth, create_placeholder_email, exchange_code, oauth_fetch
 from ..models import OAuthTokens, OAuthUserInfo
 from ..providers import ProviderConfig
 
 if TYPE_CHECKING:
     import httpx
 
-_USER_AGENT = "better-auth-py"
+_USER_AGENT = "better-auth"  # TS v1.7.6 reddit.ts:66,91
 
 
 @dataclass
@@ -37,6 +37,9 @@ class Reddit(ProviderConfig):
     userinfo_endpoint: str = "https://oauth.reddit.com/api/v1/me"
     scopes: list[str] = field(default_factory=lambda: ["identity"])
     authentication: str = "basic"
+    token_endpoint_auth: TokenEndpointAuth | None = field(
+        default_factory=lambda: TokenEndpointAuth("client_secret_basic")
+    )
 
     async def exchange(
         self,
@@ -53,7 +56,8 @@ class Reddit(ProviderConfig):
             redirect_uri=redirect_uri,
             client_id=self.client_id,
             client_secret=self.client_secret,
-            authentication="basic",
+            authentication=self.authentication,
+            token_endpoint_auth=self.token_endpoint_auth,
             headers={"accept": "text/plain", "user-agent": _USER_AGENT},
         )
 
@@ -74,7 +78,7 @@ class Reddit(ProviderConfig):
             image = image.split("?")[0]
         return OAuthUserInfo(
             id=str(profile["id"]),
-            email=f"{profile['id']}@reddit.invalid",
+            email=create_placeholder_email(identifier=str(profile["id"]), namespace="reddit"),
             name=profile.get("name") or "",
             image=image,
             email_verified=False,

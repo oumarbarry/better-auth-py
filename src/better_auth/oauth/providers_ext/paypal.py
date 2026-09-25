@@ -3,20 +3,19 @@
 Quirks vs. the generic :class:`ProviderConfig`:
   * ``environment`` (``sandbox`` default / ``live``) selects every endpoint host
     (authorize, token, userinfo, issuer, JWKS).
-  * No OAuth2 scopes — permissions are configured in the PayPal dashboard, so the
-    authorize URL carries an empty ``scope`` param.
-  * Token exchange and refresh are hand-rolled: HTTP Basic auth + custom headers,
-    and the exchange body deliberately omits ``code_verifier``.
-  * Dual-algorithm id-token verification — ``RS256`` via the published JWKS, or
-    ``HS256`` verified with the raw ``clientSecret`` as the HMAC key; any other alg
-    is rejected.
+  * No OAuth2 scopes: permissions are configured in the PayPal dashboard, so the
+    authorize URL carries no ``scope`` param.
+  * Token exchange and refresh use the shared token flow with ``client_secret_basic``
+    (TS v1.7.6 paypal.ts:85-87, 9e36635eb).
+  * No id-token sign-in: TS v1.7.6 declares no ``idToken`` config (4f53b61f4).
+    ``legacy_id_token_sign_in`` keeps the earlier dual-algorithm verifier: ``RS256``
+    via the published JWKS, or ``HS256`` with the raw ``clientSecret`` as HMAC key.
   * ``getUserInfo`` cross-checks the userinfo ``sub``/``user_id`` against the id
     token's ``sub`` (OIDC UserInfo-to-IDToken binding).
 """
 
 from __future__ import annotations
 
-import base64
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -24,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import jwt
 from jwt import PyJWK
 
-from ..machinery import OAuthFetchError, build_authorization_url, get_oauth2_tokens, oauth_fetch
+from ..machinery import OAuthFetchError, TokenEndpointAuth, build_authorization_url, oauth_fetch
 from ..models import OAuthTokens, OAuthUserInfo
 from ..providers import ProviderConfig
 from ..verify import _cache as _jwks_cache
@@ -61,8 +60,12 @@ class Paypal(ProviderConfig):
     use_pkce: bool = True
     prompt: str | None = None
     disable_id_token_sign_in: bool = False
+    #: keep the pre-1.7 id-token sign-in (TS v1.7.6 dropped it; off by default)
+    legacy_id_token_sign_in: bool = False
 
     def __post_init__(self) -> None:
+        if self.token_endpoint_auth is None:
+            self.token_endpoint_auth = TokenEndpointAuth("client_secret_basic")
         sandbox = self.environment == "sandbox"
         if sandbox:
             self.authorization_endpoint = "https://www.sandbox.paypal.com/signin/authorize"
@@ -86,6 +89,7 @@ class Paypal(ProviderConfig):
         extra_scopes: list[str] | None = None,
         login_hint: str | None = None,
         nonce: str | None = None,
+        additional_params: dict[str, str] | None = None,
     ) -> str:
         if not self.client_id or not self.client_secret:
             raise ValueError("CLIENT_ID_AND_SECRET_REQUIRED")
@@ -97,58 +101,13 @@ class Paypal(ProviderConfig):
             scopes=[],  # PayPal: permissions live in the dashboard, not OAuth scopes
             code_verifier=code_verifier,  # PKCE
             prompt=self.prompt,
+            # TS v1.7.6 paypal.ts:127 forwards the per-request extras (e7eb45b06)
+            additional_params={**self.authorize_params, **(additional_params or {})} or None,
         )
 
-    def _basic_auth(self) -> str:
-        raw = f"{self.client_id}:{self.client_secret}".encode()
-        return base64.b64encode(raw).decode()
-
-    async def exchange(
-        self,
-        http: httpx.AsyncClient,
-        *,
-        code: str,
-        redirect_uri: str,
-        code_verifier: str | None = None,
-    ) -> OAuthTokens:
-        response = await oauth_fetch(
-            http,
-            "POST",
-            self.token_endpoint,
-            headers={
-                "authorization": f"Basic {self._basic_auth()}",
-                "accept": "application/json",
-                "accept-language": "en_US",
-                "content-type": "application/x-www-form-urlencoded",
-            },
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-            },
-        )
-        payload = response.json() if response.status_code == 200 else {}
-        if "access_token" not in payload:
-            raise OAuthFetchError("FAILED_TO_GET_ACCESS_TOKEN")
-        return get_oauth2_tokens(payload)
-
-    async def refresh(self, http: httpx.AsyncClient, refresh_token: str) -> OAuthTokens:
-        response = await oauth_fetch(
-            http,
-            "POST",
-            self.token_endpoint,
-            headers={
-                "authorization": f"Basic {self._basic_auth()}",
-                "accept": "application/json",
-                "accept-language": "en_US",
-                "content-type": "application/x-www-form-urlencoded",
-            },
-            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-        )
-        payload = response.json() if response.status_code == 200 else {}
-        if "access_token" not in payload:
-            raise OAuthFetchError("FAILED_TO_REFRESH_ACCESS_TOKEN")
-        return get_oauth2_tokens(payload)
+    @property
+    def supports_id_token(self) -> bool:
+        return self.legacy_id_token_sign_in and not self.disable_id_token_sign_in
 
     async def verify_id_token(
         self,
@@ -157,7 +116,7 @@ class Paypal(ProviderConfig):
         nonce: str | None = None,
         ctx: Ctx | None = None,
     ) -> dict[str, Any] | None:
-        if self.disable_id_token_sign_in:
+        if not self.supports_id_token:
             return None
         try:
             header = jwt.get_unverified_header(token)
@@ -171,9 +130,10 @@ class Paypal(ProviderConfig):
         if alg == "HS256":
             key = self.client_secret.encode()
         elif kid:
-            jwk = await _jwks_cache.find(http, self.jwks_url, kid)
-            if jwk is None:
+            jwks = await _jwks_cache.find(http, self.jwks_url, kid)
+            if not jwks:
                 return None
+            jwk = jwks[0]
             key = PyJWK.from_dict(jwk).key
         else:
             return None

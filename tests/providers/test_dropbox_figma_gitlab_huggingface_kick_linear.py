@@ -324,3 +324,31 @@ async def test_linear_fetch_user_rejects_missing_viewer():
     p = Linear(client_id="cid", client_secret="csecret")
     with pytest.raises(OAuthFetchError):
         await p.fetch_user(TOKENS, mock_http(handler))
+
+
+# --- v1.7.6: per-request additionalParams (e7eb45b06) ------------------------------------
+
+
+@pytest.mark.parametrize("cls", [Dropbox, Figma, Gitlab, Huggingface, Kick, Linear])
+def test_authorization_url_forwards_request_additional_params(cls):
+    # TS v1.7.6 dropbox.ts:39, figma.ts:33, gitlab.ts:91, huggingface.ts:56, kick.ts:42,
+    # linear.ts:40: every provider forwards the caller's additionalParams; reserved keys
+    # never override the framework's own (create-authorization-url.ts:108-111).
+    p = cls(client_id="cid", client_secret="csecret")
+    url = p.authorization_url(
+        state="st",
+        redirect_uri="https://app/cb",
+        additional_params={"audience": "x", "state": "evil"},
+    )
+    params = qs(url)
+    assert params["audience"] == "x"
+    assert params["state"] == "st"
+
+
+def test_dropbox_request_token_access_type_wins_over_option():
+    # TS v1.7.6 dropbox.ts:53-58: `{token_access_type: accessType, ...additionalParams}`
+    p = Dropbox(client_id="cid", client_secret="csecret", access_type="offline")
+    url = p.authorization_url(
+        state="st", redirect_uri="https://app/cb", additional_params={"token_access_type": "online"}
+    )
+    assert qs(url)["token_access_type"] == "online"

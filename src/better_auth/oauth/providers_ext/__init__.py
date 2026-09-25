@@ -9,6 +9,7 @@ from __future__ import annotations
 from ..providers import Discord, GitHub, Google
 from .apple import Apple
 from .atlassian import Atlassian
+from .cloudflare import Cloudflare
 from .cognito import Cognito
 from .dropbox import Dropbox
 from .facebook import Facebook
@@ -46,6 +47,7 @@ PROVIDER_REGISTRY: dict[str, type] = {
     "discord": Discord,
     Apple.provider_id: Apple,
     Atlassian.provider_id: Atlassian,
+    Cloudflare.provider_id: Cloudflare,
     Cognito.provider_id: Cognito,
     Dropbox.provider_id: Dropbox,
     Facebook.provider_id: Facebook,
@@ -83,6 +85,7 @@ __all__ = [
     "VK",
     "Apple",
     "Atlassian",
+    "Cloudflare",
     "Cognito",
     "Discord",
     "Dropbox",

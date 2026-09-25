@@ -5,7 +5,7 @@ Services resolves a credential) and signs the user in through the same
 find/register/link decision tree the redirect OAuth flow uses.
 
 Verified against TS ``packages/better-auth/src/plugins/one-tap`` (index.ts, client.ts,
-one-tap.test.ts) at v1.6.23. TS depends on ``@better-auth/core/social-providers``'s
+one-tap.test.ts) at v1.7.6. TS depends on ``@better-auth/core/social-providers``'s
 ``verifyGoogleIdToken``/``isGoogleHostedDomainAllowed`` and ``handleOAuthUserInfo``
 (``oauth2/link-account.ts``); this port reuses its own OAuth machinery instead of
 reimplementing JWKS verification or the linking policy:
@@ -14,13 +14,9 @@ reimplementing JWKS verification or the linking policy:
   - ``oauth.flow.handle_oauth_user_info`` — the shared find/register/link decision tree.
 
 ``ponytail`` notes:
-  - ``isGoogleHostedDomainAllowed`` has no Python port: this port's ``Google`` provider
-    has no dedicated ``hd`` field, only the generic ``authorize_params`` escape hatch, so
-    there's nothing to reuse. Re-implemented here as a 6-line pure function rather than
-    touching shared provider code (out of this plugin's file-ownership scope). The
-    "configured hd" it checks is read from ``google_provider.authorize_params.get("hd")``
-    (the existing per-provider extra-params mechanism, see ``Reddit``/``Roblox``), also
-    how a caller would send `hd` as an authorize-URL hint today.
+  - The configured hosted domain is the registered Google provider's ``hd`` (falling back
+    to the older ``authorize_params["hd"]`` spelling), checked by the local ``_hd_allowed``
+    (TS ``isGoogleHostedDomainAllowed``).
   - A fresh ``Google(client_id=audience)`` is built per request instead of reusing the
     registered social-provider instance, and passed to ``handle_oauth_user_info``: TS
     builds an inline ``{providerId: "google", accountId: sub}`` literal rather than the
@@ -114,29 +110,40 @@ class OneTapPlugin(Plugin):
             audience=audience,
             issuers=google.issuers,
             max_age=_GOOGLE_ID_TOKEN_MAX_AGE,
+            algorithms=["RS256"],  # TS google.ts:74-86 verifyGoogleIdToken
         )
         if claims is None or not claims.get("sub"):
             raise APIError(400, "BAD_REQUEST", "invalid id token")
 
         # Apply the configured Google hosted domain (`hd`) so One Tap matches redirect
         # sign-in, which rejects tokens whose `hd` claim is missing or out of restriction.
-        configured_hd = google_provider.authorize_params.get("hd") if google_provider else None
+        configured_hd = None
+        if google_provider is not None:
+            configured_hd = getattr(
+                google_provider, "hd", None
+            ) or google_provider.authorize_params.get("hd")
         if not _hd_allowed(configured_hd, claims.get("hd")):
             raise APIError(400, "BAD_REQUEST", "invalid id token")
 
+        # TS v1.7.6 one-tap/index.ts:156-165 (ad35eadd1)
         raw_email = claims.get("email")
-        if not raw_email:
-            return AuthResponse(body={"error": "Email not available in token"})
+        if not isinstance(raw_email, str) or not raw_email:
+            raise APIError(400, "BAD_REQUEST", "Email not available in token")
+        sub = claims.get("sub")
+        if not isinstance(sub, str) or not sub:
+            raise APIError(400, "BAD_REQUEST", "invalid id token")
         email = raw_email.lower()
 
         # Resolve identity through the shared OAuth path so One Tap matches the redirect
         # and signIn.social flows: the account that owns the Google `sub` wins, never
         # whichever local user happens to share the token's email.
+        name = claims.get("name")
+        picture = claims.get("picture")
         info = OAuthUserInfo(
-            id=claims["sub"],
+            id=sub,
             email=email,
-            name=claims.get("name") or "",
-            image=claims.get("picture"),
+            name=name if isinstance(name, str) else "",
+            image=picture if isinstance(picture, str) else None,
             email_verified=_to_bool(claims.get("email_verified")),
             raw=claims,
         )
@@ -149,10 +156,20 @@ class OneTapPlugin(Plugin):
         )
         try:
             user_id, _is_new = await handle_oauth_user_info(
-                ctx, google, info, tokens, disable_sign_up=disable_sign_up
+                ctx,
+                google,
+                info,
+                tokens,
+                disable_sign_up=disable_sign_up,
+                source={"method": "oauth", "oauth": {"providerId": "google", "profile": claims}},
+                callback_url=callback_url,
             )
         except OAuthLinkError as err:
-            raise APIError(401, "OAUTH_LINK_ERROR", err.code) from None
+            # TS v1.7.6 one-tap/index.ts:201-212
+            if err.code == "email_not_verified":
+                raise APIError(403, "EMAIL_NOT_VERIFIED", "Email not verified") from None
+            # the message is TS's space-separated reason (link-account.ts, e.g. "signup disabled")
+            raise APIError(401, "OAUTH_LINK_ERROR", err.code.replace("_", " ")) from None
 
         session, cookies = await create_session(ctx.auth, user_id, ctx.request, ctx=ctx)
         user = await ctx.adapter.find_one("user", [Where("id", user_id)])
