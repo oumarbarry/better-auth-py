@@ -308,6 +308,55 @@ async def test_ceremony_confusion_rejected():
         assert verify.json()["code"] == "CHALLENGE_NOT_FOUND"
 
 
+async def test_registration_challenge_missing_type_rejected():
+    """A legacy/foreign challenge row with no `type` marker is rejected outright, not
+    given a backward-compat pass (routes.ts:616, v1.7.6 hardening)."""
+    auth = _auth()
+    async with make_client(auth) as client:
+        token = await _bearer(client)
+        r = await _gen_register(client, token)
+        assert r.status_code == 200, r.text
+        rows = await auth.adapter.find_many("verification")
+        challenge_row = next(r for r in rows if '"type"' in r["value"])
+        stored = json.loads(challenge_row["value"])
+        del stored["type"]
+        await auth.adapter.update(
+            "verification", [Where("id", challenge_row["id"])], {"value": json.dumps(stored)}
+        )
+        key = SoftKey()
+        verify = await client.post(
+            "/api/auth/passkey/verify-registration",
+            json={"response": key.register(r.json()["challenge"])},
+            headers={"authorization": f"Bearer {token}"},
+        )
+        assert verify.status_code == 400
+        assert verify.json()["code"] == "CHALLENGE_NOT_FOUND"
+
+
+async def test_verify_registration_create_session():
+    """createSession=true (routes.ts verifyPasskeyRegistration, v1.7.6) mints a session
+    for the registered user and sets the session cookie alongside the passkey row."""
+    async with make_client(_auth()) as client:
+        token = await _bearer(client)
+        key = SoftKey()
+        reg = await _register(client, key, token, createSession=True)
+        assert reg.status_code == 200, reg.text
+        body = reg.json()
+        assert body["credentialID"] == _b64url(key.cred_id)
+        assert body["user"]["email"] == "ada@example.com"
+        assert "session" in body
+        assert "set-cookie" in reg.headers
+
+
+async def test_verify_registration_without_create_session_omits_session():
+    async with make_client(_auth()) as client:
+        token = await _bearer(client)
+        key = SoftKey()
+        reg = await _register(client, key, token)
+        assert reg.status_code == 200, reg.text
+        assert "session" not in reg.json()
+
+
 async def test_verify_registration_missing_cookie():
     async with make_client(_auth()) as client:
         token = await _bearer(client)

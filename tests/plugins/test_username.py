@@ -184,6 +184,70 @@ async def test_preserve_both_on_update():
         assert s["user"]["displayUsername"] == "Priority Display Name"
 
 
+# --- immutable_username (index.ts, v1.7.6) ----------------------------------------------
+
+
+async def test_immutable_username_rejects_change():
+    async with make_client(_auth(immutable_username=True)) as client:
+        r = await _signup(client, email="a@b.com", username="first_user")
+        token = r.json()["token"]
+        upd = await client.post(
+            "/api/auth/update-user",
+            json={"username": "second_user"},
+            headers={"authorization": f"Bearer {token}"},
+        )
+        assert upd.status_code == 400
+        assert upd.json()["code"] == "USERNAME_IS_IMMUTABLE"
+        s = await _session(client, token)
+        assert s["user"]["username"] == "first_user"
+
+
+async def test_immutable_username_allows_resubmitting_same_value():
+    async with make_client(_auth(immutable_username=True)) as client:
+        r = await _signup(client, email="a@b.com", username="my_name")
+        token = r.json()["token"]
+        upd = await client.post(
+            "/api/auth/update-user",
+            json={"username": "My_Name"},  # same row, different casing -> normalizes equal
+            headers={"authorization": f"Bearer {token}"},
+        )
+        assert upd.status_code == 200, upd.text
+
+
+async def test_immutable_username_allows_first_set():
+    """immutableUsername only blocks *changing* an existing username, not setting one for
+    the first time via update-user."""
+    async with make_client(_auth(immutable_username=True)) as client:
+        r = await _signup(client, email="a@b.com")  # no username at sign-up
+        token = r.json()["token"]
+        upd = await client.post(
+            "/api/auth/update-user",
+            json={"username": "first_user"},
+            headers={"authorization": f"Bearer {token}"},
+        )
+        assert upd.status_code == 200, upd.text
+        s = await _session(client, token)
+        assert s["user"]["username"] == "first_user"
+
+
+# --- display_username=False (index.ts, v1.7.6) -------------------------------------------
+
+
+def test_display_username_false_drops_schema_field():
+    auth = _auth(display_username=False)
+    assert "displayUsername" not in auth.schema["user"]
+    assert "username" in auth.schema["user"]
+
+
+async def test_display_username_false_never_persisted():
+    async with make_client(_auth(display_username=False)) as client:
+        r = await _signup(client, email="a@b.com", username="my_user")
+        assert r.status_code == 200, r.text
+        s = await _session(client, r.json()["token"])
+        assert s["user"]["username"] == "my_user"
+        assert "displayUsername" not in s["user"]
+
+
 # --- is-username-available (422 on validation) ------------------------------------------
 
 

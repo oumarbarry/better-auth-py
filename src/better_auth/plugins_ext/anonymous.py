@@ -3,6 +3,14 @@ once the visitor signs in for real.
 
 Verified against TS ``packages/better-auth/src/plugins/anonymous/index.ts`` (and
 ``schema.ts``, ``error-codes.ts``, ``types.ts``) at v1.6.23.
+
+v1.7.6: the default placeholder email (no ``email_domain_name`` configured) changed from
+``temp@{id}.com`` to ``{id}@anonymous.placeholder.invalid`` (TS ``createPlaceholderEmail``,
+core/utils/email.ts) -- a stable, RFC 6761 reserved, non-routable domain shared with other
+placeholder-email plugins. Out of scope: the OAuth server-trusted state channel that lets an
+anonymous-account link survive an OAuth callback with no session cookie (index.ts
+``resolveAnonymousSession``/``addOAuthServerContext``) exists specifically for Expo's
+in-app browser, and ``expo`` is globally out of scope for this port.
 """
 
 from __future__ import annotations
@@ -141,7 +149,10 @@ class AnonymousPlugin(Plugin):
         new_id = generate_id()
         if self.email_domain_name:
             return f"temp-{new_id}@{self.email_domain_name}"
-        return f"temp@{new_id}.com"
+        # TS createPlaceholderEmail({identifier, namespace: "anonymous"}) (core/utils/
+        # email.ts, v1.7.6): a stable, non-routable, RFC 6761 reserved-TLD placeholder,
+        # replacing the old "temp@{id}.com" default (index.ts getAnonUserEmail).
+        return f"{new_id}@anonymous.placeholder.invalid"
 
     async def _require_sensitive_session(self, ctx: Ctx) -> dict[str, Any]:
         """TS ``sensitiveSessionMiddleware`` (api/routes/session.ts:644): an

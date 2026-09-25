@@ -14,10 +14,19 @@ Two TS conventions are adapted to this HTTP-only port:
   invoked with no request/headers) are not reachable through this router — every
   endpoint is served over HTTP, where TS's ``(ctx.request || ctx.headers)`` guard is
   always true. So both endpoints simply require a session (401 otherwise).
+
+v1.7.6 additions ported on top of v1.6.23: ``bannedUserMessage`` accepts a callable
+(sync or async) of the banned user, resolved on each blocked sign-in (admin.ts:95-127);
+and ``banUser`` without a duration explicitly nulls ``banExpires`` so a later permanent
+ban clears an earlier temporary ban's expiration (routes.ts:1153-1166) -- already the
+Python behavior since the update dict here always carries the key. Verified against
+``admin.ts``, ``routes.ts`` and ``types.ts``.
 """
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar
 
@@ -96,6 +105,12 @@ def _parse_roles(roles: str | list[str]) -> str:
     return ",".join(roles) if isinstance(roles, list) else roles
 
 
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 def _to_aware(dt: Any) -> datetime:
     if isinstance(dt, str):
         dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
@@ -133,7 +148,7 @@ class AdminPlugin(Plugin):
         roles: dict[str, Role] | None = None,
         admin_user_ids: list[str] | None = None,
         ac: Any = None,
-        banned_user_message: str | None = None,
+        banned_user_message: str | Callable[[dict[str, Any]], Any] | None = None,
         allow_impersonating_admins: bool = False,
     ) -> None:
         self.default_role = default_role
@@ -186,7 +201,14 @@ class AdminPlugin(Plugin):
                         {"banned": False, "banReason": None, "banExpires": None},
                     )
                     return None
-                raise APIError(403, "BANNED_USER", banned_message)
+                # bannedUserMessage may be a (sync or async) function of the banned user
+                # (admin.ts:95-127, v1.7.6) or a plain string (the v1.6.23 default).
+                message = (
+                    banned_message
+                    if isinstance(banned_message, str)
+                    else await _maybe_await(banned_message(user))
+                )
+                raise APIError(403, "BANNED_USER", message)
             return None
 
         auth.internal.hooks.append({"user": {"create": {"before": user_create_before}}})

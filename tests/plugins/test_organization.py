@@ -736,6 +736,23 @@ async def test_update_member_role_unknown_role_rejected():
         assert "ROLE_NOT_FOUND" in res.json()["message"]
 
 
+async def test_update_member_role_unknown_role_not_leaked_before_permission_check():
+    """The role-existence check runs after the permission gate (crud-members.ts "avoid
+    organization role lookup leak", v1.7.6): a caller without ``member:update`` gets the
+    permission error, never ROLE_NOT_FOUND, even when the role name does not exist."""
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as member_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        member = await sign_up(member_c, email="m@x.com", name="Mem")
+        seeded = await _seed_member(auth, org["id"], member["user"]["id"], "member")
+        res = await member_c.post(
+            "/api/auth/organization/update-member-role",
+            json={"organizationId": org["id"], "memberId": seeded["id"], "role": "not-a-role"},
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER"
+
+
 async def test_update_member_role_empty_rejected():
     auth = org_auth()
     async with make_client(auth) as client:
@@ -1226,6 +1243,26 @@ async def test_accept_invitation_full_flow():
         assert session["session"]["activeOrganizationId"] == org["id"]
 
 
+async def test_accept_invitation_twice_second_rejected():
+    """The pending -> accepted transition is a guarded compare-and-set (increment_one,
+    adapter.ts:1291-1319, v1.7.6): a second accept sees status already "accepted" and is
+    rejected rather than silently succeeding again."""
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        await _owner_with_org(auth, owner_c)
+        inv = (await _invite(owner_c, "bob@example.com")).json()
+        await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        first = await invitee_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert first.status_code == 200, first.text
+        second = await invitee_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert second.status_code == 400
+        assert second.json()["code"] == "INVITATION_NOT_FOUND"
+
+
 async def test_accept_invitation_wrong_recipient():
     auth = org_auth()
     async with make_client(auth) as owner_c, make_client(auth) as carol_c:
@@ -1650,6 +1687,17 @@ def test_teams_enabled_adds_schema():
     assert "activeTeamId" in auth.schema["session"]
     assert auth.schema["session"]["activeTeamId"].input is False
     assert "teamId" in auth.schema["invitation"]
+    # schema.ts (v1.7.6): durable capacity counter + membership uniqueness column, both
+    # input:false/returned:false so they never appear on the wire.
+    member_count = auth.schema["team"]["memberCount"]
+    assert member_count.required is True
+    assert member_count.default == 0
+    assert member_count.input is False
+    assert member_count.returned is False
+    membership_key = auth.schema["teamMember"]["membershipKey"]
+    assert membership_key.unique is True
+    assert membership_key.input is False
+    assert membership_key.returned is False
 
 
 async def test_teams_disabled_endpoints_absent():
@@ -1959,6 +2007,65 @@ async def test_list_user_teams():
         assert teams[0]["organizationId"] == org["id"]
 
 
+async def test_list_user_teams_explicit_org_scopes_result():
+    auth = _teams_auth(default_team=False)
+    async with make_client(auth) as owner_c:
+        owner, org = await _owner_with_org(auth, owner_c)
+        team = (await _create_team(owner_c, "A")).json()
+        await owner_c.post(
+            "/api/auth/organization/add-team-member",
+            json={"teamId": team["id"], "userId": owner["user"]["id"]},
+        )
+        res = await owner_c.get(
+            "/api/auth/organization/list-user-teams", params={"organizationId": org["id"]}
+        )
+        assert res.status_code == 200, res.text
+        teams = res.json()
+        assert len(teams) == 1
+        assert teams[0]["id"] == team["id"]
+
+
+async def test_list_user_teams_explicit_org_not_a_member_forbidden():
+    auth = _teams_auth(default_team=False)
+    async with make_client(auth) as owner_c, make_client(auth) as outsider_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        await sign_up(outsider_c, email="out@x.com", name="Out")
+        res = await outsider_c.get(
+            "/api/auth/organization/list-user-teams", params={"organizationId": org["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "YOU_ARE_NOT_A_MEMBER_OF_THIS_ORGANIZATION"
+
+
+async def test_list_user_teams_for_other_user_requires_member_update_permission():
+    auth = _teams_auth(default_team=False)
+    async with make_client(auth) as owner_c, make_client(auth) as member_c:
+        owner, org = await _owner_with_org(auth, owner_c)
+        member = await sign_up(member_c, email="m@x.com", name="Mem")
+        await _seed_member(auth, org["id"], member["user"]["id"], "member")
+        team = (await _create_team(owner_c, "A")).json()
+        await owner_c.post(
+            "/api/auth/organization/add-team-member",
+            json={"teamId": team["id"], "userId": member["user"]["id"]},
+        )
+        # a plain member cannot list another member's teams
+        forbidden = await member_c.get(
+            "/api/auth/organization/list-user-teams",
+            params={"userId": owner["user"]["id"], "organizationId": org["id"]},
+        )
+        assert forbidden.status_code == 403
+        assert forbidden.json()["code"] == "YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER"
+        # the owner (member:update permission) can list the member's teams
+        allowed = await owner_c.get(
+            "/api/auth/organization/list-user-teams",
+            params={"userId": member["user"]["id"], "organizationId": org["id"]},
+        )
+        assert allowed.status_code == 200, allowed.text
+        teams = allowed.json()
+        assert len(teams) == 1
+        assert teams[0]["id"] == team["id"]
+
+
 async def test_list_team_members():
     auth = _teams_auth()  # default team active, owner a member
     async with make_client(auth) as client:
@@ -2037,6 +2144,44 @@ async def test_add_team_member_limit_reached():
         )
         assert r2.status_code == 403
         assert r2.json()["code"] == "TEAM_MEMBER_LIMIT_REACHED"
+
+
+async def test_team_member_count_tracks_add_and_remove():
+    """``team.memberCount`` (schema.ts, v1.7.6) is a hidden durable counter kept in sync by
+    the guarded reserveTeamSeat/releaseTeamSeats increment_one calls; ``teamMember.
+    membershipKey`` is populated in storage but never returned to callers."""
+    auth = _teams_auth(default_team=False)
+    async with make_client(auth) as owner_c, make_client(auth) as member_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        member = await sign_up(member_c, email="m@x.com", name="Mem")
+        await _seed_member(auth, org["id"], member["user"]["id"], "member")
+        team = (await _create_team(owner_c, "A")).json()
+        assert "memberCount" not in team
+
+        row = await auth.adapter.find_one("team", [Where("id", team["id"])])
+        assert row["memberCount"] == 0
+
+        res = await owner_c.post(
+            "/api/auth/organization/add-team-member",
+            json={"teamId": team["id"], "userId": member["user"]["id"]},
+        )
+        assert res.status_code == 200, res.text
+        assert "membershipKey" not in res.json()
+
+        row = await auth.adapter.find_one("team", [Where("id", team["id"])])
+        assert row["memberCount"] == 1
+        tm_row = await auth.adapter.find_one(
+            "teamMember", [Where("teamId", team["id"]), Where("userId", member["user"]["id"])]
+        )
+        assert tm_row["membershipKey"]
+
+        res = await owner_c.post(
+            "/api/auth/organization/remove-team-member",
+            json={"teamId": team["id"], "userId": member["user"]["id"]},
+        )
+        assert res.status_code == 200, res.text
+        row = await auth.adapter.find_one("team", [Where("id", team["id"])])
+        assert row["memberCount"] == 0
 
 
 async def test_remove_team_member():
@@ -2140,6 +2285,36 @@ async def test_invite_with_team_id_creates_membership_on_accept():
         assert session["session"]["activeTeamId"] == team["id"]  # single team -> set active
 
 
+async def test_accept_invitation_release_on_team_join_failure():
+    """A failure after the invitation is claimed releases it back to pending via the
+    guarded ``fromStatus: accepted`` release (crud-invites.ts:839-850, v1.7.6), and no
+    member row is created: the invitee can retry."""
+    auth = _teams_auth(default_team=False)
+    async with make_client(auth) as owner_c, make_client(auth) as invitee_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        team = (await _create_team(owner_c, "A")).json()
+        inv = (
+            await owner_c.post(
+                "/api/auth/organization/invite-member",
+                json={"email": "bob@example.com", "role": "member", "teamId": team["id"]},
+            )
+        ).json()
+        # the invited team disappears out-of-band before the invitee accepts
+        await auth.adapter.delete("team", [Where("id", team["id"])])
+        bob = await sign_up(invitee_c, email="bob@example.com", name="Bob")
+        res = await invitee_c.post(
+            "/api/auth/organization/accept-invitation", json={"invitationId": inv["id"]}
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "TEAM_NOT_FOUND"
+        row = await auth.adapter.find_one("invitation", [Where("id", inv["id"])])
+        assert row["status"] == "pending"
+        member = await auth.adapter.find_one(
+            "member", [Where("organizationId", org["id"]), Where("userId", bob["user"]["id"])]
+        )
+        assert member is None
+
+
 async def test_invite_team_not_found():
     auth = _teams_auth(default_team=False)
     async with make_client(auth) as client:
@@ -2179,6 +2354,61 @@ async def test_invite_team_member_limit_reached():
         )
         assert res.status_code == 403
         assert res.json()["code"] == "TEAM_MEMBER_LIMIT_REACHED"
+
+
+# --- get-organization (metadata-only fetch, crud-org.ts, v1.7.6) -------------------
+
+
+async def test_get_organization_active_org():
+    async with make_client(org_auth()) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        res = await client.get("/api/auth/organization/get-organization")
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["id"] == org["id"]
+        assert "members" not in body  # metadata only, unlike get-full-organization
+
+
+async def test_get_organization_by_slug():
+    async with make_client(org_auth()) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        res = await client.get(
+            "/api/auth/organization/get-organization", params={"organizationSlug": org["slug"]}
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["id"] == org["id"]
+
+
+async def test_get_organization_no_org_returns_null():
+    async with make_client(org_auth()) as client:
+        await sign_up(client)
+        res = await client.get("/api/auth/organization/get-organization")
+        assert res.status_code == 200, res.text
+        assert res.json() is None
+
+
+async def test_get_organization_unknown_id_not_found():
+    async with make_client(org_auth()) as client:
+        await sign_up(client)
+        res = await client.get(
+            "/api/auth/organization/get-organization", params={"organizationId": "nope"}
+        )
+        assert res.status_code == 400
+        assert res.json()["code"] == "ORGANIZATION_NOT_FOUND"
+
+
+async def test_get_organization_not_a_member_forbidden():
+    auth = org_auth()
+    async with make_client(auth) as owner_c, make_client(auth) as outsider_c:
+        _, org = await _owner_with_org(auth, owner_c)
+        await sign_up(outsider_c, email="out@x.com", name="Out")
+        res = await outsider_c.get(
+            "/api/auth/organization/get-organization", params={"organizationId": org["id"]}
+        )
+        assert res.status_code == 403
+        assert res.json()["code"] == "USER_IS_NOT_A_MEMBER_OF_THE_ORGANIZATION"
 
 
 # --- get-full-organization includes teams ------------------------------------------

@@ -40,8 +40,9 @@ async def test_sign_in_anonymously_creates_user_and_session():
         assert body["token"]
         assert body["user"]["isAnonymous"] is True
         assert body["user"]["name"] == "Anonymous"
-        assert body["user"]["email"].startswith("temp@")
-        assert body["user"]["email"].endswith(".com")
+        # TS createPlaceholderEmail default (index.ts getAnonUserEmail, v1.7.6): a
+        # stable, non-routable placeholder on the RFC 6761 reserved "placeholder.invalid".
+        assert body["user"]["email"].endswith("@anonymous.placeholder.invalid")
 
         session = (await client.get("/api/auth/get-session")).json()
         assert session["user"]["isAnonymous"] is True

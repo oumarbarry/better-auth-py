@@ -13,6 +13,11 @@ sign-up and update. Wire parity with the TS plugin
   (422s); the ``databaseHooks`` normalize + persist and *skip* re-validating those
   two paths, exactly like TS ``pathsWithHttpHookValidation``.
 
+v1.7.6 additions: ``immutable_username`` rejects a username change on ``/update-user``
+once one is set (re-submitting the same value is a no-op); ``display_username=False``
+drops the ``displayUsername`` field from the schema and from every sign-up/update write.
+Verified against ``index.ts``, ``schema.ts`` and ``error-codes.ts``.
+
 Persistence note: this port's core ``sign_up_email`` does not fold arbitrary body
 fields into the user row, so the ``user.create.before`` databaseHook sources
 ``username``/``displayUsername`` from ``ctx.body()`` (the request body the HTTP
@@ -50,6 +55,7 @@ ERROR_CODES: dict[str, str] = {
     "USERNAME_TOO_LONG": "Username is too long",
     "INVALID_USERNAME": "Username is invalid",
     "INVALID_DISPLAY_USERNAME": "Display username is invalid",
+    "USERNAME_IS_IMMUTABLE": "Username cannot be updated",
 }
 
 # TS validates + normalizes in the HTTP before-hooks for these paths, so the
@@ -79,6 +85,8 @@ class UsernamePlugin(Plugin):
         display_username_normalization: Callable[[str], str] | bool = False,
         validation_order: dict[str, str] | None = None,
         schema: dict[str, Any] | None = None,
+        immutable_username: bool = False,
+        display_username: bool = True,
     ) -> None:
         self.min_username_length = min_username_length or 3
         self.max_username_length = max_username_length or 30
@@ -87,6 +95,11 @@ class UsernamePlugin(Plugin):
         self.username_normalization = username_normalization
         self.display_username_normalization = display_username_normalization
         self.validation_order = validation_order
+        # immutableUsername: /update-user rejects a username change once one is set
+        # (index.ts, v1.7.6). displayUsername=False drops the field from the schema and
+        # from every sign-up/update write (index.ts, v1.7.6).
+        self.immutable_username = immutable_username
+        self.display_username = display_username
         self._auth: BetterAuth | None = None
 
         # Instance-level schema: transform.input closes over this instance's normalizers.
@@ -99,10 +112,11 @@ class UsernamePlugin(Plugin):
                 returned=True,
                 transform_input=self._normalize,
             ),
-            "displayUsername": Field(
-                "string", required=False, transform_input=self._display_normalize
-            ),
         }
+        if display_username:
+            user_fields["displayUsername"] = Field(
+                "string", required=False, transform_input=self._display_normalize
+            )
         if schema and isinstance(schema.get("user"), dict):
             # minimal override: merge caller field overrides (no model/field renaming)
             for name, override in schema["user"].items():
@@ -215,14 +229,15 @@ class UsernamePlugin(Plugin):
                     adapter = self._auth.adapter
                 await self._validate_full(username, display, adapter, current_user_id)
             merged = {**data, "username": username}
-            if is_update:
-                if display:
-                    merged["displayUsername"] = display
-            else:
-                merged["displayUsername"] = display if display else username
+            if self.display_username:  # index.ts includeDisplayUsername, v1.7.6
+                if is_update:
+                    if display:
+                        merged["displayUsername"] = display
+                else:
+                    merged["displayUsername"] = display if display else username
             return {"data": merged}
 
-        if display:
+        if display and self.display_username:
             return {"data": {**data, "displayUsername": display}}
         return {"data": data}
 
@@ -253,25 +268,43 @@ class UsernamePlugin(Plugin):
         return None
 
     async def _hook_validate(self, ctx: Ctx) -> None:
-        # (b) validate username value + uniqueness (own row allowed on update) + display
+        # (b) validate username value + immutability + uniqueness (own row allowed on
+        # update) + display
         body = ctx.body()
         username = body.get("username")
+        is_update = ctx.request.path == "/update-user"
         if isinstance(username, str):
             err = await self._validate_value(username)
             if err is not None:
                 raise APIError(400, err[1], err[2])
             normalized = self._normalize(username)
+            session = await ctx.get_session() if is_update else None
+
+            # immutableUsername (index.ts, v1.7.6): once a username is set, /update-user
+            # rejects any change to it (re-submitting the same value is a no-op, allowed).
+            if is_update and self.immutable_username:
+                current = session["user"].get("username") if session else None
+                if current and current != normalized:
+                    raise APIError(
+                        400, "USERNAME_IS_IMMUTABLE", ERROR_CODES["USERNAME_IS_IMMUTABLE"]
+                    )
+
             existing = await ctx.adapter.find_one("user", [Where("username", normalized)])
             if ctx.request.path == "/sign-up/email" and existing is not None:
                 raise APIError(
                     400, "USERNAME_IS_ALREADY_TAKEN", ERROR_CODES["USERNAME_IS_ALREADY_TAKEN"]
                 )
-            if ctx.request.path == "/update-user" and existing is not None:
-                session = await ctx.get_session()
-                if session is None or existing["id"] != session["user"]["id"]:
-                    raise APIError(
-                        400, "USERNAME_IS_ALREADY_TAKEN", ERROR_CODES["USERNAME_IS_ALREADY_TAKEN"]
-                    )
+            if (
+                is_update
+                and existing is not None
+                and (session is None or existing["id"] != session["user"]["id"])
+            ):
+                raise APIError(
+                    400, "USERNAME_IS_ALREADY_TAKEN", ERROR_CODES["USERNAME_IS_ALREADY_TAKEN"]
+                )
+
+        if not self.display_username:  # index.ts includeDisplayUsername, v1.7.6
+            return None
 
         display = body.get("displayUsername")
         if isinstance(display, str) and self._vo("displayUsername") == "post-normalization":
@@ -286,6 +319,8 @@ class UsernamePlugin(Plugin):
 
     async def _hook_default_display(self, ctx: Ctx) -> None:
         # (c) default displayUsername to username when username is set and display omitted
+        if not self.display_username:  # index.ts includeDisplayUsername, v1.7.6
+            return None
         body = ctx.body()
         if body.get("username") and not body.get("displayUsername"):
             body["displayUsername"] = body["username"]

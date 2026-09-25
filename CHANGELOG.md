@@ -83,6 +83,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Providers can accept IdP-initiated callbacks (`allow_idp_initiated`).
 - `add_oauth_server_context` and `get_oauth_state` carry server-trusted data
   across the provider redirect.
+- Organization: `GET /organization/get-organization` returns the
+  organization without members or invitations.
+- Organization: `list-user-teams` accepts `userId` and `organizationId`, so a
+  caller with the `member:update` permission can list another member's teams.
+- Organization: `team.memberCount` and `teamMember.membershipKey` columns
+  back atomic team capacity checks. Both are internal and never returned.
+  Run your migrations; existing teams resync their count on the next join.
+- Admin: `banned_user_message` may be a sync or async function of the
+  banned user.
+- Username: `immutable_username=True` refuses changing a username once set,
+  and `display_username=False` drops the `displayUsername` field.
+- Passkey: `verify-registration` accepts `createSession: true` to sign the
+  user in after registering.
 
 ### Changed
 
@@ -219,6 +232,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   encoded as RFC 6749 requires.
 - PayPal ID token sign-in is off by default (`legacy_id_token_sign_in=True`
   restores it).
+- Anonymous: the default placeholder email is
+  `<id>@anonymous.placeholder.invalid` (was `temp@<id>.com`) for new
+  anonymous users. `email_domain_name` still overrides it.
 
 ### Fixed
 
@@ -284,6 +300,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   in better-auth.
 - `/account-info` answers `FAILED_TO_GET_USER_INFO` instead of a server
   error when the provider returns no profile.
+- Organization: accepting an invitation and rolling it back use a guarded
+  compare-and-set, so a losing concurrent accept is no longer reported as a
+  success.
+- Organization: `update-member-role` checks that the role exists only after
+  the permission check, so an unauthorized caller cannot probe role names.
+- Passkey: registration and authentication challenges require an exact
+  ceremony type match.
 
 ## [1.0.3] - 2026-09-25
 
