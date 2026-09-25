@@ -19,7 +19,14 @@ Challenge flow: ``generate_random_string(32)`` token → signed cookie
 (``<prefix>.better-auth-passkey``, maxAge 300) → verification row keyed by the RAW token,
 value ``JSON({type, expectedChallenge, userData, context})``, ``expiresAt`` now+300s. Verify:
 unsign cookie → ``consume_verification_value`` (atomic single-use) → ceremony-type gate BEFORE
-calling the webauthn lib (``routes.ts:608``/``:801``).
+calling the webauthn lib (``routes.ts:616``/``:858``, v1.7.6: an exact ``type`` match is
+required in both ceremonies, a missing/legacy ``type`` no longer gets a backward-compat pass).
+
+v1.7.6 addition: ``verify-registration`` accepts ``createSession`` in the body; when true, a
+session is created for the registered user right after the passkey row (TS wraps both in
+one transaction; this port does not, matching the sibling authentication flow's untransacted
+update+create_session pair) and the session cookie is set, with the response widened to
+``{...passkey, session, user}`` (routes.ts ``verifyPasskeyRegistration``).
 
 py_webauthn 3.0 notes (the installed version; newer than the 2.x the parity spec mapped):
 verify functions **raise** ``Invalid{Registration,Authentication}Response`` on failure (there is
@@ -93,6 +100,7 @@ PASSKEY_ERROR_CODES: dict[str, str] = {
     "PASSKEY_NOT_FOUND": "Passkey not found",
     "AUTHENTICATION_FAILED": "Authentication failed",
     "UNABLE_TO_CREATE_SESSION": "Unable to create session",
+    "USER_NOT_FOUND": "User not found",
     "FAILED_TO_UPDATE_PASSKEY": "Failed to update passkey",
     "PREVIOUSLY_REGISTERED": "Previously registered",
     "REGISTRATION_CANCELLED": "Registration cancelled",
@@ -246,10 +254,11 @@ class PasskeyPlugin(Plugin):
         if not data:
             raise APIError(400, "CHALLENGE_NOT_FOUND", PASSKEY_ERROR_CODES["CHALLENGE_NOT_FOUND"])
         value = json.loads(data["value"])
-        # A legacy row (pre-marker) has no `type`; accept it in either verifier. Only reject a
-        # challenge explicitly tagged for the OTHER ceremony — before touching the webauthn lib.
-        stored_type = value.get("type")
-        if stored_type is not None and stored_type != ceremony:
+        # Exact ceremony-type match required (routes.ts:616,:858, v1.7.6): a missing `type`
+        # (a legacy pre-marker row, or a challenge minted for a different flow) is rejected
+        # too, not just a value tagged for the other ceremony, before touching the
+        # webauthn lib.
+        if value.get("type") != ceremony:
             raise APIError(400, "CHALLENGE_NOT_FOUND", PASSKEY_ERROR_CODES["CHALLENGE_NOT_FOUND"])
         return value
 
@@ -463,6 +472,15 @@ class PasskeyPlugin(Plugin):
                     400, "RESOLVED_USER_INVALID", PASSKEY_ERROR_CODES["RESOLVED_USER_INVALID"]
                 )
 
+            # createSession (routes.ts verifyPasskeyRegistration, v1.7.6): resolve the user
+            # up front so a bad request fails before writing the passkey row.
+            create_session_flag = bool(body.get("createSession"))
+            new_session_user: dict[str, Any] | None = None
+            if create_session_flag:
+                new_session_user = await ctx.adapter.find_one("user", [Where("id", target_user_id)])
+                if new_session_user is None:
+                    raise APIError(500, "USER_NOT_FOUND", PASSKEY_ERROR_CODES["USER_NOT_FOUND"])
+
             new_passkey = {
                 "name": resolved_name,
                 "userId": target_user_id,
@@ -475,8 +493,27 @@ class PasskeyPlugin(Plugin):
                 "createdAt": datetime.now(timezone.utc),
                 "aaguid": verification.aaguid,
             }
+            # ponytail: TS wraps the passkey create + session create in one transaction
+            # (runWithTransaction); this file's sibling authentication flow doesn't
+            # transaction-wrap its update+create_session pair either, so this matches the
+            # existing convention. Upgrade both together if that residual is ever measured.
             row = await ctx.adapter.create("passkey", new_passkey)
-            return AuthResponse(body=row)
+            if new_session_user is None:
+                return AuthResponse(body=row)
+
+            session, cookies = await create_session(
+                ctx.auth, target_user_id, ctx.request, user=new_session_user, ctx=ctx
+            )
+            response = AuthResponse(
+                body={
+                    **row,
+                    "session": ctx.auth.parse_session_output(session),
+                    "user": ctx.auth.parse_user_output(new_session_user),
+                }
+            )
+            for cookie in cookies:
+                response.set_cookie(cookie)
+            return response
         except APIError:
             raise
         except InvalidRegistrationResponse:

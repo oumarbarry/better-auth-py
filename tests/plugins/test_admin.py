@@ -603,6 +603,63 @@ async def test_banned_user_message_configurable():
         assert r.json()["message"] == "Custom ban msg"
 
 
+async def test_banned_user_message_callable():
+    """bannedUserMessage may be a function of the banned user (admin.ts:95-127, v1.7.6)."""
+    seen: list[str] = []
+
+    def message_for(user):
+        seen.append(user["email"])
+        return f"{user['email']} is banned"
+
+    auth = admin_auth(banned_user_message=message_for)
+    async with make_client(auth) as admin_client, make_client(auth) as bob_client:
+        await _become_admin(auth, admin_client)
+        await sign_up(bob_client, email="bob@example.com", name="Bob")
+        bob = await auth.adapter.find_one("user", [Where("email", "bob@example.com")])
+        await admin_client.post("/api/auth/admin/ban-user", json={"userId": bob["id"]})
+        r = await bob_client.post(
+            "/api/auth/sign-in/email", json={"email": "bob@example.com", "password": PASSWORD}
+        )
+        assert r.status_code == 403
+        assert r.json()["message"] == "bob@example.com is banned"
+        assert seen == ["bob@example.com"]
+
+
+async def test_banned_user_message_async_callable():
+    async def message_for(user):
+        return f"async: {user['email']}"
+
+    auth = admin_auth(banned_user_message=message_for)
+    async with make_client(auth) as admin_client, make_client(auth) as bob_client:
+        await _become_admin(auth, admin_client)
+        await sign_up(bob_client, email="bob@example.com", name="Bob")
+        bob = await auth.adapter.find_one("user", [Where("email", "bob@example.com")])
+        await admin_client.post("/api/auth/admin/ban-user", json={"userId": bob["id"]})
+        r = await bob_client.post(
+            "/api/auth/sign-in/email", json={"email": "bob@example.com", "password": PASSWORD}
+        )
+        assert r.json()["message"] == "async: bob@example.com"
+
+
+async def test_ban_user_without_duration_clears_previous_expiration():
+    """A permanent re-ban (no banExpiresIn) nulls out a prior temporary ban's expiration
+    instead of leaving it in place (routes.ts banUser, v1.7.6 fix)."""
+    auth = admin_auth()
+    async with make_client(auth) as client:
+        await _become_admin(auth, client)
+        target = await _seed_user(auth, email="bob@x.com")
+        await client.post(
+            "/api/auth/admin/ban-user", json={"userId": target["id"], "banExpiresIn": 3600}
+        )
+        row = await auth.adapter.find_one("user", [Where("id", target["id"])])
+        assert row["banExpires"] is not None
+
+        r = await client.post("/api/auth/admin/ban-user", json={"userId": target["id"]})
+        assert r.status_code == 200
+        row = await auth.adapter.find_one("user", [Where("id", target["id"])])
+        assert row["banExpires"] is None
+
+
 async def test_expired_ban_auto_unbans_on_sign_in():
     auth = admin_auth()
     async with make_client(auth) as admin_client, make_client(auth) as bob_client:
