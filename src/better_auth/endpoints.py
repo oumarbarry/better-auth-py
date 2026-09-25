@@ -477,18 +477,13 @@ async def request_password_reset(ctx: Ctx) -> AuthResponse:
         # constant response — no user enumeration
         return AuthResponse(body={"status": True})
 
-    now = utcnow()
     token = generate_random_string(32)
-    await ctx.adapter.create(
-        "verification",
+    await ctx.internal.create_verification_value(  # password.ts:127
         {
-            "id": generate_id(),
             "identifier": f"reset-password:{token}",
             "value": user["id"],
-            "expiresAt": now + timedelta(seconds=cfg.reset_password_token_expires_in),
-            "createdAt": now,
-            "updatedAt": now,
-        },
+            "expiresAt": utcnow() + timedelta(seconds=cfg.reset_password_token_expires_in),
+        }
     )
     redirect_to = body.get("redirectTo") or "/"
     ctx.auth.ensure_trusted_url(redirect_to)
@@ -525,13 +520,10 @@ async def reset_password(ctx: Ctx) -> AuthResponse:
         raise APIError(400, "INVALID_TOKEN", "Invalid token")
     validate_password(ctx, body["newPassword"])
 
-    row = await ctx.adapter.find_one(
-        "verification", [Where("identifier", f"reset-password:{token}")]
-    )
+    # password.ts:297: single-use consume before any password change; racers and
+    # expired tokens both get None.
+    row = await ctx.internal.consume_verification_value(f"reset-password:{token}")
     if row is None:
-        raise APIError(400, "INVALID_TOKEN", "Invalid token")
-    await ctx.adapter.delete_many("verification", [Where("identifier", f"reset-password:{token}")])
-    if row["expiresAt"] <= utcnow():
         raise APIError(400, "INVALID_TOKEN", "Invalid token")
 
     user_id = row["value"]
@@ -838,11 +830,8 @@ async def _consume_delete_token(ctx: Ctx, user: dict[str, Any], token: str | Non
     Deletes the row before validating (like reset-password) so concurrent callbacks
     with the same token can only succeed once; a wrong-owner token is still burned.
     """
-    identifier = f"delete-account-{token}"
-    row = await ctx.adapter.find_one("verification", [Where("identifier", identifier)])
-    if row is not None:
-        await ctx.adapter.delete_many("verification", [Where("identifier", identifier)])
-    if row is None or row["value"] != user["id"]:
+    row = await ctx.internal.consume_verification_value(f"delete-account-{token}")
+    if row is None or row["value"] != user["id"]:  # update-user.ts:639, expired is None
         raise APIError(404, "INVALID_TOKEN", "Invalid token")
 
 
@@ -881,18 +870,13 @@ async def delete_user(ctx: Ctx) -> AuthResponse:
         return response
 
     if opts.send_delete_account_verification is not None:
-        now = utcnow()
         token = generate_random_string(32)
-        await ctx.adapter.create(
-            "verification",
+        await ctx.internal.create_verification_value(  # update-user.ts:509
             {
-                "id": generate_id(),
                 "identifier": f"delete-account-{token}",
                 "value": user["id"],
-                "expiresAt": now + timedelta(seconds=opts.delete_token_expires_in),
-                "createdAt": now,
-                "updatedAt": now,
-            },
+                "expiresAt": utcnow() + timedelta(seconds=opts.delete_token_expires_in),
+            }
         )
         url = (
             f"{ctx.auth.base_url}{ctx.auth.base_path}/delete-user/callback"

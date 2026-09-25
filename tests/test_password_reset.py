@@ -131,3 +131,30 @@ async def test_reset_url_shape():
         parts = urlsplit(url)
         assert parts.path == f"/api/auth/reset-password/{token}"
         assert parse_qs(parts.query)["callbackURL"] == ["/account/reset"]
+
+
+async def test_reset_token_goes_through_verification_storage():
+    # TS 1.6.29 password.ts:127/297: create/consumeVerificationValue, so the reset token
+    # honors verification.storeIdentifier (the stored identifier is hashed here).
+    from better_auth import Where
+    from better_auth.internal_adapter import VerificationOptions
+
+    sent: list[tuple] = []
+
+    async def send_reset_password(user, url, token):
+        sent.append((user, url, token))
+
+    auth = make_auth(
+        email_and_password=EmailAndPassword(enabled=True, send_reset_password=send_reset_password),
+        verification=VerificationOptions(store_identifier="hashed"),
+    )
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await client.post("/api/auth/request-password-reset", json={"email": SIGNUP["email"]})
+        token = sent[0][2]
+        plain = f"reset-password:{token}"
+        assert await auth.adapter.find_one("verification", [Where("identifier", plain)]) is None
+        response = await client.post(
+            "/api/auth/reset-password", json={"newPassword": "brand-new-password", "token": token}
+        )
+        assert response.status_code == 200, response.text

@@ -311,6 +311,27 @@ async def test_delete_user_callback_rejects_foreign_token():
         assert response.json()["code"] == "INVALID_TOKEN"
 
 
+async def test_delete_user_callback_rejects_expired_token():
+    # TS 1.6.29 update-user.ts:639 consumeVerificationValue returns null past expiresAt.
+    sent: list[tuple] = []
+
+    async def send_delete(user, url, token):
+        sent.append((user, url, token))
+
+    auth, events = delete_user_auth(send_delete_account_verification=send_delete)
+    async with make_client(auth) as client:
+        data = await sign_up(client)
+        await client.post("/api/auth/delete-user", json={})
+        await auth.adapter.update_many(
+            "verification", [], {"expiresAt": utcnow() - timedelta(seconds=1)}
+        )
+        response = await client.get(f"/api/auth/delete-user/callback?token={sent[0][2]}")
+        assert response.status_code == 404
+        assert response.json()["code"] == "INVALID_TOKEN"
+        assert await auth.adapter.find_one("user", [Where("id", data["user"]["id"])]) is not None
+        assert events == []
+
+
 # --- /account-info --------------------------------------------------------------------
 
 
