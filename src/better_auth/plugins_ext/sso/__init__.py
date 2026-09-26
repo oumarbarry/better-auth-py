@@ -1,10 +1,8 @@
-"""sso plugin — OIDC federation half of ``@better-auth/sso`` (Waves A+B).
+"""sso plugin: OIDC federation half of ``@better-auth/sso`` (better-auth v1.7.6).
 
-Client/relying-party SSO: register an external OIDC IdP (per-domain/per-org),
-provider CRUD, and the SSRF-guarded discovery pipeline. Sign-in/callback (Wave C)
-and domain verification endpoints / org auto-assignment (Wave D) land in later
-dispatches — the ``domainVerified`` column + register-time token seeding are wired
-here so the DB shape is stable, but the verify endpoints and login flow are not.
+Client/relying-party SSO: register an external OIDC IdP (per-domain/per-org), provider
+CRUD, the SSRF-guarded discovery pipeline, sign-in and callback (with the optional
+transactional ``resolveUser``), domain verification and organization assignment.
 
 SAML is excluded (see the spec's "Excluded — SAML" boundary): the ``samlConfig``
 column is retained (nullable, unused) for cross-runtime DB compat only; a
@@ -23,14 +21,28 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ...plugins import HookSet, Plugin, PluginHook, Route
-from ...schema import Field, Reference, Schema
-from ...types import AuthResponse, Ctx
+from ...schema import Field, Reference, Schema, parse_input_data
+from ...types import APIError, AuthResponse, Ctx
 from . import domain_verification as _domain
 from . import org_assignment as _org
 from . import providers as _providers
 from . import routes as _routes
 
 DEFAULT_TOKEN_PREFIX = "better-auth-token"
+
+#: TS v1.7.6 index.ts:168-190: keys an additional field may not reuse
+BUILT_IN_FIELD_KEYS = (
+    "id",
+    "issuer",
+    "oidcConfig",
+    "samlConfig",
+    "userId",
+    "providerId",
+    "organizationId",
+    "domain",
+    "domainVerified",
+)
+RESPONSE_FIELD_KEYS = ("type", "spMetadataUrl", "redirectURI", "domainVerificationToken")
 
 
 def has_plugin(auth: Any, plugin_id: str) -> bool:
@@ -58,12 +70,32 @@ class SSOPlugin(Plugin):
         disable_implicit_sign_up: bool = False,
         resolve_host: Any = None,
         dns_resolver: Any = None,
+        resolve_user: Callable[[dict[str, Any], dict[str, Any]], Any] | None = None,
+        guard_provider_mutation: Callable[[dict[str, Any], dict[str, Any]], Any] | None = None,
+        resolve_private_key: Callable[[dict[str, Any]], Any] | None = None,
+        schema: dict[str, Any] | None = None,
+        legacy_mapping_id: bool = False,
     ) -> None:
         self.providers_limit = providers_limit
         self.default_override_user_info = default_override_user_info
         self.default_sso = list(default_sso or [])
         self.redirect_uri = redirect_uri
-        self.model_name = model_name or "ssoProvider"
+        provider_schema = (schema or {}).get("ssoProvider") or {}
+        self.model_name = model_name or provider_schema.get("modelName") or "ssoProvider"
+        #: ``schema.ssoProvider.additionalFields`` (TS v1.7.6 48070ada8)
+        self.additional_fields: dict[str, Field] = dict(
+            provider_schema.get("additionalFields") or {}
+        )
+        #: ``resolveUser(input, {"database"})`` -> ``{"action": "continue" | "link" |
+        #: "reject", ...}``, run inside the account-link transaction (TS v1.7.6 ed61b4798)
+        self.resolve_user = resolve_user
+        #: ``guardProviderMutation(input, {"database"})``; raise to refuse (59c4c832f)
+        self.guard_provider_mutation = guard_provider_mutation
+        #: ``resolvePrivateKey({"providerId", "keyId", "issuer"})`` for private_key_jwt
+        self.resolve_private_key = resolve_private_key
+        #: read the account id from ``oidcConfig.mapping.id`` as before 1.7 (TS now always
+        #: uses ``sub``). Only for providers whose accounts were linked under a custom id.
+        self.legacy_mapping_id = legacy_mapping_id
         self.provision_user = provision_user
         self.provision_user_on_every_login = provision_user_on_every_login
         self.organization_provisioning = organization_provisioning
@@ -78,7 +110,35 @@ class SSOPlugin(Plugin):
         self.domain_verification_enabled = bool(dv.get("enabled"))
         self.token_prefix = dv.get("tokenPrefix") or DEFAULT_TOKEN_PREFIX
 
-        self.schema: Schema = {self.model_name: self._build_fields(fields or {})}
+        field_names = {**(provider_schema.get("fields") or {}), **(fields or {})}
+        self._assert_no_additional_field_collisions(field_names)
+        self.schema: Schema = {self.model_name: self._build_fields(field_names)}
+
+    def _assert_no_additional_field_collisions(self, field_names: dict[str, str]) -> None:
+        """TS v1.7.6 index.ts:210-238 ``assertNoAdditionalFieldCollisions``."""
+        built_in_names = {field_names.get(key, key) for key in BUILT_IN_FIELD_KEYS}
+        for key, spec in self.additional_fields.items():
+            if key in BUILT_IN_FIELD_KEYS:
+                raise ValueError(
+                    f'ssoProvider additional field "{key}" conflicts with a built-in field'
+                )
+            if key in RESPONSE_FIELD_KEYS:
+                raise ValueError(
+                    f'ssoProvider additional field "{key}" conflicts with a returned provider field'
+                )
+            name = spec.field_name or key
+            if name in built_in_names:
+                raise ValueError(
+                    f'ssoProvider additional field "{key}" maps to built-in field "{name}"'
+                )
+
+    def parse_additional_fields(self, data: dict[str, Any], action: str) -> dict[str, Any]:
+        """TS v1.7.6 schemas.ts:44-67: an ``input: false`` key is refused when present at
+        all, then the usual input allowlist applies."""
+        for key, spec in self.additional_fields.items():
+            if spec.input is False and key in data:
+                raise APIError(400, "BAD_REQUEST", f"{key} is not allowed to be set")
+        return parse_input_data(data, self.additional_fields, action)
 
     # --- schema -----------------------------------------------------------------------
 
@@ -87,6 +147,8 @@ class SSOPlugin(Plugin):
             return overrides.get(key, key)
 
         provider_fields: dict[str, Field] = {
+            # the row id every model carries (without it the SQL table had no primary key)
+            "id": Field("string", required=True, unique=True),
             "issuer": Field("string", required=True, field_name=name("issuer")),
             "oidcConfig": Field("string", field_name=name("oidcConfig")),
             # kept nullable + unused for cross-runtime DB compat (SAML excluded)
@@ -101,7 +163,10 @@ class SSOPlugin(Plugin):
             "domain": Field("string", required=True, field_name=name("domain")),
         }
         if self.domain_verification_enabled:
-            provider_fields["domainVerified"] = Field("boolean")
+            provider_fields["domainVerified"] = Field(
+                "boolean", field_name=overrides.get("domainVerified")
+            )
+        provider_fields.update(self.additional_fields)
         return provider_fields
 
     # --- helpers used by the route handlers -------------------------------------------

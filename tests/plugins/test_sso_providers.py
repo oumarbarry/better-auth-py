@@ -460,3 +460,204 @@ async def test_org_provider_access_requires_admin() -> None:
         await make_member(auth, other_id, "org-1", "member")
         res = await other.get("/api/auth/sso/get-provider?providerId=test")
     assert res.status_code == 403
+
+
+# --- better-auth v1.7.6: private_key_jwt, mutation guard, lock, additional fields -------
+
+
+async def test_register_private_key_jwt_needs_a_key_source() -> None:
+    # TS v1.7.6 sso.ts:684-700
+    config = {**oidc_body()["oidcConfig"], "tokenEndpointAuthentication": "private_key_jwt"}
+    del config["clientSecret"]
+    auth = make_auth(plugins=[SSOPlugin()])
+    async with make_client(auth) as client:
+        await sign_up(client)
+        res = await register(client, oidcConfig=config)
+    assert res.status_code == 400
+    assert res.json()["message"] == (
+        "private_key_jwt authentication requires either a resolvePrivateKey callback or a "
+        "privateKey in defaultSSO"
+    )
+
+
+async def test_register_private_key_jwt_stores_key_reference() -> None:
+    config = {
+        **oidc_body()["oidcConfig"],
+        "tokenEndpointAuthentication": "private_key_jwt",
+        "privateKeyId": "kid-1",
+        "privateKeyAlgorithm": "ES256",
+    }
+    del config["clientSecret"]
+    auth = make_auth(plugins=[SSOPlugin(resolve_private_key=lambda _p: {})])
+    async with make_client(auth) as client:
+        await sign_up(client)
+        res = await register(client, oidcConfig=config)
+    assert res.status_code == 200, res.text
+    row = await auth.adapter.find_one("ssoProvider", [Where("providerId", "test")])
+    assert row is not None
+    assert '"privateKeyId":"kid-1","privateKeyAlgorithm":"ES256"' in row["oidcConfig"]
+    assert "clientSecret" not in row["oidcConfig"]
+
+
+async def test_register_client_secret_required_for_secret_methods() -> None:
+    config = dict(oidc_body()["oidcConfig"])
+    del config["clientSecret"]
+    auth = make_auth(plugins=[SSOPlugin()])
+    async with make_client(auth) as client:
+        await sign_up(client)
+        res = await register(client, oidcConfig=config)
+    assert res.status_code == 400
+    assert res.json()["message"] == (
+        "clientSecret is required when using client_secret_basic or client_secret_post "
+        "authentication"
+    )
+
+
+async def test_update_mapping_is_not_an_identity_boundary() -> None:
+    # TS v1.7.6 providers.ts:79-86: mapping left the boundary with mapping.id
+    auth = make_auth(plugins=[SSOPlugin()])
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await register(client)
+        uid = await user_id(auth)
+        await auth.adapter.create(
+            "account", {"accountId": "acc-1", "providerId": "test", "userId": uid}
+        )
+        res = await client.post(
+            "/api/auth/sso/update-provider",
+            json={
+                "providerId": "test",
+                "oidcConfig": {"mapping": {"email": "mail", "name": "name"}},
+            },
+        )
+    assert res.status_code == 200, res.text
+
+
+async def test_guard_provider_mutation_sees_the_boundary_and_can_refuse() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def guard(data: dict[str, Any], context: dict[str, Any]) -> None:
+        seen.append(data)
+        assert context["database"] is not None
+        if data["action"] == "delete":
+            raise RuntimeError("keep it")
+
+    auth = make_auth(plugins=[SSOPlugin(guard_provider_mutation=guard)])
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await register(client)
+        updated = await client.post(
+            "/api/auth/sso/update-provider",
+            json={"providerId": "test", "oidcConfig": {"clientId": "changed-id"}},
+        )
+        refused = await client.post("/api/auth/sso/delete-provider", json={"providerId": "test"})
+    assert updated.status_code == 200
+    assert seen[0]["action"] == "update"
+    assert seen[0]["isAuthenticationBoundaryChange"] is True
+    assert seen[0]["provider"]["providerId"] == "test"
+    assert seen[0]["providerReference"]["source"]["type"] == "persisted"
+    # TS v1.7.6 providers.ts:292-302
+    assert refused.status_code == 409
+    assert refused.json() == {
+        "code": "SSO_PROVIDER_MUTATION_REJECTED",
+        "message": "SSO provider mutation is not allowed",
+    }
+    assert await auth.adapter.find_one("ssoProvider", [Where("providerId", "test")]) is not None
+
+
+async def test_account_link_lock_refuses_a_changed_provider() -> None:
+    from better_auth.plugins_ext.sso.providers import lock_sso_provider_for_account_link
+    from better_auth.types import APIError
+
+    plugin = SSOPlugin()
+    auth = make_auth(plugins=[plugin])
+    async with make_client(auth) as client:
+        await sign_up(client)
+        await register(client)
+    row = await auth.adapter.find_one("ssoProvider", [Where("providerId", "test")])
+    assert row is not None
+    import json
+
+    snapshot = {**row, "oidcConfig": json.loads(row["oidcConfig"])}
+    await lock_sso_provider_for_account_link(plugin, auth.adapter, snapshot)  # unchanged: ok
+    stale = {**snapshot, "oidcConfig": {**snapshot["oidcConfig"], "tokenEndpoint": "https://x/t"}}
+    for candidate in (stale, {**snapshot, "id": "gone"}):
+        try:
+            await lock_sso_provider_for_account_link(plugin, auth.adapter, candidate)
+        except APIError as error:
+            assert (error.status, error.code) == (409, "SSO_PROVIDER_CHANGED")
+        else:
+            raise AssertionError("expected SSO_PROVIDER_CHANGED")
+
+
+async def test_additional_fields_round_trip() -> None:
+    from better_auth.schema import Field
+
+    plugin = SSOPlugin(
+        schema={
+            "ssoProvider": {
+                "additionalFields": {
+                    "tenant": Field("string"),
+                    "secretNote": Field("string", returned=False),
+                    "locked": Field("boolean", input=False),
+                }
+            }
+        }
+    )
+    auth = make_auth(plugins=[plugin])
+    async with make_client(auth) as client:
+        await sign_up(client)
+        created = await register(client, tenant="acme", secretNote="hidden")
+        blocked = await register(client, providerId="other", locked=False)
+        updated = await client.post(
+            "/api/auth/sso/update-provider", json={"providerId": "test", "tenant": "globex"}
+        )
+        listed = await client.get("/api/auth/sso/providers")
+    assert created.status_code == 200, created.text
+    assert created.json()["tenant"] == "acme" and "secretNote" not in created.json()
+    # TS v1.7.6 schemas.ts:44-55
+    assert blocked.status_code == 400
+    assert blocked.json()["message"] == "locked is not allowed to be set"
+    assert updated.status_code == 200 and updated.json()["tenant"] == "globex"
+    (provider,) = listed.json()["providers"]
+    assert provider["tenant"] == "globex" and "secretNote" not in provider
+    row = await auth.adapter.find_one("ssoProvider", [Where("providerId", "test")])
+    assert row is not None and row["secretNote"] == "hidden"
+
+
+def test_additional_field_collision_is_refused() -> None:
+    import pytest
+
+    from better_auth.schema import Field
+
+    with pytest.raises(ValueError, match="conflicts with a built-in field"):
+        SSOPlugin(schema={"ssoProvider": {"additionalFields": {"domain": Field("string")}}})
+    with pytest.raises(ValueError, match="conflicts with a returned provider field"):
+        SSOPlugin(schema={"ssoProvider": {"additionalFields": {"type": Field("string")}}})
+
+
+async def test_update_and_delete_run_in_a_sqlalchemy_transaction() -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import StaticPool
+
+    from better_auth.adapters.sqlalchemy import SQLAlchemyAdapter
+
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    adapter = SQLAlchemyAdapter(engine)
+    auth = make_auth(adapter=adapter, plugins=[SSOPlugin()])
+    await adapter.create_tables()
+    try:
+        async with make_client(auth) as client:
+            await sign_up(client)
+            assert (await register(client)).status_code == 200
+            updated = await client.post(
+                "/api/auth/sso/update-provider", json={"providerId": "test", "domain": "b.com"}
+            )
+            deleted = await client.post(
+                "/api/auth/sso/delete-provider", json={"providerId": "test"}
+            )
+        assert updated.status_code == 200 and updated.json()["domain"] == "b.com"
+        assert deleted.json() == {"success": True}
+        assert await auth.adapter.find_many("ssoProvider") == []
+    finally:
+        await engine.dispose()

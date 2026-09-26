@@ -142,30 +142,35 @@ async def seed_state(
     *,
     callback_url: str = "/dash",
     error_url: str | None = None,
-    additional: dict[str, Any] | None = None,
+    provider_id: str = "corp",
+    **body: Any,
 ) -> str:
-    """Write a state row directly (bypassing sign-in) and return the state token."""
+    """Start the flow through POST /sign-in/sso and return the state it minted."""
+    payload: dict[str, Any] = {"providerId": provider_id, "callbackURL": callback_url, **body}
+    if error_url:
+        payload["errorCallbackURL"] = error_url
+    async with make_client(auth) as client:
+        res = await client.post("/api/auth/sign-in/sso", json=payload)
+    assert res.status_code == 200, res.text
+    return parse_qs(urlsplit(res.json()["url"]).query)["state"][0]
+
+
+async def raw_state(auth: BetterAuth, **extra: Any) -> str:
+    """Write a state value directly (no provider reference unless given)."""
     state = generate_id()
     now = utcnow()
     payload: dict[str, Any] = {
-        "callbackURL": callback_url,
+        "callbackURL": "/dash",
         "codeVerifier": "cv-1",
-        "errorURL": error_url,
-        "newUserURL": None,
         "expiresAt": int(now.timestamp() * 1000) + 600_000,
+        **extra,
     }
-    if additional:
-        payload["additionalData"] = additional
-    await auth.adapter.create(
-        "verification",
+    await auth.internal.create_verification_value(
         {
-            "id": generate_id(),
             "identifier": state,
             "value": json.dumps(payload),
             "expiresAt": now + timedelta(seconds=600),
-            "createdAt": now,
-            "updatedAt": now,
-        },
+        }
     )
     return state
 
@@ -216,11 +221,17 @@ async def test_callback_id_token_registers_new_user() -> None:
 
 async def test_callback_userinfo_mapping_applied() -> None:
     jwks, _sign = _rsa_jwks_and_signer()
+    # TS v1.7.6 sso.ts:1552: the account id is always the `sub` claim (mapping.id is gone).
     cfg = oidc_config(
         userInfoEndpoint=f"{IDP}/userinfo",
-        mapping={"id": "user_id", "email": "mail", "name": "full_name"},
+        mapping={"email": "mail", "name": "full_name"},
     )
-    userinfo = {"user_id": "uid-9", "mail": "u9@corp.example", "full_name": "Nine"}
+    userinfo = {
+        "sub": "uid-9",
+        "user_id": "not-used",
+        "mail": "u9@corp.example",
+        "full_name": "Nine",
+    }
     auth = make_auth(
         plugins=[SSOPlugin()],
         trusted_origins=[IDP],
@@ -309,7 +320,8 @@ async def test_untrusted_provider_does_not_inherit_name_trust() -> None:
         res = await callback(client, auth, state=state)
     assert res.status_code in (302, 307)
     query = parse_qs(urlsplit(res.headers["location"]).query)
-    assert query["error"] == ["account_not_linked"]
+    # TS v1.7.6 sso.ts:1768: the resolution error string is sent as is
+    assert query["error"] == ["account not linked"]
     assert await auth.adapter.find_one("account", [Where("providerId", "corp")]) is None
 
 
@@ -349,7 +361,7 @@ async def test_shared_callback_reads_provider_id_from_state() -> None:
     )
     async with make_client(auth) as client:
         await seed_provider(auth)
-        state = await seed_state(auth, additional={"ssoProviderId": "corp"})
+        state = await seed_state(auth)
         res = await callback(client, auth, provider_id=None, state=state)
     assert res.status_code in (302, 307), res.text
     assert res.headers["location"] == "http://testserver/dash"
@@ -358,18 +370,23 @@ async def test_shared_callback_reads_provider_id_from_state() -> None:
 async def test_shared_callback_missing_provider_id_rejected() -> None:
     auth = make_auth(plugins=[SSOPlugin(redirect_uri="/sso/callback")], trusted_origins=[IDP])
     async with make_client(auth) as client:
-        state = await seed_state(auth)  # no ssoProviderId
+        state = await raw_state(auth)  # no provider reference
         res = await callback(client, auth, provider_id=None, state=state)
     assert res.status_code in (302, 307)
     query = parse_qs(urlsplit(res.headers["location"]).query)
     assert query["error"] == ["invalid_state"]
-    assert query["error_description"] == ["missing_provider_id"]
+    assert query["error_description"] == ["missing_sso_provider_reference"]
 
 
 async def test_shared_callback_forged_provider_id_not_found() -> None:
     auth = make_auth(plugins=[SSOPlugin(redirect_uri="/sso/callback")], trusted_origins=[IDP])
     async with make_client(auth) as client:
-        state = await seed_state(auth, additional={"ssoProviderId": "ghost"})
+        forged = {
+            "providerId": "ghost",
+            "source": {"type": "configured"},
+            "authenticationConfigurationFingerprint": "x",
+        }
+        state = await raw_state(auth, serverContext={"ssoProviderReference": forged})
         res = await callback(client, auth, provider_id=None, state=state)
     assert res.status_code in (302, 307)
     query = parse_qs(urlsplit(res.headers["location"]).query)
@@ -379,7 +396,8 @@ async def test_shared_callback_forged_provider_id_not_found() -> None:
 # --- error-redirect shapes -----------------------------------------------------------
 
 
-async def test_callback_no_state_row_redirects_invalid_state() -> None:
+async def test_callback_no_state_row_redirects_state_mismatch() -> None:
+    # TS v1.7.6 sso.ts:1314 parseState -> state.ts:223-229
     auth = make_auth(plugins=[SSOPlugin()])
     async with make_client(auth) as client:
         res = await client.get(
@@ -387,7 +405,7 @@ async def test_callback_no_state_row_redirects_invalid_state() -> None:
         )
     assert res.status_code in (302, 307)
     loc = res.headers["location"]
-    assert "error=invalid_state" in loc
+    assert "error=state_mismatch" in loc
     assert loc.startswith("http://testserver/api/auth/error")
 
 
@@ -416,8 +434,9 @@ async def test_callback_token_exchange_failure_redirects() -> None:
         res = await callback(client, auth, state=state)
     assert res.status_code in (302, 307)
     query = parse_qs(urlsplit(res.headers["location"]).query)
+    # TS v1.7.6 sso.ts:1275-1298 getOIDCErrorDescription falls back to the status text
     assert query["error"] == ["invalid_provider"]
-    assert query["error_description"] == ["token_response_not_found"]
+    assert query["error_description"] == ["Bad Request"]
 
 
 async def test_callback_state_cookie_mismatch_redirects() -> None:
@@ -436,3 +455,393 @@ async def test_callback_state_cookie_mismatch_redirects() -> None:
         )
     assert res.status_code in (302, 307)
     assert "error=state_mismatch" in res.headers["location"]
+
+
+# --- better-auth v1.7.6: sign-in state, provider fence, resolveUser --------------------
+
+
+def _query(res: httpx.Response) -> dict[str, list[str]]:
+    assert res.status_code in (302, 307), res.text
+    return parse_qs(urlsplit(res.headers["location"]).query)
+
+
+async def _state_value(auth: BetterAuth, state: str) -> dict[str, Any]:
+    row = await auth.internal.find_verification_value(state)
+    assert row is not None
+    return json.loads(row["value"])
+
+
+async def test_sign_in_state_carries_the_provider_reference() -> None:
+    # TS v1.7.6 sso.ts:1141-1144: the reference rides serverContext; requestSignUp is a
+    # top-level state key.
+    from better_auth.plugins_ext.sso.provider_reference import compute_sso_provider_reference
+
+    auth = make_auth(plugins=[SSOPlugin()], trusted_origins=[IDP])
+    await seed_provider(auth)
+    state = await seed_state(auth, requestSignUp=True)
+    value = await _state_value(auth, state)
+    row = await auth.adapter.find_one("ssoProvider", [Where("providerId", "corp")])
+    assert row is not None
+    parsed = {**row, "oidcConfig": json.loads(row["oidcConfig"])}
+    assert value["serverContext"] == {
+        "ssoProviderReference": compute_sso_provider_reference(parsed)
+    }
+    assert value["requestSignUp"] is True
+    assert "additionalData" not in value
+
+
+async def test_sign_in_forwards_additional_params() -> None:
+    auth = make_auth(plugins=[SSOPlugin()], trusted_origins=[IDP])
+    await seed_provider(auth)
+    async with make_client(auth) as client:
+        ok = await client.post(
+            "/api/auth/sign-in/sso",
+            json={"providerId": "corp", "callbackURL": "/", "additionalParams": {"acr": "mfa"}},
+        )
+        reserved = await client.post(
+            "/api/auth/sign-in/sso",
+            json={"providerId": "corp", "callbackURL": "/", "additionalParams": {"state": "x"}},
+        )
+    assert parse_qs(urlsplit(ok.json()["url"]).query)["acr"] == ["mfa"]
+    assert reserved.status_code == 400
+
+
+async def test_provider_edited_after_sign_in_is_refused() -> None:
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin()],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, sign(id_token_claims())),
+    )
+    await seed_provider(auth)
+    state = await seed_state(auth)
+    await auth.adapter.update(
+        "ssoProvider",
+        [Where("providerId", "corp")],
+        {"oidcConfig": json.dumps(oidc_config(clientId="client-2"))},
+    )
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query["error"] == ["invalid_state"]
+    assert query["error_description"] == ["sso_provider_changed_during_authentication"]
+
+
+async def test_provider_edited_during_the_exchange_is_refused_under_lock() -> None:
+    # TS v1.7.6 sso.ts:1670-1690 + providers.ts:334-359: the row is locked inside the
+    # account-link transaction and its identity boundary re-checked.
+    jwks, sign = _rsa_jwks_and_signer()
+    token = sign(id_token_claims())
+    holder: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            store = holder["auth"].adapter._store["ssoProvider"]
+            store[0]["oidcConfig"] = json.dumps(oidc_config(tokenEndpoint=f"{IDP}/token2"))
+            return httpx.Response(200, json={"access_token": "at", "id_token": token})
+        return httpx.Response(200, json=jwks)
+
+    auth = make_auth(
+        plugins=[SSOPlugin()],
+        trusted_origins=[IDP],
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    holder["auth"] = auth
+    await seed_provider(auth)
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query["error"] == ["SSO_PROVIDER_CHANGED"]
+    assert query["error_description"] == [
+        "SSO provider changed while account linking was in progress"
+    ]
+    assert await auth.adapter.find_one("user", [Where("email", "worker@corp.example")]) is None
+
+
+async def test_userinfo_subject_must_match_the_id_token() -> None:
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin()],
+        trusted_origins=[IDP],
+        http_client=idp_http(
+            jwks, sign(id_token_claims()), userinfo={"sub": "someone-else", "email": "x@y.z"}
+        ),
+    )
+    await seed_provider(auth, config=oidc_config(userInfoEndpoint=f"{IDP}/userinfo"))
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query["error_description"] == ["id_token_userinfo_subject_mismatch"]
+
+
+async def test_id_token_without_subject_is_refused() -> None:
+    jwks, sign = _rsa_jwks_and_signer()
+    claims = id_token_claims()
+    del claims["sub"]
+    auth = make_auth(
+        plugins=[SSOPlugin()], trusted_origins=[IDP], http_client=idp_http(jwks, sign(claims))
+    )
+    await seed_provider(auth)
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query["error_description"] == ["id_token_subject_missing"]
+
+
+async def test_validate_user_info_sees_the_sso_source() -> None:
+    from better_auth.config import UserOptions
+
+    calls: list[dict[str, Any]] = []
+
+    async def validate(data: dict[str, Any], _ctx: Any) -> None:
+        calls.append(data)
+
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin()],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, sign(id_token_claims())),
+        user=UserOptions(validate_user_info=validate),
+    )
+    await seed_provider(auth)
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        await callback(client, auth, state=state)
+    source = calls[0]["source"]
+    assert source["method"] == "sso-oidc"
+    assert source["sso"]["providerId"] == "corp"
+    assert source["sso"]["profile"]["sub"] == "sso-sub-1"
+
+
+async def test_resolve_user_links_the_selected_user() -> None:
+    inputs: list[dict[str, Any]] = []
+
+    async def resolve(data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        inputs.append(data)
+        user = await context["database"].find_one("user", [Where("email", "boss@corp.example")])
+        return {"action": "link", "userId": user["id"], "profile": "preserve"}
+
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin(resolve_user=resolve)],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, sign(id_token_claims())),
+    )
+    target = await _seed_local_user(auth, email="boss@corp.example", email_verified=False)
+    await seed_provider(auth)
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        res = await callback(client, auth, state=state)
+    assert res.headers["location"] == "http://testserver/dash"
+    account = await auth.adapter.find_one("account", [Where("providerId", "corp")])
+    assert account is not None and account["userId"] == target
+    (data,) = inputs
+    assert data["protocol"] == "oidc"
+    assert data["accountKey"] == {"issuer": IDP, "accountId": "sso-sub-1"}
+    assert data["providerUser"]["email"] == "worker@corp.example"
+    assert data["verifiedIdTokenClaims"]["sub"] == "sso-sub-1"
+    assert data["providerReference"]["providerId"] == "corp"
+
+
+async def test_resolve_user_reject_redirects_with_its_code() -> None:
+    def resolve(_data: dict[str, Any], _context: dict[str, Any]) -> dict[str, Any]:
+        return {"action": "reject", "code": "tenant_closed", "message": "Closed"}
+
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin(resolve_user=resolve)],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, sign(id_token_claims())),
+    )
+    await seed_provider(auth)
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query == {"error": ["tenant_closed"], "error_description": ["Closed"]}
+    assert await auth.adapter.find_one("user", [Where("email", "worker@corp.example")]) is None
+
+
+async def test_resolve_user_invalid_decision_fails_closed() -> None:
+    def resolve(_data: dict[str, Any], _context: dict[str, Any]) -> dict[str, Any]:
+        return {"action": "link"}
+
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin(resolve_user=resolve)],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, sign(id_token_claims())),
+    )
+    await seed_provider(auth)
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query == {
+        "error": ["SSO_USER_RESOLUTION_FAILED"],
+        "error_description": ["Unable to resolve the SSO user"],
+    }
+
+
+async def test_resolve_user_requires_a_verified_id_token() -> None:
+    jwks, _sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin(resolve_user=lambda _d, _c: {"action": "continue"})],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, userinfo={"sub": "u", "email": "u@corp.example"}),
+    )
+    await seed_provider(auth, config=oidc_config(userInfoEndpoint=f"{IDP}/userinfo"))
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query["error_description"] == ["id_token_required_for_user_resolution"]
+
+
+async def test_resolve_user_refuses_secondary_storage_sessions() -> None:
+    from better_auth.secondary_storage import MemorySecondaryStorage
+
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin(resolve_user=lambda _d, _c: {"action": "continue"})],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, sign(id_token_claims())),
+        secondary_storage=MemorySecondaryStorage(),
+    )
+    await seed_provider(auth)
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query["error"] == ["SSO_USER_RESOLUTION_REQUIRES_DATABASE_SESSIONS"]
+
+
+async def test_private_key_jwt_token_exchange() -> None:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    from cryptography.hazmat.primitives import serialization
+
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    jwks, sign = _rsa_jwks_and_signer()
+    token = sign(id_token_claims())
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            seen["body"] = parse_qs(request.content.decode())
+            seen["auth"] = request.headers.get("authorization")
+            return httpx.Response(200, json={"access_token": "at", "id_token": token})
+        return httpx.Response(200, json=jwks)
+
+    async def resolve_key(params: dict[str, Any]) -> dict[str, Any]:
+        seen["params"] = params
+        return {"privateKeyPem": pem, "kid": "k1"}
+
+    auth = make_auth(
+        plugins=[SSOPlugin(resolve_private_key=resolve_key)],
+        trusted_origins=[IDP],
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await seed_provider(
+        auth, config=oidc_config(tokenEndpointAuthentication="private_key_jwt", privateKeyId="k1")
+    )
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        res = await callback(client, auth, state=state)
+    assert res.headers["location"] == "http://testserver/dash"
+    assert seen["params"] == {"providerId": "corp", "keyId": "k1", "issuer": IDP}
+    assert seen["auth"] is None and "client_secret" not in seen["body"]
+    assert seen["body"]["client_assertion_type"] == [
+        "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+    ]
+    assertion = jwt.decode(seen["body"]["client_assertion"][0], options={"verify_signature": False})
+    assert assertion["iss"] == "client-1" and assertion["aud"] == f"{IDP}/token"
+
+
+async def test_private_key_jwt_without_a_key_source() -> None:
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        plugins=[SSOPlugin()],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, sign(id_token_claims())),
+    )
+    await seed_provider(auth, config=oidc_config(tokenEndpointAuthentication="private_key_jwt"))
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        query = _query(await callback(client, auth, state=state))
+    assert query["error_description"] == ["no_private_key_available"]
+
+
+async def test_idp_initiated_callback_restarts_the_flow() -> None:
+    # TS v1.7.6 sso.ts:1903-1972 (03e6c94e9)
+    auth = make_auth(plugins=[SSOPlugin()], trusted_origins=[IDP])
+    await seed_provider(auth, config=oidc_config(allowIdpInitiated=True))
+    async with make_client(auth) as client:
+        res = await client.get("/api/auth/sso/callback/corp?code=x", follow_redirects=False)
+    assert res.status_code in (302, 307)
+    target = urlsplit(res.headers["location"])
+    assert f"{target.scheme}://{target.netloc}{target.path}" == f"{IDP}/authorize"
+    state = parse_qs(target.query)["state"][0]
+    value = await _state_value(auth, state)
+    assert value["serverContext"]["ssoProviderReference"]["providerId"] == "corp"
+
+
+async def test_callback_without_state_or_opt_in_is_state_not_found() -> None:
+    auth = make_auth(plugins=[SSOPlugin()], trusted_origins=[IDP])
+    await seed_provider(auth)
+    async with make_client(auth) as client:
+        res = await client.get("/api/auth/sso/callback/corp?code=x", follow_redirects=False)
+    assert res.headers["location"] == "http://testserver/api/auth/error?error=state_not_found"
+
+
+async def test_legacy_mapping_id_keeps_pre_17_account_ids() -> None:
+    jwks, _sign = _rsa_jwks_and_signer()
+    userinfo = {"sub": "s-1", "user_id": "legacy-7", "email": "l@corp.example"}
+    auth = make_auth(
+        plugins=[SSOPlugin(legacy_mapping_id=True)],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, userinfo=userinfo),
+    )
+    cfg = oidc_config(
+        userInfoEndpoint=f"{IDP}/userinfo",
+        mapping={"id": "user_id", "email": "email", "name": "name"},
+    )
+    await seed_provider(auth, config=cfg)
+    state = await seed_state(auth)
+    async with make_client(auth) as client:
+        await callback(client, auth, state=state)
+    account = await auth.adapter.find_one("account", [Where("providerId", "corp")])
+    assert account is not None and account["accountId"] == "legacy-7"
+
+
+async def test_resolve_user_rolls_back_on_sqlalchemy() -> None:
+    # TS v1.7.6 sso.ts:1668-1778: resolution, account binding and session share one
+    # transaction; a hook that moves the binding undoes the whole sign-up.
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import StaticPool
+
+    from better_auth.adapters.sqlalchemy import SQLAlchemyAdapter
+
+    async def rebind(_data: dict[str, Any], _ctx: Any) -> dict[str, Any]:
+        return {"data": {"accountId": "moved"}}
+
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    adapter = SQLAlchemyAdapter(engine)
+    jwks, sign = _rsa_jwks_and_signer()
+    auth = make_auth(
+        adapter=adapter,
+        plugins=[SSOPlugin(resolve_user=lambda _d, _c: {"action": "continue"})],
+        trusted_origins=[IDP],
+        http_client=idp_http(jwks, sign(id_token_claims())),
+        database_hooks={"account": {"create": {"before": rebind}}},
+    )
+    await adapter.create_tables()
+    try:
+        await seed_provider(auth)
+        state = await seed_state(auth)
+        async with make_client(auth) as client:
+            query = _query(await callback(client, auth, state=state))
+        assert query["error"] == ["account_hook_binding_conflict"]
+        assert await auth.adapter.find_many("user") == []
+        assert await auth.adapter.find_many("account") == []
+        assert await auth.adapter.find_many("session") == []
+    finally:
+        await engine.dispose()

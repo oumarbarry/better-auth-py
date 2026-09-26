@@ -231,7 +231,8 @@ async def test_signin_shared_callback_state_carries_provider_id() -> None:
     row = await auth.adapter.find_one("verification", [Where("identifier", state)])
     assert row is not None
     data = json.loads(row["value"])
-    assert data["additionalData"]["ssoProviderId"] == "p"
+    # TS v1.7.6 sso.ts:1141-1144: the provider rides serverContext, not additionalData
+    assert data["serverContext"]["ssoProviderReference"]["providerId"] == "p"
     # shared redirect_uri is used for the callback target
     assert parse_qs(urlsplit(url).query)["redirect_uri"] == [
         "http://testserver/api/auth/sso/callback"

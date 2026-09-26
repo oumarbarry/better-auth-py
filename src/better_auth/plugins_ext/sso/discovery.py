@@ -8,8 +8,9 @@ Security posture ported verbatim:
   - Every user-supplied endpoint URL must be ``http(s)`` and either publicly
     routable (``is_public_routable_host``) OR allowlisted via ``trustedOrigins``
     (the escape hatch for internal IdPs).
-  - The discovery fetch never follows redirects (a 3xx Location is not re-checked,
-    so it could point at an internal host) — redirects are rejected outright.
+  - Server-side OIDC fetches (discovery, token, userinfo) go through
+    :func:`fetch_oidc_endpoint`: the host is re-checked right before the request and a
+    3xx is refused as ``oidc_endpoint_redirect`` (TS v1.7.6 ``fetchOIDCEndpoint``).
   - Server-side-fetched hosts (token/userinfo/jwks) are additionally DNS-resolved
     and every resolved address re-classified (DNS-rebind defense). Best-effort:
     skipped for IP literals, allowlisted origins, and on resolver failure — exactly
@@ -91,6 +92,7 @@ _KNOWN_400_CODES = {
     "discovery_incomplete",
     "issuer_mismatch",
     "unsupported_token_auth_method",
+    "oidc_endpoint_redirect",
 }
 
 
@@ -136,10 +138,10 @@ def normalize_url(name: str, endpoint: str, issuer: str) -> str:
         return _parse_url(name, f"{base_path}/{endpoint_path}", origin).geturl()
 
 
-# --- SSRF gate on user-supplied endpoints (validateSkipDiscoveryEndpoint) ------------
+# --- SSRF gate on user-supplied endpoints (validateOIDCEndpointUrl) ------------------
 
 
-def _validate_skip_discovery_endpoint(
+def _validate_oidc_endpoint_url(
     name: str, endpoint: str, is_trusted_origin: IsTrustedOrigin
 ) -> None:
     parsed = _parse_url(name, endpoint)
@@ -156,11 +158,9 @@ def _validate_skip_discovery_endpoint(
     )
 
 
-def validate_skip_discovery_endpoints(
-    config: dict[str, Any], is_trusted_origin: IsTrustedOrigin
-) -> None:
+def validate_oidc_endpoint_urls(config: dict[str, Any], is_trusted_origin: IsTrustedOrigin) -> None:
     """Validate every present OIDC endpoint URL in a register/update body. Omitted
-    (None/empty) fields are skipped (discovery.ts ``validateSkipDiscoveryEndpoints``)."""
+    (None/empty) fields are skipped (discovery.ts ``validateOIDCEndpointUrls``)."""
     for name in (
         "authorizationEndpoint",
         "tokenEndpoint",
@@ -170,7 +170,7 @@ def validate_skip_discovery_endpoints(
     ):
         url = config.get(name)
         if url:
-            _validate_skip_discovery_endpoint(name, url, is_trusted_origin)
+            _validate_oidc_endpoint_url(name, url, is_trusted_origin)
 
 
 def validate_discovery_url(url: str, is_trusted_origin: IsTrustedOrigin) -> None:
@@ -239,31 +239,82 @@ async def assert_endpoint_resolves_public(
             )
 
 
-async def assert_oidc_endpoints_resolve_public(
+async def assert_oidc_endpoint_allowed(
+    name: str,
+    endpoint: str,
+    is_trusted_origin: IsTrustedOrigin,
+    resolve_host: ResolveHost | None = None,
+) -> None:
+    """Validate an OIDC endpoint immediately before a server-side fetch (discovery.ts
+    ``assertOIDCEndpointAllowed``): the literal host check plus the DNS resolve-check."""
+    _validate_oidc_endpoint_url(name, endpoint, is_trusted_origin)
+    await assert_endpoint_resolves_public(name, endpoint, is_trusted_origin, resolve_host)
+
+
+async def assert_server_fetched_oidc_endpoints_allowed(
     config: dict[str, Any],
     is_trusted_origin: IsTrustedOrigin,
     resolve_host: ResolveHost | None = None,
 ) -> None:
-    """Re-validate every server-side-fetched endpoint (token/userinfo/jwks) with the
-    sync host check + the DNS resolve-check. ``authorizationEndpoint`` is a browser
-    redirect target and intentionally excluded."""
+    """Re-validate every server-side-fetched endpoint (token/userinfo/jwks).
+    ``authorizationEndpoint`` is a browser redirect target and intentionally excluded."""
     for name in ("tokenEndpoint", "userInfoEndpoint", "jwksEndpoint"):
         url = config.get(name)
-        if not url:
-            continue
-        _validate_skip_discovery_endpoint(name, url, is_trusted_origin)
-        await assert_endpoint_resolves_public(name, url, is_trusted_origin, resolve_host)
+        if url:
+            await assert_oidc_endpoint_allowed(name, url, is_trusted_origin, resolve_host)
+
+
+async def fetch_oidc_endpoint(
+    http: httpx.AsyncClient,
+    name: str,
+    endpoint: str,
+    is_trusted_origin: IsTrustedOrigin,
+    *,
+    method: str = "GET",
+    resolve_host: ResolveHost | None = None,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Fetch a configured OIDC endpoint without following redirects (discovery.ts
+    ``fetchOIDCEndpoint``): the host is checked first and a 3xx raises
+    ``oidc_endpoint_redirect``. Transport errors propagate as ``httpx.HTTPError``."""
+    await assert_oidc_endpoint_allowed(name, endpoint, is_trusted_origin, resolve_host)
+    response = await http.request(method, endpoint, follow_redirects=False, **kwargs)
+    if 300 <= response.status_code < 400:
+        raise DiscoveryError(
+            "oidc_endpoint_redirect",
+            f"The {name} ({endpoint}) returned an HTTP {response.status_code} redirect. "
+            "Configure the final OIDC endpoint URL instead of a redirecting URL.",
+            {
+                "endpoint": name,
+                "url": endpoint,
+                "status": response.status_code,
+                "location": response.headers.get("location"),
+            },
+        )
+    return response
 
 
 # --- fetch + validate + normalize ----------------------------------------------------
 
 
 async def fetch_discovery_document(
-    http: httpx.AsyncClient, url: str, timeout: float = DEFAULT_DISCOVERY_TIMEOUT
+    http: httpx.AsyncClient,
+    url: str,
+    timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
+    *,
+    is_trusted_origin: IsTrustedOrigin = lambda _url: False,
+    resolve_host: ResolveHost | None = None,
 ) -> dict[str, Any]:
-    """Fetch the OIDC discovery document. Never follows redirects (a 3xx is an error)."""
+    """Fetch the OIDC discovery document through :func:`fetch_oidc_endpoint`."""
     try:
-        response = await http.get(url, timeout=timeout, follow_redirects=False)
+        response = await fetch_oidc_endpoint(
+            http,
+            "discoveryEndpoint",
+            url,
+            is_trusted_origin,
+            resolve_host=resolve_host,
+            timeout=timeout,
+        )
     except httpx.TimeoutException as error:
         raise DiscoveryError(
             "discovery_timeout", "Discovery request timed out", {"url": url}
@@ -276,12 +327,6 @@ async def fetch_discovery_document(
         ) from error
 
     status = response.status_code
-    if 300 <= status < 400:
-        raise DiscoveryError(
-            "discovery_unexpected_error",
-            "Discovery endpoint returned a redirect, which is not followed",
-            {"url": url, "status": status},
-        )
     if status == 404:
         raise DiscoveryError(
             "discovery_not_found", "Discovery endpoint not found", {"url": url, "status": status}
@@ -372,6 +417,9 @@ def select_token_endpoint_auth_method(doc: dict[str, Any], existing: str | None 
         return "client_secret_basic"
     if "client_secret_post" in supported:
         return "client_secret_post"
+    # TS v1.7.6 discovery.ts:800-805: an IdP that only offers private_key_jwt gets it.
+    if "private_key_jwt" in supported:
+        return "private_key_jwt"
     return "client_secret_basic"
 
 
@@ -403,7 +451,9 @@ async def discover_oidc_config(
         discovery_endpoint or existing.get("discoveryEndpoint") or compute_discovery_url(issuer)
     )
     validate_discovery_url(discovery_url, is_trusted_origin)
-    doc = await fetch_discovery_document(http, discovery_url, timeout)
+    doc = await fetch_discovery_document(
+        http, discovery_url, timeout, is_trusted_origin=is_trusted_origin
+    )
     validate_discovery_document(doc, issuer)
     normalized = normalize_discovery_urls(doc, issuer, is_trusted_origin)
     token_auth = select_token_endpoint_auth_method(
@@ -443,5 +493,5 @@ async def ensure_runtime_discovery(
             userInfoEndpoint=hydrated.user_info_endpoint,
             jwksEndpoint=hydrated.jwks_endpoint,
         )
-    await assert_oidc_endpoints_resolve_public(resolved, is_trusted_origin, resolve_host)
+    await assert_server_fetched_oidc_endpoints_allowed(resolved, is_trusted_origin, resolve_host)
     return resolved

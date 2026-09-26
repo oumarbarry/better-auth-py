@@ -56,7 +56,6 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
-from ..adapters.base import Where
 from ..crypto import symmetric_decrypt, symmetric_encrypt
 from ..oauth.flow import (
     OAuthLinkError,
@@ -64,6 +63,8 @@ from ..oauth.flow import (
     _callback_params,
     _error_redirect,
     _parse_callback_user,
+    _parse_state,
+    _StateError,
     handle_oauth_user_info,
     link_oauth_account,
 )
@@ -71,7 +72,7 @@ from ..oauth.models import OAuthTokens, OAuthUserInfo
 from ..oauth.providers import ProviderConfig
 from ..origin import is_trusted_origin
 from ..plugins import HookSet, Plugin, PluginHook, Route
-from ..session import create_session, utcnow
+from ..session import create_session
 from ..types import APIError, AuthResponse, Ctx, json_default
 
 logger = logging.getLogger("better_auth")
@@ -314,7 +315,8 @@ class OAuthProxyPlugin(Plugin):
         if not original_state:
             return None
         try:
-            row = await ctx.adapter.find_one("verification", [Where("identifier", original_state)])
+            # TS v1.7.6 index.ts:684-689: the verification value is plaintext JSON.
+            row = await ctx.internal.find_verification_value(original_state)
             plaintext_state = row["value"] if row else None
             if not plaintext_state:
                 logger.warning("No OAuth state found for proxy")
@@ -559,23 +561,14 @@ class OAuthProxyPlugin(Plugin):
         return response
 
     async def _restore_state(self, ctx: Ctx, state: str) -> dict[str, Any] | None:
-        """Consume the OAuth state row and return its data (TS ``restoreOAuthProxyState``,
-        ``parseGenericState`` with ``skipStateCookieCheck``): the row must exist (issued by
-        this env's sign-in) and not be expired; consuming it deletes it. Missing, expired
-        or unreadable -> None -> ``state_mismatch``."""
-        row = await ctx.adapter.find_one("verification", [Where("identifier", state)])
-        if row is None:
+        """Consume the OAuth state and return its data (TS v1.7.6 index.ts:135-149
+        ``restoreOAuthProxyState``: ``parseGenericState`` with ``skipStateCookieCheck``).
+        Missing, expired or unreadable -> None -> ``state_mismatch``."""
+        try:
+            return await _parse_state(ctx, state, skip_state_cookie_check=True)
+        except _StateError:
             logger.warning("OAuth proxy state missing or invalid")
             return None
-        await ctx.adapter.delete_many("verification", [Where("identifier", state)])
-        expires_at = row.get("expiresAt")
-        if expires_at is not None and expires_at <= utcnow():
-            return None
-        try:
-            data = json.loads(row["value"])
-        except (TypeError, ValueError):
-            return None
-        return data if isinstance(data, dict) else None
 
     # --- after /callback: unwrap same-origin proxy redirects -----------------------------
 
