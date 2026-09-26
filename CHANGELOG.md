@@ -101,6 +101,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   number and SIWE. The hook receives the method that created the user.
 - The server logs when the database adapter cannot validate the schema: a
   warning if validation was requested explicitly, a debug message otherwise.
+- SSO: optional `resolve_user` callback that picks, links or rejects the
+  user inside the same database transaction as the account link and the
+  session.
+- SSO: `guard_provider_mutation` callback to approve or refuse provider
+  updates and deletions.
+- SSO: `private_key_jwt` token endpoint authentication, with keys from
+  `resolve_private_key` or a `defaultSSO` entry.
+- SSO: IdP-initiated sign-in with `oidcConfig.allowIdpInitiated`,
+  `additionalParams` on `/sign-in/sso`, and
+  `schema.ssoProvider.additionalFields` for extra provider columns.
+- SSO: `legacy_mapping_id=True` keeps account ids read from `mapping.id`.
 
 ### Changed
 
@@ -245,6 +256,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `AdvancedDatabase(validate_schema=False)` turns the check off.
 - `InternalAdapter.create_user` accepts `source` and `ctx`. Both are required
   once `validate_user_info` is configured.
+- OAuth state rows are stored through the verification storage, so
+  `verification.store_identifier` and secondary storage apply to them. With
+  secondary storage and no database copy, sign-ins in progress during the
+  upgrade must be restarted.
+- SSO: the account id is always the `sub` claim; `mapping.id` is ignored
+  unless `legacy_mapping_id` is set.
+- SSO: callback and state error codes match better-auth 1.7.6
+  (`state_not_found`, `state_mismatch`, and messages such as
+  `account not linked`). SSO sign-ins started before the upgrade must be
+  restarted.
+- SSO: provider updates and deletions lock the provider row in a
+  transaction, and a mapping change no longer counts as an identity change.
 
 ### Fixed
 
@@ -320,6 +343,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Email OTP verification, email change and organization session updates set
   the cookie cache when the JWT plugin signs it with JWKS keys.
 - The email sign-up response reflects changes made by user database hooks.
+- SSO: a sign-in is refused with `SSO_PROVIDER_CHANGED` when its provider
+  changes between sign-in and callback or during the account link.
+- SSO: when both are present, the ID token is always verified and must
+  match the userinfo subject.
+- SSO: server-side OIDC fetches refuse redirects with
+  `oidc_endpoint_redirect`.
+- SSO: the provider table declares its `id` column, so SSO works with the
+  SQLAlchemy adapter.
+- SSO: an expired invitation no longer blocks automatic organization
+  membership.
+- OAuth sign-in reports `unable_to_update_account` when a hook refuses the
+  account update.
 
 ## [1.0.3] - 2026-09-25
 

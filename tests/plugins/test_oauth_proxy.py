@@ -308,6 +308,26 @@ async def test_full_round_trip_creates_user_and_session_on_preview():
     assert len(await production.adapter.find_many("user")) == 0
 
 
+async def test_round_trip_with_hashed_state_identifiers():
+    """The proxy reads and consumes the state through the verification storage (TS v1.7.6
+    index.ts:684-689 findVerificationValue, :135-149 parseGenericState), so a hashed
+    ``storeIdentifier`` still resolves the plain state from the provider URL."""
+    from better_auth.internal_adapter import VerificationOptions
+
+    preview = make_instance(
+        "http://preview.example.com",
+        OAuthProxyPlugin(production_url="http://production.example.com"),
+        verification=VerificationOptions(store_identifier="hashed"),
+    )
+    production = make_instance("http://production.example.com", OAuthProxyPlugin())
+
+    location = await _full_round_trip(preview, production)
+    assert "error=" not in location
+    assert "/dashboard" in location
+    assert len(await preview.adapter.find_many("user")) == 1
+    assert await preview.adapter.find_many("verification") == []
+
+
 async def test_dedicated_shared_secret_used_instead_of_global_secret():
     """A dedicated proxy ``secret`` (shared across envs, different global secrets) encrypts
     the profile — the global secret cannot decrypt it."""

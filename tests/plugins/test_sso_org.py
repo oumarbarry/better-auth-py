@@ -20,7 +20,7 @@ import httpx
 import pytest
 
 from better_auth import BetterAuth, GitHub, Where
-from better_auth.crypto import generate_id, sign_value
+from better_auth.crypto import sign_value
 from better_auth.oauth.flow import STATE_COOKIE
 from better_auth.plugins_ext.organization import OrganizationPlugin
 from better_auth.plugins_ext.sso import SSOPlugin
@@ -88,27 +88,13 @@ async def seed_org_provider(
 
 
 async def seed_state(auth: BetterAuth) -> str:
-    state = generate_id()
-    now = utcnow()
-    payload = {
-        "callbackURL": "/dash",
-        "codeVerifier": "cv-1",
-        "errorURL": None,
-        "newUserURL": None,
-        "expiresAt": int(now.timestamp() * 1000) + 600_000,
-    }
-    await auth.adapter.create(
-        "verification",
-        {
-            "id": generate_id(),
-            "identifier": state,
-            "value": json.dumps(payload),
-            "expiresAt": now + timedelta(seconds=600),
-            "createdAt": now,
-            "updatedAt": now,
-        },
-    )
-    return state
+    """Start the flow through POST /sign-in/sso and return the state it minted."""
+    async with make_client(auth) as client:
+        res = await client.post(
+            "/api/auth/sign-in/sso", json={"providerId": "corp", "callbackURL": "/dash"}
+        )
+    assert res.status_code == 200, res.text
+    return parse_qs(urlsplit(res.json()["url"]).query)["state"][0]
 
 
 def state_cookie(auth: BetterAuth, state: str) -> dict[str, str]:
@@ -443,6 +429,28 @@ async def test_by_domain_skips_while_invitation_pending() -> None:
     assert await user_members(auth, user["id"]) == []
     invitations = await auth.adapter.find_many("invitation", [Where("organizationId", "org-1")])
     assert len(invitations) == 1 and invitations[0]["status"] == "pending"
+
+
+async def test_by_domain_ignores_an_expired_invitation() -> None:
+    # TS v1.7.6 org-assignment.ts:192-199 (507141539): only an unexpired invitation holds.
+    auth, plugin, ctx = domain_ctx()
+    await seed_domain_provider(auth)
+    user = await seed_user(auth)
+    await auth.adapter.create(
+        "invitation",
+        {
+            "organizationId": "org-1",
+            "email": user["email"],
+            "role": "admin",
+            "status": "pending",
+            "inviterId": "inviter-1",
+            "expiresAt": utcnow() - timedelta(minutes=1),
+            "createdAt": utcnow(),
+        },
+    )
+    await assign_organization_by_domain(ctx, plugin, user=user)
+    rows = await user_members(auth, user["id"])
+    assert len(rows) == 1 and rows[0]["organizationId"] == "org-1"
 
 
 async def test_by_domain_surfaces_adapter_failures(monkeypatch: pytest.MonkeyPatch) -> None:

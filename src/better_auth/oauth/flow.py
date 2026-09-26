@@ -250,12 +250,15 @@ async def _create_state(
     id_token_nonce: str | None = None,
     request_sign_up: bool | None = None,
 ) -> tuple[str, str]:
-    """Write the state row (verification table) + return (state, code_verifier).
+    """Write the state through the verification storage + return (state, code_verifier).
 
     ``code_verifier`` is always generated (cheap; lets a provider's PKCE-ness change
     without touching the state layer). A separately signed CSRF cookie is set by the caller.
     ``serverContext`` is written after ``additionalData`` so a client cannot smuggle one
-    in (TS v1.7.6 oauth2/state.ts:56-69).
+    in (TS v1.7.6 oauth2/state.ts:56-69). The row goes through ``createVerificationValue``
+    so ``storeIdentifier`` hashing and secondary storage apply, and the stored value
+    carries ``oauthState`` (TS v1.7.6 state.ts:135-156). Absent keys are omitted, as
+    ``JSON.stringify`` drops ``undefined`` and TS's state schema rejects ``null``.
     """
     state = generate_random_string(32)
     code_verifier = generate_random_string(128)
@@ -265,33 +268,30 @@ async def _create_state(
         "codeVerifier": code_verifier,
         "errorURL": error_url,
         "newUserURL": new_user_url,
+        "link": link,
+        "serverContext": dict(getattr(ctx, _SERVER_CONTEXT_ATTR, None) or {}) or None,
         "expiresAt": int(now.timestamp() * 1000) + STATE_EXPIRES_IN * 1000,
+        "requestSignUp": request_sign_up,
+        "idTokenNonce": id_token_nonce or None,
+        # ponytail: client additionalData stays nested (the port's convention, see
+        # oauth_popup.py); TS spreads it at the top level. Flatten it with its readers.
+        "additionalData": additional_data or None,
     }
-    if link is not None:
-        payload["link"] = link
-    server_context = getattr(ctx, _SERVER_CONTEXT_ATTR, None)
-    if server_context:
-        payload["serverContext"] = dict(server_context)
-    if request_sign_up is not None:
-        payload["requestSignUp"] = request_sign_up
-    if id_token_nonce:
-        payload["idTokenNonce"] = id_token_nonce
-    if additional_data:
-        payload["additionalData"] = additional_data
-    # ponytail: raw adapter row, not the verification storage (secondary storage, hashed
-    # identifiers) TS uses; SSO and oauth-proxy read these rows directly. Move all three to
-    # ``ctx.internal`` verification values together.
-    await ctx.adapter.create(
-        "verification",
-        {
-            "id": generate_id(),
-            "identifier": state,
-            "value": json.dumps(payload),
-            "expiresAt": now + timedelta(seconds=STATE_EXPIRES_IN),
-            "createdAt": now,
-            "updatedAt": now,
-        },
-    )
+    payload = {key: value for key, value in payload.items() if value is not None}
+    try:
+        verification = await ctx.internal.create_verification_value(
+            {
+                "identifier": state,
+                "value": json.dumps({**payload, "oauthState": state}),
+                "expiresAt": now + timedelta(seconds=STATE_EXPIRES_IN),
+            }
+        )
+    except Exception:
+        verification = None
+    if verification is None:
+        # TS v1.7.6 oauth2/state.ts:73-81
+        logger.error("Failed to create verification")
+        raise APIError(500, "INTERNAL_SERVER_ERROR", "Unable to create verification")
     setattr(ctx, _STATE_ATTR, payload)
     return state, code_verifier
 
@@ -472,6 +472,9 @@ async def handle_oauth_user_info(
     override_user_info: bool | None = None,
     source: dict[str, Any] | None = None,
     callback_url: str | None = None,
+    selected_user: dict[str, str] | None = None,
+    require_exact_account_binding: bool = False,
+    defer_non_database_writes: bool = False,
 ) -> tuple[str, bool]:
     """Find/register/link decision tree (``link-account.ts``). Returns (user_id, is_register).
 
@@ -497,8 +500,20 @@ async def handle_oauth_user_info(
       trusted social provider must not launder that trust).
     - ``override_user_info`` — overrides ``provider.override_user_info_on_sign_in`` when
       not ``None`` (SSO passes the per-provider ``oidcConfig.overrideUserInfo``).
+
+    Resolution options (TS v1.7.6 link-account.ts:170-640, ed61b4798, the SSO
+    ``resolveUser`` path):
+
+    - ``selected_user``: ``{"userId", "profile": "preserve" | "update"}`` chosen by an
+      application resolver. The identity links to that user without the implicit-linking
+      gate; ``profile`` decides whether the provider profile overwrites the user.
+    - ``require_exact_account_binding`` (implied by ``selected_user``): a database hook
+      that rewrites the account key or owner is refused with ``409``.
+    - ``defer_non_database_writes``: the verification email waits until the enclosing
+      :meth:`InternalAdapter.transaction` commits and is dropped on rollback.
     """
     now = utcnow()
+    exact = bool(selected_user) or require_exact_account_binding
     override = (
         provider.override_user_info_on_sign_in if override_user_info is None else override_user_info
     )
@@ -519,26 +534,44 @@ async def handle_oauth_user_info(
                 "retrying authentication."
             )
             raise OAuthLinkError("unable_to_link_account")
+        if selected_user and user["id"] != selected_user["userId"]:
+            # TS v1.7.6 link-account.ts:222-230
+            raise APIError(
+                409, "account_ownership_conflict", "Account is already linked to another user"
+            )
         # TS v1.7.6 link-account.ts:382-390: a returning user is re-validated with the
         # fresh provider profile.
         await assert_valid_user_info(
             ctx, {**_profile_fields(info, email), "id": user["id"]}, {**source, "action": "sign-in"}
         )
         if ctx.auth.account.update_account_on_sign_in:
-            fresh = _fresh_token_fields(ctx, tokens)
-            await ctx.internal.update(
+            fresh = {"providerId": provider.provider_id, **_fresh_token_fields(ctx, tokens)}
+            updated = await ctx.internal.update(
                 "account", [Where("id", account["id"])], {**fresh, "updatedAt": now}, ctx=ctx
             )
-        user = await _maybe_promote_verified(ctx, user, info, email, now)
-        if override and user is not None:
-            user = await _override_user_info(ctx, user, info, email, now)
-        await _require_email_verification(ctx, provider, user, False, callback_url)
+            if updated is None:
+                # TS v1.7.6 link-account.ts:423-433
+                raise OAuthLinkError("unable_to_update_account")
+            if exact:
+                _assert_exact_binding(updated, provider, info, user["id"])
+        if not selected_user:
+            user = await _maybe_promote_verified(ctx, user, info, email, now)
+        user = await _apply_profile_policy(ctx, user, info, email, now, override, selected_user)
+        await _require_email_verification(
+            ctx, provider, user, False, callback_url, defer_non_database_writes
+        )
         return account["userId"], False
 
     try:
-        user = await ctx.adapter.find_one("user", [Where("email", email)]) if email else None
+        if selected_user:
+            user = await ctx.adapter.find_one("user", [Where("id", selected_user["userId"])])
+        else:
+            user = await ctx.adapter.find_one("user", [Where("email", email)]) if email else None
     except Exception:
         raise _database_error(ctx) from None
+    if selected_user and user is None:
+        # TS v1.7.6 link-account.ts:238-247
+        raise APIError(404, "user_not_found", "User not found")
 
     if user is None:  # register
         if disable_sign_up:
@@ -553,27 +586,31 @@ async def handle_oauth_user_info(
             "updatedAt": now,
         }
 
-        async def register(tx: Any) -> dict[str, Any]:
+        async def register(tx: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
             # TS v1.7.6 internal-adapter.ts:282-306: createUser runs the gate first.
             await assert_valid_user_info(ctx, user_data, {**source, "action": "create-user"})
             created = await tx.create("user", {"id": generate_id(), **user_data}, ctx=ctx)
             if created is None:
                 raise RuntimeError("user creation was aborted")
-            await _create_account(
+            created_account = await _create_account(
                 ctx, provider, info, token_fields, created["id"], now, internal=tx
             )
-            return created
+            return created, created_account
 
         # TS v1.7.6 link-account.ts:542-588 (a83152e2e): user + first account commit
         # together; after-hooks run once the transaction commits.
         try:
-            created = await ctx.internal.transaction(register)
+            created, created_account = await ctx.internal.transaction(register)
         except APIError:
             raise
         except Exception:
             logger.exception("Unable to create OAuth user")
             raise OAuthLinkError("unable_to_create_user") from None
-        await _require_email_verification(ctx, provider, created, True, callback_url)
+        if exact:
+            _assert_exact_binding(created_account, provider, info, created["id"])
+        await _require_email_verification(
+            ctx, provider, created, True, callback_url, defer_non_database_writes
+        )
         return created["id"], True
 
     # user exists, this provider account is not yet linked → implicit-linking gate
@@ -583,7 +620,7 @@ async def handle_oauth_user_info(
         is_trusted = provider.provider_id in (await _resolve_trusted_providers(ctx))
     else:
         is_trusted = False
-    if (
+    if not selected_user and (
         (not is_trusted and not info.email_verified)
         or (linking.require_local_email_verified and not user["emailVerified"])
         or linking.enabled is False
@@ -609,13 +646,54 @@ async def handle_oauth_user_info(
         linked = None
     if linked is None:
         raise OAuthLinkError("unable_to_link_account")
-    user = await _maybe_promote_verified(ctx, user, info, email, now) or user
-    if linking.update_user_info_on_link and user is not None:
-        user = await _apply_update_user_info_on_link(ctx, user, info, now)
-    if override and user is not None:
-        user = await _override_user_info(ctx, user, info, email, now)
-    await _require_email_verification(ctx, provider, user, False, callback_url)
+    if exact:
+        _assert_exact_binding(linked, provider, info, user["id"])
+    if not selected_user:
+        user = await _maybe_promote_verified(ctx, user, info, email, now) or user
+        if linking.update_user_info_on_link and user is not None:
+            user = await _apply_update_user_info_on_link(ctx, user, info, now)
+    user = await _apply_profile_policy(ctx, user, info, email, now, override, selected_user)
+    await _require_email_verification(
+        ctx, provider, user, False, callback_url, defer_non_database_writes
+    )
+    assert user is not None
     return user["id"], False
+
+
+def _assert_exact_binding(
+    row: dict[str, Any] | None, provider: ProviderConfig, info: OAuthUserInfo, user_id: str
+) -> None:
+    """TS v1.7.6 link-account.ts:333-345: a hook may not move the selected binding."""
+    if row is not None and (
+        row.get("accountId") != info.id
+        or row.get("providerId") != provider.provider_id
+        or row.get("userId") != user_id
+    ):
+        raise APIError(
+            409,
+            "account_hook_binding_conflict",
+            "Account hook changed the selected authentication binding",
+        )
+
+
+async def _apply_profile_policy(
+    ctx: Ctx,
+    user: dict[str, Any] | None,
+    info: OAuthUserInfo,
+    email: str,
+    now: Any,
+    override: bool,
+    selected_user: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    """Profile overwrite: ``selected_user.profile == "update"`` for a resolver-selected
+    user, else ``overrideUserInfo`` (TS v1.7.6 link-account.ts:471-518)."""
+    wanted = selected_user["profile"] == "update" if selected_user else override
+    if not wanted or user is None:
+        return user
+    updated = await _override_user_info(ctx, user, info, email, now)
+    if selected_user and updated["id"] != selected_user["userId"]:
+        raise APIError(409, "user_hook_selection_conflict", "User hook changed the selected user")
+    return updated
 
 
 async def _require_email_verification(
@@ -624,6 +702,7 @@ async def _require_email_verification(
     user: dict[str, Any] | None,
     is_register: bool,
     callback_url: str | None,
+    defer: bool = False,
 ) -> None:
     """Per-provider ``requireEmailVerification`` (TS v1.7.6 link-account.ts:598-630,
     91f235f86): a verification email goes out on sign-up (``sendOnSignUp`` falling back to
@@ -637,19 +716,26 @@ async def _require_email_verification(
     cfg = ctx.auth.email_verification
     send_on_sign_up = cfg.send_on_sign_up if cfg.send_on_sign_up is not None else required
     if is_register and send_on_sign_up:
-        await _dispatch_verification_email(ctx, user, callback_url)
+        await _dispatch_verification_email(ctx, user, callback_url, defer)
     if required:
         if not is_register and cfg.send_on_sign_in:
-            await _dispatch_verification_email(ctx, user, callback_url)
+            await _dispatch_verification_email(ctx, user, callback_url, defer)
         raise OAuthLinkError("email_not_verified")
 
 
 async def _dispatch_verification_email(
-    ctx: Ctx, user: dict[str, Any], callback_url: str | None
+    ctx: Ctx, user: dict[str, Any], callback_url: str | None, defer: bool = False
 ) -> None:
-    """TS v1.7.6 link-account.ts:667-708: a failed send is logged, never fatal."""
+    """TS v1.7.6 link-account.ts:667-708: a failed send is logged, never fatal. ``defer``
+    queues it after the enclosing transaction commits (``queueAfterTransactionHook``)."""
     cfg = ctx.auth.email_verification
     if cfg.send_verification_email is None:
+        return
+    # ponytail: reuses the InternalAdapter's after-commit queue (set while a transaction
+    # runs); expose a public queue method if a second caller needs one.
+    queue = ctx.internal._after_queue
+    if defer and queue is not None:
+        queue.append(lambda: _dispatch_verification_email(ctx, user, callback_url))
         return
     try:
         token = sign_email_verification_token(
@@ -797,20 +883,39 @@ class _StateError(Exception):
         super().__init__(code)
 
 
-async def _parse_state(ctx: Ctx, state: str) -> dict[str, Any]:
-    """TS v1.7.6 state.ts:219-298 (database strategy) + oauth2/state.ts:84-117: every state
-    failure is ``state_mismatch``; the errorURL is the flow's own once the row is read."""
+async def _parse_state(
+    ctx: Ctx, state: str, *, skip_state_cookie_check: bool | None = None
+) -> dict[str, Any]:
+    """TS v1.7.6 state.ts:219-298 (database strategy) + oauth2/state.ts:84-117. The row is
+    read with ``findVerificationValue`` and removed with ``deleteVerificationByIdentifier``
+    once the CSRF cookie matched. Every state failure is ``state_mismatch`` (an unreadable
+    row is ``internal_server_error``); the errorURL is the flow's own once the row is read.
+    ``skip_state_cookie_check`` overrides ``auth.skip_state_cookie_check`` (oauth-proxy)."""
     default_error_url = _default_error_url(ctx)
-    row = await ctx.adapter.find_one("verification", [Where("identifier", state)])
+    row = await ctx.internal.find_verification_value(state)
     if row is None:
         raise _StateError("state_mismatch", default_error_url)
-    data = json.loads(row["value"])
+    try:
+        data = json.loads(row["value"])
+        if not isinstance(data, dict):
+            raise ValueError("state is not an object")
+    except (TypeError, ValueError):
+        logger.error("Failed to parse state")
+        raise _StateError("internal_server_error", default_error_url) from None
     error_url = data.get("errorURL") or default_error_url
-    if not ctx.auth.skip_state_cookie_check:
+    oauth_state = data.get("oauthState")
+    if oauth_state is not None and oauth_state != state:
+        raise _StateError("state_mismatch", error_url)
+    skip = (
+        ctx.auth.skip_state_cookie_check
+        if skip_state_cookie_check is None
+        else skip_state_cookie_check
+    )
+    if not skip:
         raw = ctx.request.cookies().get(cookie_name(ctx.auth, STATE_COOKIE))
         if raw is None or unsign_value(ctx.auth.secret, raw) != state:
             raise _StateError("state_mismatch", error_url)
-    await ctx.adapter.delete_many("verification", [Where("identifier", state)])
+    await ctx.internal.delete_verification_by_identifier(state)
     if int(data.get("expiresAt") or 0) < int(utcnow().timestamp() * 1000):
         raise _StateError("state_mismatch", error_url, cookie_expired=True)
     data["errorURL"] = error_url

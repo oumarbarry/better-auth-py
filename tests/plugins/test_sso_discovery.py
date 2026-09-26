@@ -16,7 +16,7 @@ import pytest
 from better_auth.plugins_ext.sso.discovery import (
     DiscoveryError,
     assert_endpoint_resolves_public,
-    assert_oidc_endpoints_resolve_public,
+    assert_server_fetched_oidc_endpoints_allowed,
     compute_discovery_url,
     discover_oidc_config,
     fetch_discovery_document,
@@ -26,7 +26,7 @@ from better_auth.plugins_ext.sso.discovery import (
     select_token_endpoint_auth_method,
     validate_discovery_document,
     validate_discovery_url,
-    validate_skip_discovery_endpoints,
+    validate_oidc_endpoint_urls,
 )
 
 IDP = "http://localhost:8080"  # loopback => private; allowlisted via trusted origins
@@ -74,35 +74,31 @@ def test_compute_discovery_url_trailing_slash() -> None:
     )
 
 
-# --- validate_skip_discovery_endpoints (SSRF gate on body endpoints) -----------------
+# --- validate_oidc_endpoint_urls (SSRF gate on body endpoints) -----------------
 
 
 def test_skip_endpoints_public_allowed() -> None:
-    validate_skip_discovery_endpoints(
-        {"tokenEndpoint": "https://idp.example.com/token"}, trust_only()
-    )
+    validate_oidc_endpoint_urls({"tokenEndpoint": "https://idp.example.com/token"}, trust_only())
 
 
 def test_skip_endpoints_private_rejected() -> None:
     with pytest.raises(DiscoveryError) as exc:
-        validate_skip_discovery_endpoints({"tokenEndpoint": "http://127.0.0.1/token"}, trust_only())
+        validate_oidc_endpoint_urls({"tokenEndpoint": "http://127.0.0.1/token"}, trust_only())
     assert exc.value.code == "discovery_private_host"
 
 
 def test_skip_endpoints_private_allowlisted_via_trusted_origin() -> None:
-    validate_skip_discovery_endpoints({"tokenEndpoint": f"{IDP}/token"}, trust_only(IDP))
+    validate_oidc_endpoint_urls({"tokenEndpoint": f"{IDP}/token"}, trust_only(IDP))
 
 
 def test_skip_endpoints_non_http_scheme_rejected() -> None:
     with pytest.raises(DiscoveryError) as exc:
-        validate_skip_discovery_endpoints(
-            {"jwksEndpoint": "ftp://idp.example.com/jwks"}, trust_only()
-        )
+        validate_oidc_endpoint_urls({"jwksEndpoint": "ftp://idp.example.com/jwks"}, trust_only())
     assert exc.value.code == "discovery_invalid_url"
 
 
 def test_skip_endpoints_omitted_fields_skipped() -> None:
-    validate_skip_discovery_endpoints({"tokenEndpoint": None}, trust_only())
+    validate_oidc_endpoint_urls({"tokenEndpoint": None}, trust_only())
 
 
 # --- validate_discovery_url ----------------------------------------------------------
@@ -174,6 +170,12 @@ def test_select_auth_default_basic() -> None:
     assert select_token_endpoint_auth_method(full_doc()) == "client_secret_basic"
 
 
+def test_select_auth_only_private_key_jwt() -> None:
+    # TS v1.7.6 discovery.ts:800-805
+    doc = full_doc(token_endpoint_auth_methods_supported=["private_key_jwt"])
+    assert select_token_endpoint_auth_method(doc) == "private_key_jwt"
+
+
 # --- needs_runtime_discovery ---------------------------------------------------------
 
 
@@ -209,28 +211,49 @@ def test_normalize_untrusted_rejected() -> None:
 
 async def test_fetch_success() -> None:
     async with mock_http(httpx.Response(200, json=full_doc())) as http:
-        doc = await fetch_discovery_document(http, f"{IDP}/.well-known/openid-configuration")
+        doc = await fetch_discovery_document(
+            http, f"{IDP}/.well-known/openid-configuration", is_trusted_origin=trust_only(IDP)
+        )
     assert doc["issuer"] == IDP
 
 
 async def test_fetch_404_not_found() -> None:
     async with mock_http(httpx.Response(404, json={})) as http:
         with pytest.raises(DiscoveryError) as exc:
-            await fetch_discovery_document(http, f"{IDP}/.well-known")
+            await fetch_discovery_document(
+                http, f"{IDP}/.well-known", is_trusted_origin=trust_only(IDP)
+            )
     assert exc.value.code == "discovery_not_found"
 
 
 async def test_fetch_redirect_rejected() -> None:
     async with mock_http(httpx.Response(302, headers={"location": "http://127.0.0.1/"})) as http:
         with pytest.raises(DiscoveryError) as exc:
+            await fetch_discovery_document(
+                http, f"{IDP}/.well-known", is_trusted_origin=trust_only(IDP)
+            )
+    # TS v1.7.6 discovery.ts:328-339 (4475f4a39)
+    assert exc.value.code == "oidc_endpoint_redirect"
+    assert exc.value.message == (
+        f"The discoveryEndpoint ({IDP}/.well-known) returned an HTTP 302 redirect. "
+        "Configure the final OIDC endpoint URL instead of a redirecting URL."
+    )
+
+
+async def test_fetch_checks_the_endpoint_host_before_fetching() -> None:
+    # TS v1.7.6 discovery.ts:352-357: fetchOIDCEndpoint asserts the host first.
+    async with mock_http(httpx.Response(200, json=full_doc())) as http:
+        with pytest.raises(DiscoveryError) as exc:
             await fetch_discovery_document(http, f"{IDP}/.well-known")
-    assert exc.value.code == "discovery_unexpected_error"
+    assert exc.value.code == "discovery_private_host"
 
 
 async def test_fetch_empty_invalid_json() -> None:
     async with mock_http(httpx.Response(200, json={})) as http:
         with pytest.raises(DiscoveryError) as exc:
-            await fetch_discovery_document(http, f"{IDP}/.well-known")
+            await fetch_discovery_document(
+                http, f"{IDP}/.well-known", is_trusted_origin=trust_only(IDP)
+            )
     assert exc.value.code == "discovery_invalid_json"
 
 
@@ -277,6 +300,7 @@ async def test_discover_issuer_mismatch_raises() -> None:
         ("discovery_private_host", 400),
         ("issuer_mismatch", 400),
         ("discovery_incomplete", 400),
+        ("oidc_endpoint_redirect", 400),
     ],
 )
 def test_map_error_status(code: str, status: int) -> None:
@@ -343,12 +367,12 @@ async def test_resolve_check_resolver_failure_falls_back() -> None:
     )
 
 
-async def test_assert_oidc_endpoints_resolve_public_matrix() -> None:
+async def test_assert_server_fetched_oidc_endpoints_allowed_matrix() -> None:
     async def resolver(host: str) -> list[str]:
         return ["10.0.0.5"] if host == "userinfo.example.com" else ["93.184.216.34"]
 
     with pytest.raises(DiscoveryError) as exc:
-        await assert_oidc_endpoints_resolve_public(
+        await assert_server_fetched_oidc_endpoints_allowed(
             {
                 "tokenEndpoint": "https://idp.example.com/token",
                 "userInfoEndpoint": "https://userinfo.example.com/me",

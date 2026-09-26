@@ -52,7 +52,10 @@ async def _verified_domain_providers(
     ctx: Ctx, plugin: SSOPlugin, domain: str
 ) -> list[dict[str, Any]]:
     """Persisted providers whose proven domain set covers ``domain`` (TS
-    ``findVerifiedDomainProviders`` — internal, never exposed as a route)."""
+    ``findVerifiedDomainProviders``, internal, never exposed as a route).
+
+    ponytail: one unbounded read; TS pages 100 rows at a time only because its adapters
+    cap ``findMany`` at 100 by default. Page here too if this table grows large."""
     providers = await ctx.adapter.find_many(plugin.model_name, [Where("domainVerified", True)])
     return [p for p in providers if domain_matches(domain, p["domain"])]
 
@@ -98,6 +101,8 @@ async def _create_member_if_absent(
             Where("organizationId", organization_id),
             Where("email", (user.get("email") or "").lower()),
             Where("status", "pending"),
+            # TS v1.7.6 org-assignment.ts:197 (507141539): an expired invitation no longer holds
+            Where("expiresAt", utcnow(), operator="gt"),
         ],
     )
     if pending_invitation:
