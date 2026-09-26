@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from better_auth.adapters.base import Where
 from better_auth.adapters.sqlalchemy import SQLAlchemyAdapter
-from better_auth.schema import Field
+from better_auth.schema import Field, Reference
 from better_auth.session import utcnow
 from conftest import SIGNUP, make_auth, make_client, sign_up
 
@@ -149,5 +149,83 @@ async def test_unique_indexed_field_creates_a_single_unique_index():
         await adapter.create("uniqueTable", {"id": "first", "slug": "shared"})
         with pytest.raises(IntegrityError):
             await adapter.create("uniqueTable", {"id": "second", "slug": "shared"})
+    finally:
+        await engine.dispose()
+
+
+# --- plugin tables and column types (TS db/get-migration.ts:846-925) -------------------
+
+
+async def test_plugin_table_without_declared_id_gets_a_primary_key():
+    """Plugin schemas never declare ``id``; every better-auth table has one (the TS
+    migration adds it to each table). Without it inserts failed with
+    ``Unconsumed column names: id``."""
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    adapter = SQLAlchemyAdapter(engine)
+    adapter.init({"twoFactor": {"secret": Field("string", required=True)}})
+    await adapter.create_tables()
+    try:
+        row = await adapter.create("twoFactor", {"secret": "s"})
+        assert row is not None and row["id"]
+        assert adapter._tables["twoFactor"].c["id"].primary_key
+        found = await adapter.find_one("twoFactor", [Where("id", row["id"])])
+        assert found is not None and found["secret"] == "s"
+    finally:
+        await engine.dispose()
+
+
+def _ddl(adapter: SQLAlchemyAdapter, model: str, dialect: str) -> str:
+    from sqlalchemy.dialects import mysql, postgresql, sqlite
+    from sqlalchemy.schema import CreateTable
+
+    dialects = {"postgresql": postgresql, "mysql": mysql, "sqlite": sqlite}
+    return str(CreateTable(adapter._tables[model]).compile(dialect=dialects[dialect].dialect()))
+
+
+def test_string_columns_follow_the_ts_type_map():
+    adapter = SQLAlchemyAdapter(create_async_engine("sqlite+aiosqlite://"))
+    adapter.init(
+        {
+            "user": {"id": Field("string", required=True, unique=True)},
+            "thing": {
+                "secret": Field("string", required=True),
+                "slug": Field("string", unique=True),
+                "userId": Field("string", references=Reference("user", "id")),
+            },
+        }
+    )
+    pg = _ddl(adapter, "thing", "postgresql")
+    assert "secret TEXT NOT NULL" in pg and "slug TEXT" in pg and '"userId" TEXT' in pg
+    assert "id TEXT NOT NULL" in pg
+    my = _ddl(adapter, "thing", "mysql")
+    assert "secret TEXT NOT NULL" in my
+    assert "slug VARCHAR(255)" in my
+    assert "`userId` VARCHAR(36)" in my and "id VARCHAR(36) NOT NULL" in my
+
+
+async def test_every_default_plugin_table_is_created_with_an_id():
+    """Regression: plugin tables lacked ``id`` on SQLAlchemy, and the oauth-provider
+    foreign keys to ``oauthRefreshToken.id`` made ``create_tables()`` crash."""
+    import inspect
+
+    import better_auth.plugins_ext as plugins
+    from better_auth.plugins import Plugin
+
+    instances = []
+    for name in dir(plugins):
+        cls = getattr(plugins, name)
+        if inspect.isclass(cls) and issubclass(cls, Plugin) and cls is not Plugin:
+            try:
+                instances.append(cls())
+            except TypeError:  # plugins with required options are covered by their own tests
+                continue
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    adapter = SQLAlchemyAdapter(engine)
+    make_auth(adapter=adapter, plugins=instances)
+    try:
+        await adapter.create_tables()
+        missing = [m for m, t in adapter._tables.items() if not t.c["id"].primary_key]
+        assert missing == []
+        assert {"twoFactor", "oauthRefreshToken"} <= set(adapter._tables)
     finally:
         await engine.dispose()

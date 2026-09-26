@@ -42,10 +42,16 @@ from .base import BaseAdapter, SortBy, Where
 from .transform import Caps
 
 
-def _col_type(spec: Field) -> Any:
+def _col_type(name: str, spec: Field) -> Any:
     t = spec.type
     if t == "string":
-        return String(255)
+        # TS db/get-migration.ts:850-925: text on PostgreSQL and SQLite; MySQL needs a
+        # bounded varchar for keyed columns (ids and foreign keys 36, unique/indexed 255).
+        if name == "id" or spec.references is not None:
+            return Text().with_variant(String(36), "mysql", "mariadb")
+        if spec.unique or spec.index:
+            return Text().with_variant(String(255), "mysql", "mariadb")
+        return Text()
     if t in ("text", "json", "string[]", "number[]"):
         return Text()
     if t == "number":
@@ -91,8 +97,11 @@ class SQLAlchemyAdapter(BaseAdapter):
             if model in self._tables:
                 continue
             columns: list[Column] = []
+            if "id" not in fields:
+                # Plugin schemas leave ``id`` implicit; every better-auth table has one.
+                fields = {"id": Field("string", required=True), **fields}
             for name, spec in fields.items():
-                args: list[Any] = [_col_type(spec)]
+                args: list[Any] = [_col_type(name, spec)]
                 if spec.references is not None:
                     ref = spec.references
                     on_delete = ref.on_delete.upper() if ref.on_delete else None
