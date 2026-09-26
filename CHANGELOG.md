@@ -96,6 +96,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   and `display_username=False` drops the `displayUsername` field.
 - Passkey: `verify-registration` accepts `createSession: true` to sign the
   user in after registering.
+- OAuth provider: protected resources. Configure `resources`, or manage them
+  with the new server-side admin methods. Each resource sets token lifetimes,
+  allowed scopes, custom claims, a signing key pin and a DPoP requirement,
+  and can be limited to linked clients. New tables `oauthResource` and
+  `oauthClientResource`, and new token columns: run your migrations.
+- OAuth provider: DPoP (RFC 9449). A DPoP proof at the token endpoint binds
+  tokens to the client key (`token_type: DPoP`, `cnf.jkt`); UserInfo and
+  introspection enforce and report the binding.
+- OAuth provider: OIDC back-channel logout. Ending a session revokes its
+  OAuth tokens and notifies clients that registered a back-channel logout
+  URI, after the session deletion commits.
+- OAuth provider: the `claims` request parameter, form POST at
+  `/oauth2/authorize`, and `max_age` enforcement.
 
 ### Changed
 
@@ -235,6 +248,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Anonymous: the default placeholder email is
   `<id>@anonymous.placeholder.invalid` (was `temp@<id>.com`) for new
   anonymous users. `email_domain_name` still overrides it.
+- OAuth provider: ID tokens carry protocol claims only (`acr` is "0"), and
+  profile and email claims come from UserInfo, as in better-auth 1.7. Set
+  `legacy_id_token_profile_claims=True` (deprecated) to keep the scope-based
+  profile and email claims in the ID token. Custom ID token claims cannot
+  replace protocol claims.
+- OAuth provider: a requested `resource` must be a configured resource,
+  linked to the client unless `enforce_per_client_resources=False`. The base
+  URL is no longer accepted as an audience by default: configure `resources`,
+  or list legacy audiences in `valid_audiences` (deprecated).
+- OAuth provider: resource indicators are bound to the authorization grant;
+  token and refresh requests can narrow them but never widen them.
+- OAuth provider: invalid authorization requests redirect to the client's
+  registered redirect URI with an RFC 6749 error, and `state` is optional.
+- OAuth provider: `/oauth2/end-session` accepts GET and POST, no longer
+  requires `id_token_hint`, and asks the user to confirm when there is no
+  usable hint.
+- OAuth provider: the social sign-in resume uses the server-trusted OAuth
+  state, so a client can no longer inject its own authorization query.
 
 ### Fixed
 
@@ -307,6 +338,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the permission check, so an unauthorized caller cannot probe role names.
 - Passkey: registration and authentication challenges require an exact
   ceremony type match.
+- OAuth provider: UserInfo accepts the access token in a form body and
+  returns no-store responses.
 
 ## [1.0.3] - 2026-09-25
 
