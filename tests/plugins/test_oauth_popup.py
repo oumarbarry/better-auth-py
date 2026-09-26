@@ -209,11 +209,11 @@ async def test_strips_internal_state_keys_from_additional_data():
     assert start.status_code == 302
     records = await auth.adapter.find_many("verification", [])
     values = [json.loads(r["value"]) for r in records]
-    stored = next(v for v in values if v.get("additionalData", {}).get("tenant") == "acme")
-    assert stored["additionalData"]["tenant"] == "acme"
-    # `link` is an INTERNAL_STATE_KEY: it must never survive in additionalData, and must
-    # never be promoted to the top-level linking key (that would hijack the flow).
-    assert "link" not in stored["additionalData"]
+    # TS v1.7.6 oauth-popup/index.ts:220-237: additionalData is spread at the top level.
+    stored = next(v for v in values if v.get("tenant") == "acme")
+    assert "additionalData" not in stored
+    # `link` is an INTERNAL_STATE_KEY: it must never be promoted to the top-level
+    # linking key (that would hijack the flow).
     assert "link" not in stored
 
 

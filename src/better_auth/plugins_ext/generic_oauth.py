@@ -50,7 +50,7 @@ from ..oauth.machinery import (
     oauth_fetch,
     refresh_access_token,
 )
-from ..oauth.models import OAuthTokens, OAuthUserInfo
+from ..oauth.models import CORE_USER_KEYS, OAuthTokens, OAuthUserInfo
 from ..oauth.providers import ProviderConfig, is_valid_account_subject
 from ..oauth.verify import verify_id_token
 from ..plugins import Plugin, Route
@@ -470,6 +470,7 @@ class _GenericProvider(ProviderConfig):
             image=user.get("image"),
             email_verified=bool(user.get("emailVerified")),
             raw=raw,
+            extra={k: v for k, v in user.items() if k not in CORE_USER_KEYS},
         )
 
     # --- client-submitted id_token (ec8a38c08) ---------------------------------------------

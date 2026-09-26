@@ -19,6 +19,7 @@ from ..providers import ProviderConfig
 @dataclass
 class Spotify(ProviderConfig):
     provider_id: str = "spotify"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://accounts.spotify.com/authorize"
     token_endpoint: str = "https://accounts.spotify.com/api/token"
     userinfo_endpoint: str = "https://api.spotify.com/v1/me"

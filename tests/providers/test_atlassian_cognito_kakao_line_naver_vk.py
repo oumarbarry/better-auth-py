@@ -68,7 +68,9 @@ def test_atlassian_authorization_url():
 
 
 def test_atlassian_disable_default_scope():
-    q = authz_query(Atlassian(client_id="c", disable_default_scope=True), extra_scopes=["x"])
+    q = authz_query(
+        Atlassian(client_id="c", client_secret="s", disable_default_scope=True), extra_scopes=["x"]
+    )
     assert q["scope"] == ["x"]
 
 

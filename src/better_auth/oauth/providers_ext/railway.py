@@ -32,6 +32,7 @@ def _railway_mapper(profile: dict[str, Any]) -> OAuthUserInfo:
 @dataclass
 class Railway(ProviderConfig):
     provider_id: str = "railway"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://backboard.railway.com/oauth/auth"
     token_endpoint: str = "https://backboard.railway.com/oauth/token"
     userinfo_endpoint: str = "https://backboard.railway.com/oauth/me"

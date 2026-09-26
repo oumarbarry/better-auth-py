@@ -19,6 +19,8 @@ from ..providers import ProviderConfig
 @dataclass
 class Figma(ProviderConfig):
     provider_id: str = "figma"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
+    required_credentials = "id+secret"  # TS CLIENT_ID_AND_SECRET_REQUIRED guard
     authorization_endpoint: str = "https://www.figma.com/oauth"
     token_endpoint: str = "https://api.figma.com/v1/oauth/token"
     userinfo_endpoint: str = "https://api.figma.com/v1/me"

@@ -20,6 +20,9 @@ class APIError(Exception):
     top-level fields (organization's ``missingPermissions``, api-key's
     ``details: {tryAgainIn}``). Merged into the rendered JSON body by
     ``BetterAuth._on_api_error``; ``code``/``message`` always win over ``extra``.
+
+    ``headers`` ride the error response, like the headers TS attaches to a thrown APIError
+    (core api/index.ts:36-53), e.g. ``Cache-Control: no-store`` from a ``noStore`` route.
     """
 
     def __init__(
@@ -28,11 +31,14 @@ class APIError(Exception):
         code: str,
         message: str | None = None,
         extra: dict[str, Any] | None = None,
+        *,
+        headers: list[tuple[str, str]] | None = None,
     ):
         self.status = status
         self.code = code
         self.message = message or code.replace("_", " ").capitalize()
         self.extra = extra
+        self.headers = headers
         super().__init__(self.message)
 
 

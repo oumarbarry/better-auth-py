@@ -25,6 +25,7 @@ from ..providers import ProviderConfig
 @dataclass
 class Roblox(ProviderConfig):
     provider_id: str = "roblox"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://apis.roblox.com/oauth/v1/authorize"
     token_endpoint: str = "https://apis.roblox.com/oauth/v1/token"
     userinfo_endpoint: str = "https://apis.roblox.com/oauth/v1/userinfo"

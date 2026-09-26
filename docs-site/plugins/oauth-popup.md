@@ -39,5 +39,5 @@ None. The plugin takes no options (same as TS).
 - Implementation note: state is stored as a verification row plus a signed
   CSRF cookie
   (this port's OAuth-state convention), so the normal `/callback` and
-  `/oauth2/callback` routes consume it unchanged; `additionalData` is nested
-  under its own key with internal state keys stripped.
+  `/oauth2/callback` routes consume it unchanged; `additionalData` keys sit at
+  the top level of the state, with internal state keys stripped.

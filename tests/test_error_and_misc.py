@@ -124,3 +124,36 @@ async def test_error_page_redirect_keeps_error_url_fragment():
     async with make_client(auth) as client:
         response = await client.get("/api/auth/error?error=<bad>", follow_redirects=False)
     assert response.headers["location"] == "https://app.example/oops?error=UNKNOWN#top"
+
+
+# --- APIError response headers (TS core api/index.ts:36-53, 101-118) --------------------
+
+
+async def test_api_error_headers_reach_the_response():
+    from better_auth.plugins import Plugin
+
+    class Raiser(Plugin):
+        id = "raiser"
+
+        def routes(self):
+            return [("GET", "/raise", self.raise_it)]
+
+        async def raise_it(self, ctx):
+            raise APIError(401, "UNAUTHORIZED", headers=[("Cache-Control", "no-store")])
+
+    async with make_client(make_auth(plugins=[Raiser()])) as client:
+        response = await client.get("/api/auth/raise")
+    assert response.status_code == 401
+    assert response.json() == {"code": "UNAUTHORIZED", "message": "Unauthorized"}
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_api_error_positional_constructor_is_unchanged():
+    error = APIError(400, "BAD", "Bad thing", {"field": "x"})
+    assert (error.status, error.code, error.message, error.extra) == (
+        400,
+        "BAD",
+        "Bad thing",
+        {"field": "x"},
+    )
+    assert error.headers is None

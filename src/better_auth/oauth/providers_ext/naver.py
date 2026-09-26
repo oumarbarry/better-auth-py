@@ -33,6 +33,7 @@ def _map(p: dict[str, Any]) -> OAuthUserInfo:
 @dataclass
 class Naver(ProviderConfig):
     provider_id: str = "naver"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://nid.naver.com/oauth2.0/authorize"
     token_endpoint: str = "https://nid.naver.com/oauth2.0/token"
     userinfo_endpoint: str = "https://openapi.naver.com/v1/nid/me"

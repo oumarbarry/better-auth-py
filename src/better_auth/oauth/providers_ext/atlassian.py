@@ -28,6 +28,8 @@ def _map(p: dict[str, Any]) -> OAuthUserInfo:
 @dataclass
 class Atlassian(ProviderConfig):
     provider_id: str = "atlassian"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
+    required_credentials = "id+secret"  # TS CLIENT_ID_AND_SECRET_REQUIRED guard
     authorization_endpoint: str = "https://auth.atlassian.com/authorize"
     token_endpoint: str = "https://auth.atlassian.com/oauth/token"
     userinfo_endpoint: str = "https://api.atlassian.com/me"

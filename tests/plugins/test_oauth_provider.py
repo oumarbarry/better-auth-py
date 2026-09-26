@@ -271,6 +271,45 @@ async def test_privileges_gate_forbids_every_action():
             assert (await client.get(path)).status_code == 401
 
 
+async def test_privilege_errors_on_no_store_routes_carry_no_store():
+    # TS v1.7.6 core api/index.ts:101-118: a `noStore` endpoint (oauthClient/index.ts:254,
+    # 590, oauth.ts:1519) attaches its headers to an APIError its handler throws.
+    allowed = {"on": True}
+    async with provider_client(
+        allow_dynamic_client_registration=True, client_privileges=lambda ctx: allowed["on"]
+    ) as client:
+        await sign_up(client)
+        cid = (await _create(client)).json()["client_id"]
+        allowed["on"] = False
+        for path, body in (
+            ("/api/auth/oauth2/register", {"redirect_uris": ["https://a.example.com/cb"]}),
+            ("/api/auth/oauth2/create-client", {"redirect_uris": ["https://a.example.com/cb"]}),
+            ("/api/auth/oauth2/client/rotate-secret", {"client_id": cid}),
+        ):
+            res = await client.post(path, json=body)
+            assert res.status_code == 401, (path, res.text)
+            assert res.json()["code"] == "UNAUTHORIZED"
+            assert res.headers["cache-control"] == "no-store", path
+            assert res.headers["pragma"] == "no-cache", path
+        # get-clients has no noStore metadata: its error stays plain.
+        listed = await client.get("/api/auth/oauth2/get-clients")
+        assert listed.status_code == 401
+        assert "cache-control" not in listed.headers
+
+
+async def test_missing_session_on_client_routes_is_not_no_store():
+    # TS v1.7.6 oauthClient/index.ts:228, 585: `use: [sessionMiddleware]` rejects before
+    # the noStore-wrapped handler runs, so that 401 carries no Cache-Control.
+    async with provider_client() as client:
+        for path, body in (
+            ("/api/auth/oauth2/create-client", {"redirect_uris": ["https://a.example.com/cb"]}),
+            ("/api/auth/oauth2/client/rotate-secret", {"client_id": "x"}),
+        ):
+            res = await client.post(path, json=body)
+            assert res.status_code == 401, (path, res.text)
+            assert "cache-control" not in res.headers, path
+
+
 async def test_privileges_gate_allows_when_hook_true():
     seen: list[str] = []
 
@@ -308,6 +347,24 @@ async def test_get_and_list_never_return_client_secret():
         listed = await client.get("/api/auth/oauth2/get-clients")
         assert listed.status_code == 200
         assert all("client_secret" not in c for c in listed.json())
+
+
+async def test_get_list_and_update_keep_client_secret_expires_at():
+    # TS v1.7.6 oauthClient/endpoints.ts:54-57, 267-269, 370-372 null only client_secret;
+    # schemaToOAuth (register.ts:1416) keeps client_secret_expires_at for secret clients.
+    async with provider_client() as client:
+        await sign_up(client)
+        cid = (await _create(client)).json()["client_id"]
+        got = (await client.get(f"/api/auth/oauth2/get-client?client_id={cid}")).json()
+        assert got["client_secret_expires_at"] == 0
+        listed = (await client.get("/api/auth/oauth2/get-clients")).json()
+        assert listed[0]["client_secret_expires_at"] == 0
+        updated = await client.post(
+            "/api/auth/oauth2/update-client",
+            json={"client_id": cid, "update": {"client_name": "Renamed"}},
+        )
+        assert updated.json()["client_secret_expires_at"] == 0
+        assert "client_secret" not in updated.json()
 
 
 async def test_cross_user_cannot_read_client():

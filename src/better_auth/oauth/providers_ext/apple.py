@@ -85,6 +85,7 @@ def _name_from_token_user(user: dict[str, Any] | None) -> str | None:
 @dataclass
 class Apple(ProviderConfig):
     provider_id: str = "apple"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://appleid.apple.com/auth/authorize"
     token_endpoint: str = "https://appleid.apple.com/auth/token"
     scopes: list[str] = field(default_factory=lambda: ["email", "name"])
@@ -127,7 +128,6 @@ class Apple(ProviderConfig):
             response_type="code id_token",
             response_mode="form_post",
             code_verifier=code_verifier if self.use_pkce else None,
-            login_hint=login_hint,
             # TS v1.7.6 apple.ts:112 forwards the per-request extras (e7eb45b06)
             additional_params={**self.authorize_params, **(additional_params or {})} or None,
         )

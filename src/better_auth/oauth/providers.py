@@ -17,7 +17,7 @@ import inspect
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import jwt
 
@@ -70,6 +70,12 @@ class ProviderConfig:
     scope_joiner: str = " "
     #: per-provider PKCE (S256) — NOT a global flag (spec item 1)
     use_pkce: bool = False
+    #: whether the TS provider's ``createAuthorizationURL`` passes ``loginHint`` on (most
+    #: built-in providers drop it; custom and generic providers forward it)
+    forwards_login_hint: ClassVar[bool] = True
+    #: the TS ``CLIENT_ID_AND_SECRET_REQUIRED`` guard on the authorize URL: "id" checks
+    #: the client id, "id+secret" both, "" none
+    required_credentials: ClassVar[str] = ""
     #: bind the redirect flow's id token to a nonce (TS ``requiresIdTokenNonce``): the
     #: nonce is minted into state, sent on the authorize URL, handed back to
     #: ``fetch_user`` as ``tokens.expected_id_token_nonce``, and a callback whose state
@@ -136,6 +142,11 @@ class ProviderConfig:
         """``additional_params`` are the per-request extras (TS ``additionalParams``,
         e7eb45b06); they win over the configured ``authorize_params``. ``nonce`` is the
         redirect flow's id-token nonce, sent only when the provider binds one."""
+        if self.required_credentials and (
+            not get_primary_client_id(self.client_id)
+            or (self.required_credentials == "id+secret" and not self.client_secret)
+        ):
+            raise ValueError("CLIENT_ID_AND_SECRET_REQUIRED")
         scopes = [] if self.disable_default_scope else list(self.scopes)
         scopes += list(extra_scopes or [])
         deduped = list(dict.fromkeys(scopes))
@@ -148,7 +159,7 @@ class ProviderConfig:
             scopes=deduped or None,
             scope_joiner=self.scope_joiner,
             code_verifier=code_verifier if self.use_pkce else None,
-            login_hint=login_hint,
+            login_hint=login_hint if self.forwards_login_hint else None,
             nonce=nonce if self.binds_id_token_nonce else None,
             additional_params=params or None,
         )
@@ -317,11 +328,14 @@ class GitHub(ProviderConfig):
     token_endpoint: str = "https://github.com/login/oauth/access_token"
     userinfo_endpoint: str = "https://api.github.com/user"
     scopes: list[str] = field(default_factory=lambda: ["read:user", "user:email"])
+    #: github.ts:67-98 hands codeVerifier to the authorize URL and the code exchange
+    use_pkce: bool = True
 
     async def fetch_user(self, tokens: OAuthTokens, http: httpx.AsyncClient) -> OAuthUserInfo:
         headers = {
             "authorization": f"Bearer {tokens.access_token}",
-            "user-agent": "better-auth-py",
+            # github.ts:143, 161
+            "user-agent": "better-auth",
             "accept": "application/vnd.github+json",
         }
         response = await oauth_fetch(http, "GET", self.userinfo_endpoint, headers=headers)

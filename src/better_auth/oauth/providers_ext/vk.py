@@ -37,6 +37,7 @@ def _map(p: dict[str, Any]) -> OAuthUserInfo:
 @dataclass
 class VK(ProviderConfig):
     provider_id: str = "vk"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://id.vk.com/authorize"
     token_endpoint: str = "https://id.vk.com/oauth2/auth"
     userinfo_endpoint: str = _USER_INFO_ENDPOINT

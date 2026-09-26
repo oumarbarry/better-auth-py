@@ -20,7 +20,14 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
-from better_auth import BetterAuth, EmailVerification, GitHub, Where
+from better_auth import (
+    AccountLinking,
+    AccountOptions,
+    BetterAuth,
+    EmailVerification,
+    GitHub,
+    Where,
+)
 from better_auth.config import UserOptions
 from better_auth.oauth import verify
 from better_auth.oauth.machinery import TokenEndpointAuth
@@ -40,6 +47,7 @@ from better_auth.plugins_ext.generic_oauth import (
     slack,
     yandex,
 )
+from better_auth.schema import Field
 from conftest import SIGNUP, make_auth, make_client, sign_up
 
 IDP = "https://idp.example.com"
@@ -699,3 +707,79 @@ async def test_yandex_preset_without_email_returns_none():
     )
     getter: Any = config.get_user_info
     assert await getter.fetch(OAuthTokens(access_token="a"), http) is None
+
+
+# --- provider profile into the user row (link-account.ts:461-588, db/schema.ts:225-238) ---
+
+
+async def test_registration_without_a_provider_name_stores_an_empty_name():
+    # TS v1.7.6 callback.ts:293 passes `userInfo.name || ""`: never the email.
+    http = idp_http(userinfo={"id": "n1", "email": "noname@test.com"})
+    auth = plugin_auth(cfg(), http_client=http)
+    await run_flow(auth)
+    user = await auth.adapter.find_one("user", [Where("email", "noname@test.com")])
+    assert user is not None and user["name"] == ""
+
+
+def company_auth(mapper: Any, **fields: Field) -> BetterAuth:
+    http = idp_http(userinfo={"id": "c1", "email": "co@test.com", "name": "Co"})
+    return plugin_auth(
+        cfg(map_profile_to_user=mapper, override_user_info=True),
+        http_client=http,
+        user=UserOptions(additional_fields={"company": Field("string"), **fields}),
+    )
+
+
+async def test_mapped_profile_fills_additional_user_fields_on_registration():
+    auth = company_auth(lambda raw: {"company": "Acme", "unknown": "dropped"})
+    await run_flow(auth)
+    user = await auth.adapter.find_one("user", [Where("email", "co@test.com")])
+    assert user is not None and user["company"] == "Acme"
+    assert "unknown" not in user
+
+
+async def test_mapped_profile_skips_fields_closed_to_input():
+    auth = company_auth(
+        lambda raw: {"company": "Acme", "role": "admin"},
+        role=Field("string", input=False, default="user"),
+    )
+    await run_flow(auth)
+    user = await auth.adapter.find_one("user", [Where("email", "co@test.com")])
+    assert user is not None and user["role"] == "user"
+
+
+async def test_mapped_profile_updates_additional_fields_when_overriding_user_info():
+    names = iter(["Acme", "Globex"])
+    auth = company_auth(lambda raw: {"company": next(names)})
+    await run_flow(auth)
+    await run_flow(auth)
+    user = await auth.adapter.find_one("user", [Where("email", "co@test.com")])
+    assert user is not None and user["company"] == "Globex"
+
+
+async def test_mapped_profile_updates_additional_fields_on_link():
+    http = idp_http(userinfo={"id": "l1", "email": "generic@test.com", "emailVerified": True})
+    auth = plugin_auth(
+        cfg(map_profile_to_user=lambda raw: {"company": "Linked"}),
+        http_client=http,
+        user=UserOptions(additional_fields={"company": Field("string")}),
+        account=AccountOptions(
+            account_linking=AccountLinking(
+                trusted_providers=["acme"], update_user_info_on_link=True
+            )
+        ),
+    )
+    async with make_client(auth) as client:
+        await sign_up(client, email="generic@test.com")
+    await auth.adapter.update("user", [Where("email", "generic@test.com")], {"emailVerified": True})
+    await run_flow(auth)
+    user = await auth.adapter.find_one("user", [Where("email", "generic@test.com")])
+    assert user is not None and user["company"] == "Linked"
+
+
+async def test_missing_required_additional_field_redirects_with_its_code():
+    # TS v1.7.6 db/schema.ts:205-210 raises MISSING_FIELD; callback.ts:306-313 forwards it.
+    auth = company_auth(lambda raw: {}, tier=Field("string", required=True))
+    _s, cb, _ = await run_flow(auth)
+    assert "error=MISSING_FIELD" in cb.headers["location"]
+    assert "tier+is+required" in cb.headers["location"]

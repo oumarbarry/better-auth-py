@@ -261,8 +261,8 @@ async def test_apple_callback_without_user_falls_back_to_id_token_name():
 
 async def test_apple_callback_malformed_user_json_ignored():
     """Malformed `user` JSON is ignored (TS safeJSONParse -> null) -- the flow still succeeds,
-    falling back to the id-token name (empty here, so account creation's own `info.name or
-    email` fallback kicks in -- flow.py:303) instead of erroring."""
+    falling back to the id-token name (empty here, stored as "" like TS v1.7.6 apple.ts:166
+    and callback.ts:293) instead of erroring."""
     id_token = apple_id_token()
     auth = apple_auth(id_token)
     async with make_client(auth) as client:
@@ -274,7 +274,7 @@ async def test_apple_callback_malformed_user_json_ignored():
         assert response.status_code == 302
         assert "error" not in response.headers["location"]
         session = (await client.get("/api/auth/get-session")).json()
-        assert session["user"]["name"] == "jane@example.com"
+        assert session["user"]["name"] == ""
 
 
 async def test_github_callback_ignores_stray_user_param():

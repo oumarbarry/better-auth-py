@@ -31,6 +31,7 @@ def _vercel_mapper(profile: dict[str, Any]) -> OAuthUserInfo:
 @dataclass
 class Vercel(ProviderConfig):
     provider_id: str = "vercel"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://vercel.com/oauth/authorize"
     token_endpoint: str = "https://api.vercel.com/login/oauth/token"
     userinfo_endpoint: str = "https://api.vercel.com/login/oauth/userinfo"

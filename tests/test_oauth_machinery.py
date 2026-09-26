@@ -12,7 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
-from better_auth import AccountLinking, AccountOptions, GitHub, Google
+from better_auth import AccountLinking, AccountOptions, Discord, GitHub, Google
 from better_auth.adapters.base import Where
 from better_auth.config import OnAPIError
 from better_auth.oauth.flow import merge_scopes, parse_stored_scopes
@@ -147,17 +147,20 @@ async def test_re_signin_promotes_unverified_local_email():
 # --- per-provider PKCE --------------------------------------------------------------------
 
 
-async def test_google_uses_pkce_github_does_not():
+async def test_google_and_github_use_pkce_discord_does_not():
     auth = make_auth(
         social_providers={
             "github": GitHub(client_id="c", client_secret="s"),
             "google": Google(client_id="c", client_secret="s"),
+            "discord": Discord(client_id="c", client_secret="s"),
         }
     )
     async with make_client(auth) as client:
+        # github.ts:67-91 passes codeVerifier; discord.ts:92-111 does not.
         gh = await client.post("/api/auth/sign-in/social", json={"provider": "github"})
-        gq = parse_qs(urlsplit(gh.json()["url"]).query)
-        assert "code_challenge" not in gq
+        assert "code_challenge" in parse_qs(urlsplit(gh.json()["url"]).query)
+        dc = await client.post("/api/auth/sign-in/social", json={"provider": "discord"})
+        assert "code_challenge" not in parse_qs(urlsplit(dc.json()["url"]).query)
 
         gg = await client.post("/api/auth/sign-in/social", json={"provider": "google"})
         gg_q = parse_qs(urlsplit(gg.json()["url"]).query)
@@ -269,6 +272,21 @@ async def test_account_info_returns_raw_profile():
         body = r.json()
         assert body["user"]["email"] == SIGNUP["email"]
         assert body["data"]["login"] == "octocat"  # raw provider profile, not {}
+
+
+async def test_account_info_profile_failure_is_failed_to_get_user_info():
+    # TS v1.7.6 account.ts:1044-1053: a provider whose profile call fails yields no info,
+    # which is a 401 FAILED_TO_GET_USER_INFO (github.ts:147, reddit.ts return null).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"message": "down"})
+
+    auth = gh_auth(VERIFIED, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    async with make_client(auth) as client:
+        signup = await sign_up(client)
+        await _make_account(auth, signup["user"]["id"], accessTokenExpiresAt=None)
+        r = await client.get("/api/auth/account-info?accountId=acc1")
+        assert r.status_code == 401, r.text
+        assert r.json()["code"] == "FAILED_TO_GET_USER_INFO"
 
 
 # --- id-token verify (self-signed JWKS fixture) + idToken sign-in -------------------------

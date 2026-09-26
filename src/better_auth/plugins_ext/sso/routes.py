@@ -43,7 +43,7 @@ from ...oauth.machinery import (
     create_private_key_jwt_client_assertion_getter,
     get_oauth2_tokens,
 )
-from ...oauth.models import OAuthTokens, OAuthUserInfo
+from ...oauth.models import CORE_USER_KEYS, OAuthTokens, OAuthUserInfo
 from ...oauth.providers import ProviderConfig
 from ...oauth.verify import verify_id_token
 from ...schema import filter_output_fields
@@ -938,6 +938,7 @@ async def _complete_oidc_callback(
         image=provider_user["image"],
         email_verified=provider_user["emailVerified"],
         raw=raw_profile,
+        extra={k: v for k, v in provider_user.items() if k not in CORE_USER_KEYS},
     )
     resolving = plugin.resolve_user is not None
     request_sign_up = state_data.get("requestSignUp")

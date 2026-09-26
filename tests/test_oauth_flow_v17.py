@@ -1,6 +1,7 @@
 """Social sign-in core at better-auth v1.7.6: callback.ts, sign-in.ts (social), state.ts,
 link-account.ts (validateUserInfo, requireEmailVerification), account.ts refresh."""
 
+import json
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -416,3 +417,49 @@ async def test_refresh_token_response_account_id_is_the_row_id():
         r = await client.post("/api/auth/refresh-token", json={"accountId": account["id"]})
         assert r.status_code == 200, r.text
     assert r.json()["accountId"] == account["id"]
+
+
+# --- additionalData is spread at the top of the state (oauth2/state.ts:56-69) -----------
+
+
+async def test_additional_data_is_spread_at_the_top_of_the_stored_state():
+    auth = acme_auth()
+    async with make_client(auth) as client:
+        await start(
+            client,
+            callbackURL="/dash",
+            additionalData={"tenant": "acme", "callbackURL": "https://evil", "link": {"x": 1}},
+        )
+    rows = await auth.adapter.find_many("verification", [])
+    value = json.loads(rows[0]["value"])
+    # TS v1.7.6 oauth2/state.ts:56-69: client keys spread first, core keys win.
+    assert value["tenant"] == "acme"
+    assert "additionalData" not in value
+    assert value["callbackURL"] == "/dash"
+    assert "link" not in value
+
+
+async def test_callback_reads_additional_data_at_the_top_level():
+    auth = acme_auth(plugins=[ContextPlugin()])
+    async with make_client(auth) as client:
+        url = await start(client, additionalData={"tenant": "acme"})
+        await client.get(f"/api/auth/callback/acme?code=abc&state={state_of(url)}")
+    assert ContextPlugin.seen["tenant"] == "acme"
+
+
+async def test_callback_accepts_a_state_written_in_the_old_nested_form():
+    # States written before the upgrade nest additionalData; they live 10 minutes.
+    auth = acme_auth(plugins=[ContextPlugin()])
+    async with make_client(auth) as client:
+        url = await start(client)
+        state = state_of(url)
+        row = await auth.internal.find_verification_value(state)
+        value = json.loads(row["value"])
+        value["additionalData"] = {"tenant": "acme", "callbackURL": "https://evil"}
+        await auth.adapter.update(
+            "verification", [Where("id", row["id"])], {"value": json.dumps(value)}
+        )
+        r = await client.get(f"/api/auth/callback/acme?code=abc&state={state}")
+    assert ContextPlugin.seen["tenant"] == "acme"
+    assert ContextPlugin.seen["callbackURL"] == "/"
+    assert r.status_code == 302

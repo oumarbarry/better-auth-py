@@ -4,7 +4,7 @@ title: GitHub
 
 # GitHub
 
-GitHub OAuth2. Pure OAuth2 (no PKCE, no id token).
+GitHub OAuth2 with PKCE (S256). No id token.
 
 ## Configure
 

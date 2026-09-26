@@ -21,6 +21,7 @@ from ..providers import ProviderConfig
 @dataclass
 class Slack(ProviderConfig):
     provider_id: str = "slack"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://slack.com/openid/connect/authorize"
     token_endpoint: str = "https://slack.com/api/openid.connect.token"
     userinfo_endpoint: str = "https://slack.com/api/openid.connect.userInfo"

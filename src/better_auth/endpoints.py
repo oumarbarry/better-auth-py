@@ -9,6 +9,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
+import httpx
 import jwt as pyjwt
 
 from .adapters.base import Where
@@ -1188,7 +1189,9 @@ async def account_info(ctx: Ctx) -> AuthResponse:
     )
     try:
         info = await provider.fetch_user(tokens, ctx.auth.http)
-    except OAuthFetchError:
+    except (OAuthFetchError, httpx.HTTPError, ValueError):
+        # A provider profile call that fails is TS's `null` user info (github.ts:147,
+        # reddit.ts:115), like the callback's handling in oauth/flow.py.
         info = None
     if info is None:  # TS v1.7.6 account.ts:1048-1053
         raise APIError(401, "FAILED_TO_GET_USER_INFO", "Failed to get user info")

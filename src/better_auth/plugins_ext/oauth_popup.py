@@ -15,9 +15,8 @@ below is reused verbatim from TS.
 ``ponytail`` notes:
 - State is the shared ``oauth.flow`` verification row + signed CSRF cookie, so the normal
   ``/callback`` route consumes it unchanged (generic-oauth providers included).
-- ``additionalData`` is stored NESTED under ``additionalData`` (this port's convention,
-  matching generic-oauth) with INTERNAL_STATE_KEYS stripped — nesting already keeps an
-  injected ``link``/``callbackURL`` out of the keys the callback reads.
+- ``additionalData`` is spread at the top level of the state with the internal state keys
+  stripped (TS index.ts:220-237), so an injected ``link``/``callbackURL`` never lands.
 """
 
 from __future__ import annotations
@@ -63,23 +62,6 @@ OAUTH_POPUP_ERROR_CODES: dict[str, str] = {
     "POPUP_CLOSED": "Sign-in popup was closed before completing",
     "POPUP_TIMEOUT": "Sign-in popup timed out",
 }
-
-# --- state keys mirrored so additionalData cannot inject them (state.ts stateDataSchema) --
-
-INTERNAL_STATE_KEYS = frozenset(
-    {
-        "callbackURL",
-        "codeVerifier",
-        "errorURL",
-        "newUserURL",
-        "expiresAt",
-        "oauthState",
-        "link",
-        "requestSignUp",
-        "idTokenNonce",
-        "serverContext",
-    }
-)
 
 # --- the CSP-pinned completion script (byte-for-byte from index.ts) ----------------------
 
@@ -284,14 +266,14 @@ class OAuthPopupPlugin(Plugin):
                     parsed = loaded
             except ValueError:
                 parsed = {}
-        additional_data = {k: v for k, v in parsed.items() if k not in INTERNAL_STATE_KEYS}
         nonce = _mint_id_token_nonce(provider)
         state, code_verifier = await _create_state(
             ctx,
             callback_url=callback_url,
             error_url=query.get("errorCallbackURL"),
             new_user_url=query.get("newUserCallbackURL"),
-            additional_data=additional_data or None,
+            # _create_state strips INTERNAL_STATE_KEYS (TS index.ts:223-227).
+            additional_data=parsed,
             id_token_nonce=nonce,
             request_sign_up=True if query.get("requestSignUp") == "true" else None,
         )

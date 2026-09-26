@@ -238,6 +238,45 @@ def test_github_forwards_additional_params():
     assert parse_qs(urlsplit(url).query)["allow_signup"] == ["false"]
 
 
+def test_github_sends_pkce():
+    # github.ts:67-91 hands codeVerifier to createAuthorizationURL, which adds S256.
+    p = GitHub(client_id="cid", client_secret="cs")
+    url = p.authorization_url(state="st", redirect_uri="http://cb", code_verifier="v" * 43)
+    query = parse_qs(urlsplit(url).query)
+    assert query["code_challenge_method"] == ["S256"]
+    assert "code_challenge" in query
+
+
+async def test_github_exchange_sends_the_code_verifier():
+    # github.ts:93-98: authorizationCodeRequest carries codeVerifier.
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update({k: v[0] for k, v in parse_qs(request.content.decode()).items()})
+        return httpx.Response(200, json={"access_token": "at", "token_type": "bearer"})
+
+    await GitHub(client_id="c", client_secret="s").exchange(
+        http_with(handler), code="code", redirect_uri="http://cb", code_verifier="v" * 43
+    )
+    assert seen["code_verifier"] == "v" * 43
+
+
+async def test_github_user_agent_is_better_auth():
+    # github.ts:143, 161: "User-Agent": "better-auth" on both profile calls.
+    agents: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        agents.append(request.headers["user-agent"])
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": 7, "login": "o", "email": "a@x.com"})
+        return httpx.Response(200, json=[])
+
+    await GitHub(client_id="c", client_secret="s").fetch_user(
+        OAuthTokens(access_token="at"), http_with(handler)
+    )
+    assert agents == ["better-auth", "better-auth"]
+
+
 async def test_github_keeps_public_profile_email_and_its_verification():
     # github.ts:160-165: the emails list only fills a missing profile email, and
     # emailVerified is read from the entry matching the chosen email

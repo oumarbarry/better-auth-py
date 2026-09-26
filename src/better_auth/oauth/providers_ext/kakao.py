@@ -30,6 +30,7 @@ def _map(p: dict[str, Any]) -> OAuthUserInfo:
 @dataclass
 class Kakao(ProviderConfig):
     provider_id: str = "kakao"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://kauth.kakao.com/oauth/authorize"
     token_endpoint: str = "https://kauth.kakao.com/oauth/token"
     userinfo_endpoint: str = "https://kapi.kakao.com/v2/user/me"

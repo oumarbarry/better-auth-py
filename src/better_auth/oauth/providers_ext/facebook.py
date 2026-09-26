@@ -49,6 +49,7 @@ def _decode_unverified(token: str) -> dict[str, Any]:
 @dataclass
 class Facebook(ProviderConfig):
     provider_id: str = "facebook"
+    required_credentials = "id+secret"  # TS CLIENT_ID_AND_SECRET_REQUIRED guard
     authorization_endpoint: str = "https://www.facebook.com/v24.0/dialog/oauth"
     token_endpoint: str = "https://graph.facebook.com/v24.0/oauth/access_token"
     userinfo_endpoint: str = "https://graph.facebook.com/me"

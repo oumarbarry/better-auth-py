@@ -406,7 +406,9 @@ class BetterAuth:
         body: dict[str, Any] = dict(getattr(error, "extra", None) or {})
         body["code"] = code
         body["message"] = message
-        return AuthResponse(status=status, body=body)
+        return AuthResponse(
+            status=status, body=body, headers=list(getattr(error, "headers", None) or [])
+        )
 
     async def _dispatch(self, request: AuthRequest) -> AuthResponse:
         # A trailing slash on a non-root path is significant unless skipTrailingSlashes

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 @dataclass
 class Dropbox(ProviderConfig):
     provider_id: str = "dropbox"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://www.dropbox.com/oauth2/authorize"
     token_endpoint: str = "https://api.dropboxapi.com/oauth2/token"
     userinfo_endpoint: str = "https://api.dropboxapi.com/2/users/get_current_account"

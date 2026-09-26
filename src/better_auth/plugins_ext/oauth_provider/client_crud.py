@@ -107,9 +107,10 @@ def _reject_trusted(opts: Any, client_id: str) -> None:
 
 
 def _strip_secret(client: dict[str, Any]) -> dict[str, Any]:
+    """TS v1.7.6 oauthClient/endpoints.ts:54-57: only ``client_secret`` is hidden;
+    ``client_secret_expires_at`` stays on the wire."""
     res = schema_to_oauth(client)
     res.pop("client_secret", None)
-    res.pop("client_secret_expires_at", None)
     return res
 
 

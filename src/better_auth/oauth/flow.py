@@ -220,6 +220,23 @@ def _mint_id_token_nonce(provider: ProviderConfig) -> str | None:
 # --- request-scoped OAuth state (TS v1.7.6 api/state/oauth.ts, 0cbaf81be) ---------------
 
 _STATE_ATTR = "_oauth_state"
+
+#: The keys of TS's ``stateDataSchema`` (state.ts:11-46 ``INTERNAL_STATE_KEYS``): client
+#: ``additionalData`` can never set them.
+INTERNAL_STATE_KEYS = frozenset(
+    {
+        "callbackURL",
+        "codeVerifier",
+        "errorURL",
+        "newUserURL",
+        "expiresAt",
+        "oauthState",
+        "link",
+        "requestSignUp",
+        "idTokenNonce",
+        "serverContext",
+    }
+)
 _SERVER_CONTEXT_ATTR = "_oauth_server_context"
 
 
@@ -234,8 +251,8 @@ async def add_oauth_server_context(ctx: Ctx, values: dict[str, Any]) -> None:
 
 def get_oauth_state(ctx: Ctx) -> dict[str, Any] | None:
     """The OAuth state of this request: the state just written during sign-in, or the one
-    parsed on the callback. Only ``serverContext`` is server-trusted; ``additionalData``
-    comes from the client."""
+    parsed on the callback. Only ``serverContext`` is server-trusted; the client's
+    ``additionalData`` keys sit at the top level and must not be trusted."""
     return getattr(ctx, _STATE_ATTR, None)
 
 
@@ -273,11 +290,13 @@ async def _create_state(
         "expiresAt": int(now.timestamp() * 1000) + STATE_EXPIRES_IN * 1000,
         "requestSignUp": request_sign_up,
         "idTokenNonce": id_token_nonce or None,
-        # ponytail: client additionalData stays nested (the port's convention, see
-        # oauth_popup.py); TS spreads it at the top level. Flatten it with its readers.
-        "additionalData": additional_data or None,
     }
-    payload = {key: value for key, value in payload.items() if value is not None}
+    # TS v1.7.6 oauth2/state.ts:56-69: client additionalData is spread at the top level
+    # and every core key is written after it, so a client key named like one never lands
+    # (an absent core value drops the key, as JSON.stringify drops undefined).
+    extra = additional_data if isinstance(additional_data, dict) else {}
+    client = {k: v for k, v in extra.items() if k not in INTERNAL_STATE_KEYS}
+    payload = {**client, **{key: value for key, value in payload.items() if value is not None}}
     try:
         verification = await ctx.internal.create_verification_value(
             {
@@ -460,6 +479,19 @@ def _profile_fields(info: OAuthUserInfo, email: str) -> dict[str, Any]:
     }
 
 
+def _profile_user_fields(ctx: Ctx, info: OAuthUserInfo, action: str) -> dict[str, Any]:
+    """TS v1.7.6 db/schema.ts:225-238 ``parseAdditionalUserInputFromProviderProfile``: the
+    mapped profile's configured user fields. A field closed to input is skipped (never
+    refused); on ``create`` defaults apply and a missing required field is a 400."""
+    schema = ctx.auth.schema["user"]
+    allowed = {
+        key: value
+        for key, value in info.extra.items()
+        if key not in schema or schema[key].input is not False
+    }
+    return ctx.auth.parse_user_input(allowed, action)
+
+
 async def handle_oauth_user_info(
     ctx: Ctx,
     provider: ProviderConfig,
@@ -577,11 +609,14 @@ async def handle_oauth_user_info(
         if disable_sign_up:
             raise OAuthLinkError("signup_disabled")
         token_fields = _token_fields(ctx, tokens)
+        # TS v1.7.6 link-account.ts:517-560: every caller passes `name || ""` (callback.ts:293,
+        # sign-in.ts:333), then the mapped profile's configured user fields.
         user_data = {
-            "name": info.name or email,
+            "name": info.name or "",
+            "image": info.image,
+            **_profile_user_fields(ctx, info, "create"),
             "email": email,
             "emailVerified": info.email_verified,
-            "image": info.image,
             "createdAt": now,
             "updatedAt": now,
         }
@@ -796,13 +831,15 @@ async def _maybe_promote_verified(
 async def _apply_update_user_info_on_link(
     ctx: Ctx, user: dict[str, Any], info: OAuthUserInfo, now: Any
 ) -> dict[str, Any]:
-    """account.accountLinking.updateUserInfoOnLink: copy name/image from the freshly linked
-    provider profile onto the user — never touches email/emailVerified (identity anchors)."""
+    """account.accountLinking.updateUserInfoOnLink: copy name/image and the mapped profile's
+    configured user fields (TS v1.7.6 link-account.ts:722-757) from the freshly linked
+    provider profile onto the user. Never touches email/emailVerified (identity anchors)."""
     updates = {"updatedAt": now}
     if info.name:
         updates["name"] = info.name
     if info.image:
         updates["image"] = info.image
+    updates.update(_profile_user_fields(ctx, info, "update"))
     updated = await ctx.internal.update("user", [Where("id", user["id"])], updates, ctx=ctx)
     return updated or {**user, **updates}
 
@@ -816,9 +853,12 @@ async def _override_user_info(
         verified = user["emailVerified"] or info.email_verified
     else:
         verified = info.email_verified
+    # TS v1.7.6 link-account.ts:461-492: callers pass `name || ""`; updateUser drops an
+    # undefined image, so a provider without one keeps the stored image.
     updates = {
-        "name": info.name or user["name"],
-        "image": info.image,
+        "name": info.name or "",
+        **({"image": info.image} if info.image is not None else {}),
+        **_profile_user_fields(ctx, info, "update"),
         "email": email or user["email"],
         "emailVerified": verified,
         "updatedAt": now,
@@ -919,6 +959,14 @@ async def _parse_state(
     if int(data.get("expiresAt") or 0) < int(utcnow().timestamp() * 1000):
         raise _StateError("state_mismatch", error_url, cookie_expired=True)
     data["errorURL"] = error_url
+    # States written before additionalData was spread (TS oauth2/state.ts:56-69) nest it
+    # under ``additionalData``. They live 10 minutes, so lift the nested keys to the top
+    # level (core keys still win) so sign-ins in flight at upgrade read like new ones.
+    legacy = data.get("additionalData")
+    if isinstance(legacy, dict):
+        for key, value in legacy.items():
+            if key not in INTERNAL_STATE_KEYS:
+                data.setdefault(key, value)
     setattr(ctx, _STATE_ATTR, data)
     return data
 

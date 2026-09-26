@@ -30,6 +30,7 @@ def _polar_mapper(profile: dict[str, Any]) -> OAuthUserInfo:
 @dataclass
 class Polar(ProviderConfig):
     provider_id: str = "polar"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://polar.sh/oauth2/authorize"
     token_endpoint: str = "https://api.polar.sh/v1/oauth2/token"
     userinfo_endpoint: str = "https://api.polar.sh/v1/oauth2/userinfo"

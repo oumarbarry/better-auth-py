@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 @dataclass
 class Twitter(ProviderConfig):
     provider_id: str = "twitter"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://x.com/i/oauth2/authorize"
     token_endpoint: str = "https://api.x.com/2/oauth2/token"
     scopes: list[str] = field(

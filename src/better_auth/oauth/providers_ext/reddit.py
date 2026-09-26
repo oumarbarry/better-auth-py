@@ -32,6 +32,7 @@ _USER_AGENT = "better-auth"  # TS v1.7.6 reddit.ts:66,91
 @dataclass
 class Reddit(ProviderConfig):
     provider_id: str = "reddit"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://www.reddit.com/api/v1/authorize"
     token_endpoint: str = "https://www.reddit.com/api/v1/access_token"
     userinfo_endpoint: str = "https://oauth.reddit.com/api/v1/me"

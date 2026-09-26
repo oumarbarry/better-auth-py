@@ -43,6 +43,7 @@ def _decode_unverified(token: str) -> dict[str, Any]:
 @dataclass
 class Twitch(ProviderConfig):
     provider_id: str = "twitch"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://id.twitch.tv/oauth2/authorize"
     token_endpoint: str = "https://id.twitch.tv/oauth2/token"
     scopes: list[str] = field(default_factory=lambda: ["user:read:email", "openid"])
@@ -74,7 +75,6 @@ class Twitch(ProviderConfig):
             scope_joiner=self.scope_joiner,
             # Twitch never forwards codeVerifier — no PKCE.
             code_verifier=None,
-            login_hint=login_hint,
             claims=self.claims,
             # twitch.ts:65 (e7eb45b06): per-request extras win over config
             additional_params={**self.authorize_params, **(additional_params or {})} or None,

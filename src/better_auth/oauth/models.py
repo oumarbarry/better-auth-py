@@ -30,6 +30,10 @@ class OAuthTokens:
     expected_id_token_nonce: str | None = None
 
 
+#: The user keys ``OAuthUserInfo`` carries as attributes; any other mapped key is ``extra``.
+CORE_USER_KEYS = frozenset({"id", "email", "emailVerified", "name", "image"})
+
+
 @dataclass
 class OAuthUserInfo:
     """Provider profile mapped to core user fields. ``.raw`` is the untouched provider
@@ -42,3 +46,7 @@ class OAuthUserInfo:
     image: str | None = None
     email_verified: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    #: mapped user fields beyond id/email/emailVerified/name/image (a generic-oauth
+    #: ``map_profile_to_user`` result, SSO ``mapping.extraFields``): TS's
+    #: ``providerProfile`` rest, written to configured user fields (link-account.ts:461-588)
+    extra: dict[str, Any] = field(default_factory=dict)

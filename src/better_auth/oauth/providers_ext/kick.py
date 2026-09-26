@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 @dataclass
 class Kick(ProviderConfig):
     provider_id: str = "kick"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://id.kick.com/oauth/authorize"
     token_endpoint: str = "https://id.kick.com/oauth/token"
     userinfo_endpoint: str = "https://api.kick.com/public/v1/users"

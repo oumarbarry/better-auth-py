@@ -62,6 +62,7 @@ def _decode_unverified(token: str) -> dict[str, Any]:
 @dataclass
 class MicrosoftEntraId(ProviderConfig):
     provider_id: str = "microsoft"
+    required_credentials = "id"  # TS CLIENT_ID_AND_SECRET_REQUIRED guard
     scopes: list[str] = field(
         default_factory=lambda: [
             "openid",

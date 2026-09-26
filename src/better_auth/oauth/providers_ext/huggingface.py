@@ -16,6 +16,7 @@ from ..providers import ProviderConfig
 @dataclass
 class Huggingface(ProviderConfig):
     provider_id: str = "huggingface"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
     authorization_endpoint: str = "https://huggingface.co/oauth/authorize"
     token_endpoint: str = "https://huggingface.co/oauth/token"
     userinfo_endpoint: str = "https://huggingface.co/oauth/userinfo"

@@ -42,6 +42,8 @@ def _map(p: dict[str, Any]) -> OAuthUserInfo:
 @dataclass
 class Cognito(ProviderConfig):
     provider_id: str = "cognito"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
+    required_credentials = "id"  # TS CLIENT_ID_AND_SECRET_REQUIRED guard
     domain: str = ""
     region: str = ""
     user_pool_id: str = ""

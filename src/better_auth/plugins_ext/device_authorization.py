@@ -40,7 +40,7 @@ from ..crypto import generate_random_string
 from ..plugins import Plugin, RateLimitRule, Route
 from ..schema import Field, Schema
 from ..session import utcnow
-from ..types import AuthResponse, Ctx
+from ..types import APIError, AuthResponse, Ctx
 
 #: TS ``DEVICE_AUTHORIZATION_ERROR_CODES`` (error-codes.ts) — exact strings, surfaced on
 #: ``auth.error_codes``. These are the internal error *messages*; the wire-visible OAuth
@@ -341,6 +341,13 @@ def _handles_errors(handler: Callable[..., Awaitable[AuthResponse]], no_store: b
                 present = {name.lower() for name, _ in response.headers}
                 response.headers += [(k, v) for k, v in _NO_STORE if k.lower() not in present]
             return response
+        except APIError as error:
+            # TS core api/index.ts:101-118: a noStore handler's APIError carries them too.
+            if no_store:
+                headers = error.headers or []
+                present = {name.lower() for name, _ in headers}
+                error.headers = headers + [(k, v) for k, v in _NO_STORE if k.lower() not in present]
+            raise
 
     return wrapped
 

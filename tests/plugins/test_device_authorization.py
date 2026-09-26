@@ -18,6 +18,7 @@ from better_auth.plugins_ext.device_authorization import (
     ERROR_CODES,
     DeviceAuthorizationPlugin,
 )
+from better_auth.types import APIError
 from conftest import make_auth, make_client, sign_up
 
 GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
@@ -95,6 +96,23 @@ async def test_rejects_invalid_client_in_device_code_request():
             "error": "invalid_client",
             "error_description": "Invalid client ID",
         }
+
+
+async def test_api_errors_on_device_routes_carry_no_store():
+    # TS v1.7.6 device-authorization/routes.ts:258, 659 (noStore) + core api/index.ts:101-118.
+    def refuse(client_id):
+        raise APIError(403, "FORBIDDEN", "Client blocked")
+
+    auth = device_auth(validate_client=refuse)
+    async with make_client(auth) as client:
+        for response in (
+            await client.post("/api/auth/device/code", json={"client_id": "c"}),
+            await _poll_token(client, "d", client_id="c"),
+        ):
+            assert response.status_code == 403
+            assert response.json()["code"] == "FORBIDDEN"
+            assert response.headers["cache-control"] == "no-store"
+            assert response.headers["pragma"] == "no-cache"
 
 
 async def test_accepts_valid_client_in_device_code_request():

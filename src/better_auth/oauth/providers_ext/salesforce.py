@@ -21,6 +21,8 @@ from ..providers import ProviderConfig
 @dataclass
 class Salesforce(ProviderConfig):
     provider_id: str = "salesforce"
+    forwards_login_hint = False  # TS createAuthorizationURL drops loginHint
+    required_credentials = "id+secret"  # TS CLIENT_ID_AND_SECRET_REQUIRED guard
     #: "production" (login.salesforce.com) or "sandbox" (test.salesforce.com).
     environment: str = "production"
     #: my-domain host (e.g. "acme.my.salesforce.com") — overrides environment.

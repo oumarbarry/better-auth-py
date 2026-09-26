@@ -391,9 +391,19 @@ class OAuthProviderPlugin(Plugin):
             ("POST", "/oauth2/delete-consent", self._delete_consent),
         ]
         # TS ``metadata.noStore`` (2196ea65e): credential routes send no-store on errors too.
+        # token, introspect, userinfo and end-session set it themselves, since their body
+        # validation errors (raised before the TS handler runs) must stay without it.
         no_store = {"/oauth2/register", "/oauth2/create-client", "/oauth2/client/rotate-secret"}
+        # TS ``use: [sessionMiddleware]`` (oauthClient/index.ts:228, 585) rejects first.
+        session_first = {"/oauth2/create-client", "/oauth2/client/rotate-secret"}
         return [
-            (method, path, self._oauth_guard(handler, no_store=path in no_store))
+            (
+                method,
+                path,
+                self._oauth_guard(
+                    handler, no_store=path in no_store, session_first=path in session_first
+                ),
+            )
             for method, path, handler in raw
         ]
 
@@ -503,8 +513,13 @@ class OAuthProviderPlugin(Plugin):
             result.headers = cookies + result.headers
         return result
 
-    def _oauth_guard(self, handler: Any, *, no_store: bool = False) -> Any:
+    def _oauth_guard(
+        self, handler: Any, *, no_store: bool = False, session_first: bool = False
+    ) -> Any:
         async def wrapped(ctx: Ctx) -> Any:
+            if session_first:
+                # Runs outside the noStore scope, like TS middleware before the handler.
+                await ctx.require_session()
             try:
                 return await handler(ctx)
             except OAuthError as error:
@@ -515,6 +530,15 @@ class OAuthProviderPlugin(Plugin):
                         (k, v) for k, v in NO_STORE_HEADERS if k.lower() not in present
                     ]
                 return response
+            except APIError as error:
+                # TS core api/index.ts:101-118: a noStore handler's APIError carries them too.
+                if no_store:
+                    headers = error.headers or []
+                    present = {name.lower() for name, _ in headers}
+                    error.headers = headers + [
+                        (k, v) for k, v in NO_STORE_HEADERS if k.lower() not in present
+                    ]
+                raise
 
         return wrapped
 
