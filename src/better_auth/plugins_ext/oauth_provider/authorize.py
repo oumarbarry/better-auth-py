@@ -1,10 +1,13 @@
 """GET /oauth2/authorize — the authorization-code flow + signed-query resume.
 
-Port of TS ``packages/oauth-provider/src/authorize.ts`` (v1.6.23). The 10-step flow:
-grant gate, PAR resolution, client validation, redirect_uri match (exact + RFC 8252 §7.3
-loopback-IP port-agnostic), scope validation, PKCE enforcement, session/prompt gates
-(signed login/consent page redirects or OIDC ``prompt=none`` error redirects), consent
-lookup, and authorization-code minting into the verification store.
+Port of TS ``packages/oauth-provider/src/authorize.ts`` (v1.7.6). GET query or form POST
+(267229bd2). The flow: grant gate, request object and PAR handling, the authorization query
+schema (errors go to a registered ``redirect_uri`` per RFC 6749 §4.1.2.1, else the error page),
+client validation, redirect_uri match (exact + RFC 8252 §7.3 loopback-IP port-agnostic), scope
+validation, the OIDC ``claims`` request (openid required, essential ``acr``), RFC 8707 resource
+policy, PKCE enforcement, session/prompt gates (``max_age``, signed login/consent page redirects
+or OIDC ``prompt=none`` error redirects), consent lookup (scopes, UserInfo claims, resources),
+and authorization-code minting into the verification store with the bound resources.
 
 Request-scoped state (TS ``defineRequestState`` / ``oAuthState``) is stashed on the ``Ctx``
 object, which the core dispatcher threads through before-hook -> endpoint -> after-hook.
@@ -14,21 +17,38 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
+import re
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ...crypto import generate_random_string
 from ...session import utcnow
 from ...types import APIError, AuthResponse, Ctx
+from .claims import (
+    LEVEL_0_ACR,
+    can_satisfy_essential_acr_request,
+    get_requested_user_info_claims,
+    get_supported_claims,
+    is_claims_request_input,
+    is_valid_oidc_claims_request,
+)
 from .metadata import _issuer
+from .resources import resolve_resource_policy, to_resource_list
 from .signed_query import Pairs
+from .token import _resource_issue
 from .utils import (
+    OAuthError,
     client_allows_grant,
     format_error_url,
     handle_redirect,
     is_loopback_ip,
     is_pkce_required,
+    normalize_timestamp_value,
     parse_prompt,
+    safe_url_issue,
+    search_params_to_query,
     sign_oauth_query,
     store_token,
 )
@@ -166,6 +186,7 @@ async def redirect_with_authorization_code(
     session_id: str,
     auth_time: int,
     reference_id: str | None,
+    resource: list[str],
 ) -> AuthResponse:
     """Mint an authorization code into the verification store and redirect — TS
     ``redirectWithAuthorizationCode``."""
@@ -181,11 +202,11 @@ async def redirect_with_authorization_code(
             # Omitted when unset, like TS JSON.stringify: the TS verification schema rejects null.
             **({"referenceId": reference_id} if reference_id is not None else {}),
             "authTime": auth_time,
+            # Resources authorized for the grant, narrowed but never widened at /token.
+            "resource": resource,
         },
         separators=(",", ":"),
     )
-    from datetime import datetime, timezone
-
     await ctx.internal.create_verification_value(
         {
             "identifier": await store_token(opts.store_tokens, code, "authorization_code"),
@@ -203,6 +224,205 @@ async def redirect_with_authorization_code(
     return handle_redirect(ctx, _redirect_with_code_url(query["redirect_uri"], params))
 
 
+# --- authorization request validation (types/zod.ts:106, oauth-endpoint.ts:223) -----
+
+_PROMPT_TOKENS = ("none", "consent", "login", "create", "select_account")
+_DPOP_JKT = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_JS_DECIMAL = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
+_JS_PREFIXED = re.compile(r"^0([xXoObB])([0-9A-Fa-f]+)$")
+
+
+def _js_number(value: str) -> float:
+    """JS ``Number(string)`` for the trimmed ``max_age`` text (NaN when not numeric)."""
+    text = value.strip()
+    prefixed = _JS_PREFIXED.match(text)
+    if prefixed:
+        base = {"x": 16, "o": 8, "b": 2}[prefixed.group(1).lower()]
+        try:
+            return float(int(prefixed.group(2), base))
+        except ValueError:
+            return math.nan
+    if text in ("Infinity", "+Infinity"):
+        return math.inf
+    if text == "-Infinity":
+        return -math.inf
+    return float(text) if _JS_DECIMAL.match(text) else math.nan
+
+
+def _prompt_issue(value: str) -> str | None:
+    tokens = [t.strip() for t in value.split(" ") if t.strip()]
+    if not tokens:
+        return "prompt must include at least one value"
+    for token in tokens:
+        if token not in _PROMPT_TOKENS:
+            return f"unsupported prompt value: {token}"
+    if "none" in tokens and len(set(tokens)) > 1:
+        return "prompt=none cannot be combined with other prompt values"
+    return None
+
+
+class _QueryIssue(Exception):
+    def __init__(self, error: str, description: str) -> None:
+        super().__init__(description)
+        self.error = error
+        self.description = description
+
+
+def _string_field(query: dict[str, Any], field: str) -> str | None:
+    value = query.get(field)
+    if value is None:
+        return None
+    if isinstance(value, list):
+        raise _QueryIssue("invalid_request", f"{field} must not appear more than once")
+    if not isinstance(value, str):
+        raise _QueryIssue("invalid_request", f"{field} must be a string")
+    return value
+
+
+def _enum_field(query: dict[str, Any], field: str, allowed: str, error: str) -> None:
+    value = _string_field(query, field)
+    if value is not None and value != allowed:
+        raise _QueryIssue(error, f"{field} must be one of: {allowed}")
+
+
+def parse_authorization_query(query: dict[str, Any]) -> dict[str, Any]:
+    """TS ``authorizationQuerySchema`` + ``mapIssuesToOAuthError`` (first issue in schema
+    order). Returns the parsed query (``max_age`` as an int); raises :class:`_QueryIssue`."""
+    _enum_field(query, "response_type", "code", "unsupported_response_type")
+    for field in ("request", "request_uri"):
+        _string_field(query, field)
+    redirect_uri = _string_field(query, "redirect_uri")
+    if redirect_uri is not None:
+        issue = safe_url_issue(redirect_uri)
+        if issue:
+            raise _QueryIssue("invalid_request", f"redirect_uri: {issue}")
+    for field in ("scope", "state"):
+        _string_field(query, field)
+    client_id = _string_field(query, "client_id")
+    if client_id is None:
+        raise _QueryIssue("invalid_request", "client_id is required")
+    if not client_id:
+        raise _QueryIssue("invalid_request", "client_id: client_id is required")
+    prompt = _string_field(query, "prompt")
+    if prompt is not None:
+        issue = _prompt_issue(prompt)
+        if issue:
+            raise _QueryIssue("invalid_request", f"prompt: {issue}")
+    for field in ("display", "ui_locales"):
+        _string_field(query, field)
+    parsed = dict(query)
+    max_age = query.get("max_age")
+    if max_age is not None:
+        if isinstance(max_age, str) and not max_age.strip():
+            raise _QueryIssue(
+                "invalid_request", "max_age: Too small: expected string to have >=1 characters"
+            )
+        if isinstance(max_age, bool) or not isinstance(max_age, (str, int, float)):
+            raise _QueryIssue("invalid_request", "max_age: Invalid input")
+        number = _js_number(max_age) if isinstance(max_age, str) else float(max_age)
+        if not math.isfinite(number) or number != int(number) or number < 0:
+            raise _QueryIssue("invalid_request", "max_age: max_age must be a non-negative integer")
+        parsed["max_age"] = int(number)
+    for field in ("acr_values", "login_hint", "id_token_hint", "code_challenge"):
+        _string_field(query, field)
+    _enum_field(query, "code_challenge_method", "S256", "invalid_request")
+    _string_field(query, "nonce")
+    claims = query.get("claims")
+    if claims is not None and not is_claims_request_input(claims):
+        raise _QueryIssue("invalid_request", "claims: Invalid input")
+    dpop_jkt = _string_field(query, "dpop_jkt")
+    if dpop_jkt is not None and not _DPOP_JKT.match(dpop_jkt):
+        raise _QueryIssue(
+            "invalid_request",
+            "dpop_jkt: dpop_jkt must be a base64url-encoded SHA-256 JWK thumbprint",
+        )
+    resource = query.get("resource")
+    if resource is not None:
+        issue = _resource_issue(resource)
+        if issue:
+            raise _QueryIssue("invalid_request", f"resource: {issue}")
+    return parsed
+
+
+def _derive_response_mode(raw: dict[str, Any]) -> str:
+    """TS ``deriveResponseMode`` (authorize.ts:106): OIDC Core §5 error channel."""
+    mode = raw.get("response_mode")
+    if mode in ("fragment", "query"):
+        return mode
+    response_type = raw.get("response_type")
+    if isinstance(response_type, str) and re.search(r"\b(token|id_token)\b", response_type):
+        return "fragment"
+    return "query"
+
+
+async def redirect_on_error(
+    ctx: Ctx, opts: Any, raw: dict[str, Any], error: str, description: str
+) -> AuthResponse:
+    """TS ``authorizeRedirectOnError`` (authorize.ts:366): deliver the error to a registered
+    ``redirect_uri`` of an enabled client (RFC 6749 §4.1.2.1), else to the error page."""
+    client_id = raw.get("client_id") if isinstance(raw.get("client_id"), str) else None
+    redirect_uri = raw.get("redirect_uri") if isinstance(raw.get("redirect_uri"), str) else None
+    trusted = None
+    if client_id and redirect_uri:
+        from .client_crud import get_client
+
+        try:
+            client = await get_client(ctx, opts, client_id)
+        except Exception:
+            client = None
+        redirect_uris = (client or {}).get("redirectUris") or []
+        if (
+            client
+            and not client.get("disabled")
+            and _match_redirect_uri(redirect_uris, redirect_uri)
+        ):
+            trusted = redirect_uri
+    if trusted:
+        state = raw.get("state") if isinstance(raw.get("state"), str) else None
+        return handle_redirect(
+            ctx,
+            format_error_url(
+                trusted,
+                error,
+                description,
+                state,
+                get_issuer(ctx, opts),
+                _derive_response_mode(raw),
+            ),
+        )
+    return handle_redirect(ctx, _get_error_url(ctx, error, description))
+
+
+def request_query(ctx: Ctx) -> dict[str, Any]:
+    """The GET query with repeated keys kept as lists (the TS router array-promotes them),
+    read from the absolute request URL when the integration provides it."""
+    url = ctx.request.url
+    if url and "?" in url:
+        raw = url.split("?", 1)[1].split("#", 1)[0]
+        return search_params_to_query(parse_qsl(raw, keep_blank_values=True))
+    return dict(ctx.request.query)
+
+
+def form_query(ctx: Ctx) -> dict[str, Any]:
+    """A form-encoded POST authorization request (267229bd2); repeated keys collapse to the
+    last value like the TS form-body parser."""
+    ctype = (ctx.request.headers.get("content-type") or "").lower()
+    if "application/x-www-form-urlencoded" in ctype:
+        return dict(parse_qsl(ctx.request.body.decode("utf-8", "replace"), keep_blank_values=True))
+    try:
+        body = ctx.body()
+    except Exception:
+        return {}
+    return dict(body) if isinstance(body, dict) else {}
+
+
+def _is_within_max_age(created_at: datetime, max_age: int) -> bool:
+    """TS ``isWithinMaxAge`` (authorize.ts:50)."""
+    if max_age == 0:
+        return False
+    return (utcnow() - created_at).total_seconds() * 1000 <= max_age * 1000
+
+
 # --- main endpoint -------------------------------------------------------------------
 
 
@@ -215,40 +435,56 @@ async def authorize_endpoint(
     if opts.grant_types and "authorization_code" not in opts.grant_types:
         raise APIError(404, "NOT_FOUND")
 
+    query = dict(query)
+    request_object = query.get("request") if isinstance(query.get("request"), str) else None
+    request_uri = query.get("request_uri") if isinstance(query.get("request_uri"), str) else None
+    if request_object is not None and request_uri is not None:
+        return await redirect_on_error(
+            ctx,
+            opts,
+            query,
+            "invalid_request",
+            "request and request_uri cannot be used together",
+        )
+    if request_object is not None:
+        return await redirect_on_error(
+            ctx, opts, query, "request_not_supported", "request object not supported"
+        )
+
     # 2. PAR (request_uri) resolution — RFC 9126 §4: only client_id carried from the URL.
-    if query.get("request_uri"):
+    if request_uri is not None:
+        url_client_id = query.get("client_id") if isinstance(query.get("client_id"), str) else None
+        if not url_client_id:
+            return await redirect_on_error(
+                ctx, opts, query, "invalid_request", "client_id is required"
+            )
         resolver = getattr(opts, "request_uri_resolver", None)
         if resolver is None:
-            return handle_redirect(
-                ctx, _get_error_url(ctx, "invalid_request_uri", "request_uri not supported")
+            return await redirect_on_error(
+                ctx, opts, query, "request_uri_not_supported", "request_uri not supported"
             )
         resolved = await _maybe_await(
-            resolver(
-                {
-                    "requestUri": query["request_uri"],
-                    "clientId": query.get("client_id") or "",
-                    "ctx": ctx,
-                }
-            )
+            resolver({"requestUri": request_uri, "clientId": url_client_id, "ctx": ctx})
         )
         if not resolved:
-            return handle_redirect(
-                ctx, _get_error_url(ctx, "invalid_request_uri", "request_uri is invalid or expired")
+            return await redirect_on_error(
+                ctx, opts, query, "invalid_request_uri", "request_uri is invalid or expired"
             )
-        url_client_id = query.get("client_id")
         query = dict(resolved)
-        if url_client_id:
-            query["client_id"] = url_client_id
+        query["client_id"] = url_client_id
+
+    try:
+        query = parse_authorization_query(query)
+    except _QueryIssue as issue:
+        return await redirect_on_error(ctx, opts, query, issue.error, issue.description)
 
     # ponytail: TS also stashes the resolved query in oAuthState here for the social
     # round-trip getOAuthState persistence; the port has no cross-request oAuthState store
     # (consent/continue read the same-request before-hook stash), so this is a no-op — skip.
 
-    if not query.get("client_id"):
-        return handle_redirect(ctx, _get_error_url(ctx, "invalid_client", "client_id is required"))
     if not query.get("response_type"):
-        return handle_redirect(
-            ctx, _get_error_url(ctx, "invalid_request", "response_type is required")
+        return await redirect_on_error(
+            ctx, opts, query, "invalid_request", "response_type is required"
         )
 
     prompt_set = parse_prompt(query.get("prompt") or "")
@@ -286,6 +522,14 @@ async def authorize_endpoint(
     if not matched or not query.get("redirect_uri"):
         return handle_redirect(ctx, _get_error_url(ctx, "invalid_redirect", "invalid redirect uri"))
 
+    def rp_error(error: str, description: str) -> AuthResponse:
+        return handle_redirect(
+            ctx,
+            format_error_url(
+                query["redirect_uri"], error, description, query.get("state"), get_issuer(ctx, opts)
+            ),
+        )
+
     # 6. Scope validation.
     raw_scope = query.get("scope")
     requested_scopes = [s for s in raw_scope.split(" ") if s] if raw_scope else None
@@ -293,60 +537,67 @@ async def authorize_endpoint(
         valid = set(client.get("scopes") or opts.scopes or [])
         invalid = [s for s in requested_scopes if s not in valid]
         if invalid:
-            return handle_redirect(
-                ctx,
-                format_error_url(
-                    query["redirect_uri"],
-                    "invalid_scope",
-                    f"The following scopes are invalid: {', '.join(invalid)}",
-                    query.get("state"),
-                    get_issuer(ctx, opts),
-                ),
+            return rp_error(
+                "invalid_scope", f"The following scopes are invalid: {', '.join(invalid)}"
             )
     if requested_scopes is None:
         requested_scopes = client.get("scopes") or opts.scopes or []
         query["scope"] = " ".join(requested_scopes)
 
+    # OIDC claims request (396120120, a966815b1).
+    openid_requested = "openid" in requested_scopes
+    if query.get("claims") is not None and not openid_requested:
+        return rp_error(
+            "invalid_request", "openid scope must be requested when using the claims parameter"
+        )
+    if openid_requested and not is_valid_oidc_claims_request(query.get("claims")):
+        return rp_error("invalid_request", "claims must be a valid Claims request object")
+    if openid_requested and not can_satisfy_essential_acr_request(query.get("claims"), LEVEL_0_ACR):
+        return rp_error("access_denied", "essential acr requirement cannot be met")
+    requested_user_info_claims = get_requested_user_info_claims(
+        query.get("claims"), get_supported_claims(opts)
+    )
+
+    # RFC 8707: fail fast on unusable resources before consent (authorize.ts:597).
+    if query.get("resource") is not None:
+        try:
+            await resolve_resource_policy(
+                ctx,
+                opts,
+                resource=query["resource"],
+                client_id=client["clientId"],
+                requested_scopes=requested_scopes,
+            )
+        except OAuthError as error:
+            return rp_error(error.error, error.description)
+
     # 7. PKCE enforcement.
     reason = is_pkce_required(client, requested_scopes, query.get("nonce"))
     if reason and not (query.get("code_challenge") and query.get("code_challenge_method")):
-        return handle_redirect(
-            ctx,
-            format_error_url(
-                query["redirect_uri"],
-                "invalid_request",
-                reason,
-                query.get("state"),
-                get_issuer(ctx, opts),
-            ),
-        )
+        return rp_error("invalid_request", reason)
     if query.get("code_challenge") or query.get("code_challenge_method"):
         if not (query.get("code_challenge") and query.get("code_challenge_method")):
-            return handle_redirect(
-                ctx,
-                format_error_url(
-                    query["redirect_uri"],
-                    "invalid_request",
-                    "code_challenge and code_challenge_method must both be provided",
-                    query.get("state"),
-                    get_issuer(ctx, opts),
-                ),
+            return rp_error(
+                "invalid_request", "code_challenge and code_challenge_method must both be provided"
             )
         if query["code_challenge_method"] != "S256":
-            return handle_redirect(
-                ctx,
-                format_error_url(
-                    query["redirect_uri"],
-                    "invalid_request",
-                    "invalid code_challenge method, only S256 is supported",
-                    query.get("state"),
-                    get_issuer(ctx, opts),
-                ),
+            return rp_error(
+                "invalid_request", "invalid code_challenge method, only S256 is supported"
             )
 
-    # 8. Session / prompt gates.
+    requested_resources = to_resource_list(query.get("resource")) or []
+
+    # 8. Session / prompt gates. A stale session under max_age re-authenticates through the
+    # login page, like prompt=login (0e1770ac7).
     session = await ctx.get_session()
-    if not session or "login" in prompt_set or "create" in prompt_set:
+    max_age = query.get("max_age")
+    satisfied_max_age = (
+        session is not None
+        and max_age is not None
+        and _is_within_max_age(_created_at(session["session"]), max_age)
+    )
+    stale_for_max_age = session is not None and max_age is not None and not satisfied_max_age
+    if not session or stale_for_max_age or "login" in prompt_set or "create" in prompt_set:
         if prompt_none:
             return _redirect_prompt_none_error(
                 ctx, opts, query, "login_required", "authentication required"
@@ -354,6 +605,8 @@ async def authorize_endpoint(
         return _redirect_with_prompt_code(
             ctx, opts, query, "create" if "create" in prompt_set else "login"
         )
+    if satisfied_max_age:
+        query.pop("max_age", None)
 
     ctx_common = {
         "headers": ctx.request.headers,
@@ -416,7 +669,7 @@ async def authorize_endpoint(
             )
         )
 
-    auth_time = int(session["session"]["createdAt"].timestamp() * 1000)
+    auth_time = int(_created_at(session["session"]).timestamp() * 1000)
 
     # 9. Consent.
     if client.get("skipConsent"):
@@ -429,10 +682,20 @@ async def authorize_endpoint(
             session_id=session["session"]["id"],
             auth_time=auth_time,
             reference_id=reference_id,
+            resource=requested_resources,
         )
 
     consent = await _find_consent(ctx, client["clientId"], session["user"]["id"], reference_id)
-    if not consent or not all(s in consent.get("scopes", []) for s in requested_scopes):
+    consented_claims = (consent or {}).get("requestedUserInfoClaims") or []
+    consented_resources = (consent or {}).get("resources") or []
+    # Re-prompt when a scope, a claims.userinfo name (e3125e872) or a resource (b4b086722) is
+    # not covered by the stored consent.
+    if (
+        not consent
+        or not all(s in (consent.get("scopes") or []) for s in requested_scopes)
+        or not all(c in consented_claims for c in requested_user_info_claims)
+        or not all(r in consented_resources for r in requested_resources)
+    ):
         if prompt_none:
             return _redirect_prompt_none_error(
                 ctx, opts, query, "consent_required", "End-User consent is required"
@@ -450,7 +713,12 @@ async def authorize_endpoint(
         session_id=session["session"]["id"],
         auth_time=auth_time,
         reference_id=reference_id,
+        resource=requested_resources,
     )
+
+
+def _created_at(session: dict[str, Any]) -> datetime:
+    return normalize_timestamp_value(session.get("createdAt")) or utcnow()
 
 
 def _match_redirect_uri(registered_uris: list[str], requested: str | None) -> bool:

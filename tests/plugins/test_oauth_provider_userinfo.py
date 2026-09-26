@@ -192,8 +192,8 @@ async def test_userinfo_missing_bearer_401():
         res = await userinfo(c, None)
         assert res.status_code == 401
         assert res.json()["error"] == "invalid_request"
-        assert res.json()["error_description"] == "authorization header not found"
-        # Wire parity with userinfo.ts:46 — TS sets no WWW-Authenticate header
+        assert res.json()["error_description"] == "access token not found"  # userinfo.ts:118
+        # Wire parity with userinfo.ts:118: TS sets no WWW-Authenticate header
         # (only the client-side mcp.ts, excluded from the port, does).
         assert "www-authenticate" not in res.headers
 
@@ -443,32 +443,8 @@ async def test_end_session_requires_enable_end_session():
         assert res.json()["error"] == "invalid_client"
 
 
-async def test_end_session_bad_audience_rejected():
-    auth = provider_auth()
-    await seed(auth, scopes=["openid"], enableEndSession=True)
-    await seed(
-        auth, client_id="client-2", enableEndSession=True, redirect="https://c2.example.com/cb"
-    )
-    async with make_client(auth) as c:
-        await sign_up(c)
-        id_token = (await _access(c, scope="openid"))["id_token"]  # aud = client-1
-        res = await end_session(c, id_token_hint=id_token, client_id="client-2")
-        assert res.status_code == 400
-        assert res.json()["error"] == "invalid_request"
-
-
-async def test_end_session_bad_issuer_rejected():
-    auth = provider_auth()
-    await seed(auth, scopes=["openid"], enableEndSession=True)
-    async with make_client(auth) as c:
-        await sign_up(c)
-        jwt_plugin = next(p for p in auth.plugins if p.id == "jwt")
-        forged = await jwt_plugin.sign_jwt(
-            payload={"iss": "https://evil.example.com", "aud": "client-1", "sid": "x"}
-        )
-        res = await end_session(c, id_token_hint=forged, client_id="client-1")
-        assert res.status_code == 500
-        assert res.json()["error"] == "invalid_request"
+# The 1.6 audience (400) and issuer (500) rejections are now invalid_token 401: see
+# test_oauth_provider_logout.py::test_rejects_a_hint_for_another_audience_or_issuer.
 
 
 async def test_end_session_non_registered_redirect_not_followed():

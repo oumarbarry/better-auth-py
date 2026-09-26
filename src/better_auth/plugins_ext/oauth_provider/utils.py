@@ -95,21 +95,40 @@ def _oauth_error(
     return AuthResponse(status=status, body=body, headers=list(headers or []))
 
 
+def append_query_params(url: str, params: Pairs) -> str:
+    """Append ``params`` before the fragment, keeping the existing query text, TS core
+    ``appendQueryParams`` (utils/url.ts:61). An empty http(s) path becomes ``/`` like
+    ``URL.href``."""
+    query = urlencode(params, quote_via=quote_plus)
+    if not query:
+        return url
+    base, hash_mark, fragment = url.partition("#")
+    parts = urlsplit(base)
+    if not base.startswith("/") and parts.scheme.lower() in ("http", "https") and not parts.path:
+        base = base.split("?", 1)[0] + "/" + (f"?{parts.query}" if parts.query else "")
+    head, _, existing = base.partition("?")
+    search = f"{existing}{'' if existing.endswith('&') else '&'}{query}" if existing else query
+    return f"{head}?{search}{hash_mark}{fragment}"
+
+
 def format_error_url(
     url: str,
     error: str,
     description: str,
     state: str | None = None,
     iss: str | None = None,
+    mode: str = "query",
 ) -> str:
-    """Build ``redirect_uri?error&error_description[&state][&iss]`` — TS ``formatErrorURL``."""
+    """Build ``redirect_uri?error&error_description[&state][&iss]``, or the same parameters in
+    the fragment for ``mode="fragment"``, TS ``formatErrorURL`` (authorize.ts:76)."""
     params: Pairs = [("error", error), ("error_description", description)]
     if state:
         params.append(("state", state))
     if iss:
         params.append(("iss", iss))
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}{urlencode(params, quote_via=quote_plus)}"
+    if mode == "fragment":
+        return f"{url}#{urlencode(params, quote_via=quote_plus)}"
+    return append_query_params(url, params)
 
 
 def handle_redirect(ctx: Ctx, uri: str) -> AuthResponse:
@@ -598,6 +617,22 @@ def remove_prompt_from_query(pairs: Pairs, prompt: str) -> Pairs:
     return result
 
 
+def remove_max_age_from_query(pairs: Pairs) -> Pairs:
+    """TS ``removeMaxAgeFromQuery`` (utils/index.ts:1075)."""
+    return [(k, v) for k, v in pairs if k != "max_age"]
+
+
+def is_session_fresh_for_signed_query(session_created_at: Any, issued_at: datetime | None) -> bool:
+    """A session created at or after the signed query was issued satisfies a forced
+    re-authentication, TS ``isSessionFreshForSignedQuery`` (utils/index.ts:1052)."""
+    if issued_at is None:
+        return False
+    normalized = normalize_timestamp_value(session_created_at)
+    if normalized is None:
+        return False
+    return normalized.timestamp() >= issued_at.timestamp()
+
+
 def normalize_timestamp_value(value: Any) -> datetime | None:
     """Coerce an adapter timestamp (datetime / epoch-ms number / ISO or numeric string)
     into an aware datetime — TS ``normalizeTimestampValue``. Returns ``None`` when unusable."""
@@ -720,38 +755,6 @@ def resolve_subject_identifier(client: dict[str, Any], opts: Any, user_id: str) 
 
 
 # --- server-side JWT-access-token verify (item 5) ------------------------------------
-
-
-_ACCESS_TOKEN_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*)\s+(.+)$")
-
-
-def strip_access_token_authorization_scheme(token: str) -> str:
-    """Drop a leading ``Bearer``/``DPoP`` scheme from a presented token, TS core
-    ``stripAccessTokenAuthorizationScheme`` (oauth2/dpop.ts:175)."""
-    match = _ACCESS_TOKEN_SCHEME.match(token)
-    if match and match.group(1).lower() in ("bearer", "dpop"):
-        return match.group(2).strip()
-    return token
-
-
-#: TS ``MAX_AUD_VALUES`` (resources.ts:58).
-_MAX_AUD_VALUES = 64
-
-
-def audience_allowed(ctx: Ctx, opts: Any, aud: Any) -> bool:
-    """Every ``aud`` value must be a known target, TS ``isAudienceClaimAllowed``
-    (resources.ts:283) with the ``/oauth2/userinfo`` implicit audience. No ``aud`` passes.
-
-    ponytail: known targets are ``valid_audiences`` (default: the base URL) until the
-    ``oauthResource`` model is ported; then this becomes the resource-row lookup."""
-    if aud is None:
-        return True
-    values = aud if isinstance(aud, list) else [aud]
-    if len(values) > _MAX_AUD_VALUES:
-        return False
-    base = f"{ctx.auth.base_url}{ctx.auth.base_path}"
-    known = {*(getattr(opts, "valid_audiences", None) or [base]), f"{base}/oauth2/userinfo"}
-    return all(v in known for v in values)
 
 
 class JwsAccessTokenInvalid(Exception):
