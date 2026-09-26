@@ -96,6 +96,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   and `display_username=False` drops the `displayUsername` field.
 - Passkey: `verify-registration` accepts `createSession: true` to sign the
   user in after registering.
+- `user.validate_user_info` also gates users created by email sign-up, the
+  admin create-user route, anonymous sign-in, email OTP, magic link, phone
+  number and SIWE. The hook receives the method that created the user.
+- The server logs when the database adapter cannot validate the schema: a
+  warning if validation was requested explicitly, a debug message otherwise.
 
 ### Changed
 
@@ -235,6 +240,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Anonymous: the default placeholder email is
   `<id>@anonymous.placeholder.invalid` (was `temp@<id>.com`) for new
   anonymous users. `email_domain_name` still overrides it.
+- A database schema mismatch now fails every auth request, including routes
+  that never touch the database, as better-auth does.
+  `AdvancedDatabase(validate_schema=False)` turns the check off.
+- `InternalAdapter.create_user` accepts `source` and `ctx`. Both are required
+  once `validate_user_info` is configured.
 
 ### Fixed
 
@@ -307,6 +317,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the permission check, so an unauthorized caller cannot probe role names.
 - Passkey: registration and authentication challenges require an exact
   ceremony type match.
+- Email OTP verification, email change and organization session updates set
+  the cookie cache when the JWT plugin signs it with JWKS keys.
+- The email sign-up response reflects changes made by user database hooks.
 
 ## [1.0.3] - 2026-09-25
 
