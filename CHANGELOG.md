@@ -140,6 +140,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   clients, exchanged at `/oauth2/token` and advertised in discovery.
 - Device authorization accepts form-encoded requests, rate limits `/device`
   and shows the client and scope to the code owner.
+- `APIError` accepts an optional `headers` keyword, sent with the error
+  response.
+- Mapped provider profile fields (generic OAuth `map_profile_to_user`, SSO
+  `mapping.extraFields`) fill configured user additional fields at sign-up,
+  on profile override and when a link updates user info. A required
+  additional field with no default and no value now stops an OAuth sign-up
+  with `MISSING_FIELD`, as in better-auth.
 
 ### Changed
 
@@ -332,6 +339,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   endpoints send `Cache-Control: no-store`, errors included.
 - Device authorization: device codes and user codes are unique and limited to
   191 characters.
+- OAuth state stores the client's `additionalData` keys at the top level, like
+  better-auth. States written before the upgrade are still read. Code that
+  read `get_oauth_state(ctx)["additionalData"]` reads the keys directly.
+- A user created through OAuth without a provider name gets an empty name
+  instead of the email.
+- GitHub sign-in uses PKCE and sends the `better-auth` User-Agent.
+- Only the providers that forward `loginHint` upstream in better-auth still
+  send `login_hint`.
 
 ### Fixed
 
@@ -425,6 +440,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   is used as the expiry time itself, as in better-auth.
 - OAuth provider: redirect URIs that carry credentials no longer count as
   loopback.
+- OAuth provider client get, list and update responses keep
+  `client_secret_expires_at`.
+- Authorization errors on client registration, client creation, secret
+  rotation and the device code and token routes send `Cache-Control: no-store`.
+- Salesforce, Figma, Atlassian, Facebook, Microsoft and Cognito refuse to
+  start sign-in without the required client credentials.
+- `/account-info` returns 401 `FAILED_TO_GET_USER_INFO` instead of 500 when
+  the provider profile call fails.
+- Signing in again with `override_user_info_on_sign_in` no longer clears the
+  stored image when the provider sends none.
 
 ## [1.0.3] - 2026-09-25
 
