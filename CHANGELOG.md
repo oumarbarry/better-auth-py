@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-09-29
+
+### Fixed
+
+- SQLAlchemy adapter: plugin tables (two-factor, API keys, passkeys, device
+  authorization, Sign-In with Ethereum wallets, OAuth provider and others)
+  get their `id` primary key. Before, inserts into them failed, and
+  `create_tables()` failed outright when the OAuth provider plugin was
+  installed. Plugin tables created by an earlier release have no `id` column
+  and could never hold rows: drop them and run `create_tables()` again, or add
+  an `id` text primary key in your migration.
+- SQLAlchemy adapter: string columns use `TEXT` on PostgreSQL and SQLite, as
+  better-auth does, so long values such as encrypted backup codes fit. On
+  MySQL, ids and foreign keys are `VARCHAR(36)`, unique or indexed strings
+  `VARCHAR(255)`, and other strings `TEXT`. Existing columns are not changed.
+
 ## [1.0.3] - 2026-09-25
 
 ### Fixed
