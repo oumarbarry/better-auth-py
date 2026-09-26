@@ -125,6 +125,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   URI, after the session deletion commits.
 - OAuth provider: the `claims` request parameter, form POST at
   `/oauth2/authorize`, and `max_age` enforcement.
+- OAuth provider: client fields from better-auth 1.7.6: application type,
+  back-channel logout URI, inline JWKS or JWKS URI, DPoP-bound tokens and
+  client discovery id. Run your migrations.
+- OAuth provider: protected dynamic client registration with an RFC 7591
+  initial access token (`validate_initial_access_token`).
+- OAuth provider: dynamic registration can link protected resources
+  (`client_registration_default_resources`,
+  `client_registration_allowed_resources`) and can let confidential clients
+  skip PKCE (`client_registration_require_pkce=False`).
+- OAuth provider: admin client create and update accept
+  `client_credentials_scopes`.
+- `OAuthDeviceAuthorizationPlugin`: the RFC 8628 device grant for OAuth
+  clients, exchanged at `/oauth2/token` and advertised in discovery.
+- Device authorization accepts form-encoded requests, rate limits `/device`
+  and shows the client and scope to the code owner.
 
 ### Changed
 
@@ -299,6 +314,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   usable hint.
 - OAuth provider: the social sign-in resume uses the server-trusted OAuth
   state, so a client can no longer inject its own authorization query.
+- OAuth provider: a client is public only when its token endpoint auth
+  method is `none`; the `type` and `public` columns are no longer used.
+  Clients created by 1.0 endpoints already follow this rule.
+- OAuth provider: redirect URIs follow the client application type (default
+  `web`): web clients need HTTPS on a public host, native clients may use
+  loopback HTTP or a reverse-domain scheme. Existing clients keep working
+  until they are updated; a client using an HTTP loopback redirect must be
+  updated with `application_type: "native"`.
+- OAuth provider: loopback redirect URIs on `localhost` may use any port,
+  like IP loopback addresses.
+- OAuth provider: unauthenticated dynamic registration defaults to a
+  confidential `client_secret_basic` client, stores the configured
+  registration scope set, and drops unknown top-level fields instead of
+  keeping them in `metadata`.
+- OAuth provider: registration, client creation, secret rotation and device
+  endpoints send `Cache-Control: no-store`, errors included.
+- Device authorization: device codes and user codes are unique and limited to
+  191 characters.
 
 ### Fixed
 
@@ -388,6 +421,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   account update.
 - OAuth provider: UserInfo accepts the access token in a form body and
   returns no-store responses.
+- OAuth provider: a numeric `client_registration_client_secret_expiration`
+  is used as the expiry time itself, as in better-auth.
+- OAuth provider: redirect URIs that carry credentials no longer count as
+  loopback.
 
 ## [1.0.3] - 2026-09-25
 
