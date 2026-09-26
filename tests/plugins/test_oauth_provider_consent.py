@@ -45,7 +45,6 @@ async def seed_client(auth, **fields):
         "redirectUris": [CB],
         "scopes": ["openid", "profile"],
         "grantTypes": ["authorization_code"],
-        "public": False,
         "disabled": False,
         "requirePKCE": False,
         "skipConsent": False,

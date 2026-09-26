@@ -36,8 +36,6 @@ from .authorize import (
 )
 from .claims import STANDARD_CLAIM_NAMES, STANDARD_CLAIMS
 from .client_crud import (
-    admin_create_client_endpoint,
-    create_client_endpoint,
     delete_client_endpoint,
     get_client_endpoint,
     get_client_public_endpoint,
@@ -65,7 +63,7 @@ from .metadata import (
     metadata_response,
 )
 from .oauth_continue import continue_endpoint  # `continue` is a reserved word -> oauth_continue
-from .register import register_endpoint
+from .register import NO_STORE_HEADERS, create_client_endpoint, register_endpoint
 from .resource_crud import (
     create_resource_endpoint,
     delete_resource_endpoint,
@@ -116,7 +114,7 @@ def _server_context_issued_at(value: Any) -> datetime | None:
     return datetime.fromtimestamp(issued_ms / 1000, tz=timezone.utc)
 
 
-def _compute_claims(scopes: set[str]) -> list[str]:
+def _compute_claims(scopes: dict[str, None]) -> list[str]:
     """TS oauth.ts:201: protocol claims plus the standard claims whose scope is configured."""
     claims = ["sub", "iss", "aud", "exp", "iat", "sid", "scope", "azp"]
     return claims + [name for name in STANDARD_CLAIM_NAMES if STANDARD_CLAIMS[name][0] in scopes]
@@ -149,6 +147,10 @@ class OAuthProviderPlugin(Plugin):
         client_registration_default_scopes: list[str] | None = None,
         client_registration_allowed_scopes: list[str] | None = None,
         client_registration_client_secret_expiration: Any = None,
+        client_registration_require_pkce: bool = True,
+        client_registration_default_resources: list[str] | None = None,
+        client_registration_allowed_resources: list[str] | None = None,
+        validate_initial_access_token: Any = None,
         grant_types: list[str] | None = None,
         client_credential_grant_default_scopes: list[str] | None = None,
         login_page: str | None = None,
@@ -213,7 +215,15 @@ class OAuthProviderPlugin(Plugin):
                 "encryption method not recommended, please use 'hashed' or the 'hash' function"
             )
 
-        scope_set = {s for s in (scopes or _DEFAULT_SCOPES) if s}
+        # Ordered like TS ``new Set(scopes)`` (oauth.ts:154): stored DCR scopes follow it.
+        scope_set = dict.fromkeys(s for s in (scopes or _DEFAULT_SCOPES) if s)
+        # TS oauth.ts:142: the default registration scopes join the allowed ones.
+        if client_registration_default_scopes:
+            merged = [
+                *(client_registration_allowed_scopes or []),
+                *client_registration_default_scopes,
+            ]
+            client_registration_allowed_scopes = list(dict.fromkeys(merged))
 
         if client_registration_allowed_scopes:
             for sc in client_registration_allowed_scopes:
@@ -222,6 +232,18 @@ class OAuthProviderPlugin(Plugin):
         for sc in (advertised_metadata or {}).get("scopes_supported") or []:
             if sc not in scope_set:
                 raise ValueError(f"advertisedMetadata.scopes_supported {sc} not found in scopes")
+
+        configured_resources = {
+            r if isinstance(r, str) else (r.get("identifier") if isinstance(r, dict) else None)
+            for r in resources or []
+        }
+        for option_name, identifiers in (
+            ("clientRegistrationDefaultResources", client_registration_default_resources),
+            ("clientRegistrationAllowedResources", client_registration_allowed_resources),
+        ):
+            for identifier in identifiers or []:
+                if identifier not in configured_resources:
+                    raise ValueError(f"{option_name} resource {identifier} not found in resources")
 
         if pairwise_secret is not None and len(pairwise_secret) < 32:
             raise ValueError(
@@ -263,6 +285,15 @@ class OAuthProviderPlugin(Plugin):
         self.client_registration_client_secret_expiration = (
             client_registration_client_secret_expiration
         )
+        # Confidential DCR clients skip PKCE when False (TS types:810, a8200b297).
+        self.client_registration_require_pkce = client_registration_require_pkce
+        # Resources linked to, or requestable by, every DCR client (TS types:583-592).
+        self.client_registration_default_resources = client_registration_default_resources
+        self.client_registration_allowed_resources = client_registration_allowed_resources
+        # RFC 7591 initial access token validator for protected DCR (TS types:758, 0143d6919):
+        # called with {initialAccessToken, headers, clientMetadata}, returns
+        # {"referenceId"?: str} to allow or False to reject.
+        self.validate_initial_access_token = validate_initial_access_token
         self.grant_types = resolved_grants
         self.client_credential_grant_default_scopes = client_credential_grant_default_scopes
         self.login_page = login_page
@@ -302,8 +333,13 @@ class OAuthProviderPlugin(Plugin):
         # Deprecated, port-only: True puts the scope-based profile and email claims back in the
         # ID token, as the 1.0 port did. TS 1.7 serves them from UserInfo only (d368217ef).
         self.legacy_id_token_profile_claims = legacy_id_token_profile_claims
+        # Accepted and ignored: TS 1.7 removed the option with its warnings (a7962147b).
         self.silence_warnings = silence_warnings or {}
         self.rate_limit_config = rate_limit
+        # Grant handlers and discovery metadata contributed by companion plugins such as
+        # OAuthDeviceAuthorizationPlugin (TS extendOAuthProvider, extensions.ts:220).
+        self.extension_grants: dict[str, Any] = {}
+        self.extension_metadata: list[Any] = []
         self._auth: BetterAuth | None = None
 
     # --- lifecycle ------------------------------------------------------------------
@@ -354,7 +390,12 @@ class OAuthProviderPlugin(Plugin):
             ("POST", "/oauth2/update-consent", self._update_consent),
             ("POST", "/oauth2/delete-consent", self._delete_consent),
         ]
-        return [(method, path, self._oauth_guard(handler)) for method, path, handler in raw]
+        # TS ``metadata.noStore`` (2196ea65e): credential routes send no-store on errors too.
+        no_store = {"/oauth2/register", "/oauth2/create-client", "/oauth2/client/rotate-secret"}
+        return [
+            (method, path, self._oauth_guard(handler, no_store=path in no_store))
+            for method, path, handler in raw
+        ]
 
     def rate_limit(self) -> list[RateLimitRule]:
         rules: list[RateLimitRule] = []
@@ -462,12 +503,18 @@ class OAuthProviderPlugin(Plugin):
             result.headers = cookies + result.headers
         return result
 
-    def _oauth_guard(self, handler: Any) -> Any:
+    def _oauth_guard(self, handler: Any, *, no_store: bool = False) -> Any:
         async def wrapped(ctx: Ctx) -> Any:
             try:
                 return await handler(ctx)
             except OAuthError as error:
-                return error.to_response()
+                response = error.to_response()
+                if no_store:
+                    present = {name.lower() for name, _ in response.headers}
+                    response.headers += [
+                        (k, v) for k, v in NO_STORE_HEADERS if k.lower() not in present
+                    ]
+                return response
 
         return wrapped
 
@@ -498,7 +545,7 @@ class OAuthProviderPlugin(Plugin):
     async def _update_client(self, ctx: Ctx) -> dict[str, Any]:
         return await update_client_endpoint(ctx, self, admin=False)
 
-    async def _rotate(self, ctx: Ctx) -> dict[str, Any]:
+    async def _rotate(self, ctx: Ctx) -> AuthResponse:
         return await rotate_client_secret_endpoint(ctx, self)
 
     async def _delete(self, ctx: Ctx) -> AuthResponse:
@@ -558,10 +605,9 @@ class OAuthProviderPlugin(Plugin):
 
     async def admin_create_client(self, ctx: Ctx) -> AuthResponse:
         """POST /admin/oauth2/create-client (SERVER_ONLY)."""
-        try:
-            return await admin_create_client_endpoint(ctx, self)
-        except OAuthError as error:
-            return error.to_response()
+        return await self._oauth_guard(
+            lambda c: create_client_endpoint(c, self, admin=True), no_store=True
+        )(ctx)
 
     async def admin_update_client(self, ctx: Ctx) -> dict[str, Any] | AuthResponse:
         """PATCH /admin/oauth2/update-client (SERVER_ONLY)."""

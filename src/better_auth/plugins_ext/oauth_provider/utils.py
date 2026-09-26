@@ -284,10 +284,11 @@ def _form_pairs(ctx: Ctx) -> list[tuple[str, str]] | None:
     return parse_qsl(ctx.request.body.decode("utf-8", "replace"), keep_blank_values=True)
 
 
-def normalize_client_authentication_parameters(ctx: Ctx, body: dict[str, Any]) -> None:
+def normalize_client_authentication_parameters(ctx: Ctx, body: dict[str, Any]) -> bool:
     """Enforce RFC 6749 §2.3 credential cardinality in place, TS
     ``normalizeClientAuthenticationParameters`` (utils/index.ts:545). Empty values are dropped,
-    repeated credentials and mixed authentication methods are ``invalid_request``."""
+    repeated credentials and mixed authentication methods are ``invalid_request``. Returns
+    whether the request carried client authentication (TS ``detected``, utils/index.ts:617)."""
 
     def fail(description: str) -> OAuthError:
         return OAuthError(400, "invalid_request", description)
@@ -327,6 +328,7 @@ def normalize_client_authentication_parameters(ctx: Ctx, body: dict[str, Any]) -
     body["client_id"] = client_id
     for field in _CLIENT_AUTHENTICATION_FIELDS:
         body[field] = fields.get(field)
+    return has_authorization or bool(fields)
 
 
 async def extract_client_credentials(
@@ -417,7 +419,7 @@ def is_loopback_host(netloc: str) -> bool:
     """Loopback per RFC 6761/8252 — ``127.0.0.0/8``, ``[::1]``, ``localhost``/``*.localhost``.
     DNS ``localhost`` counts here (SafeUrl HTTP allowance), unlike the authorize loopback-IP
     redirect match which is IP-literal only."""
-    host = _host_only(netloc).lower()
+    host = _host_only(netloc.rpartition("@")[2]).lower()  # URL.host excludes userinfo
     if host == "localhost" or host.endswith(".localhost"):
         return True
     if host == "::1":
@@ -669,6 +671,18 @@ def search_params_to_query(pairs: Pairs) -> dict[str, Any]:
     return {k: (v[0] if len(v) == 1 else v) for k, v in grouped.items()}
 
 
+#: TS ``DEFAULT_GRANT_TYPES`` (extensions.ts:25).
+DEFAULT_GRANT_TYPES = ("authorization_code", "client_credentials", "refresh_token")
+
+
+def get_supported_grant_types(opts: Any) -> list[str]:
+    """TS ``getSupportedGrantTypes`` (extensions.ts:257): the configured grants plus the grants
+    companion plugins registered (``extension_grants``)."""
+    configured = getattr(opts, "grant_types", None) or DEFAULT_GRANT_TYPES
+    extension = getattr(opts, "extension_grants", None) or {}
+    return list(dict.fromkeys([*configured, *extension]))
+
+
 def client_allows_grant(client: dict[str, Any], grant_type: str) -> bool:
     """Whether a client may use ``grant_type`` — TS ``clientAllowsGrant``. Unset ``grantTypes``
     defaults to ``["authorization_code"]``; a client allowing ``authorization_code`` implicitly
@@ -691,15 +705,8 @@ def is_pkce_required(
     """Return the reason PKCE is required, or ``None`` if not, TS ``isPKCERequired``
     (utils/index.ts:1107). Public clients always need it; ``offline_access`` needs it unless an
     OIDC request (``openid``) carries a ``nonce`` (dd42701af); ``requirePKCE ?? True`` last.
-
-    ponytail: public detection still honors the legacy ``type``/``public`` columns; TS 1.7 keys
-    on ``tokenEndpointAuthMethod == "none"`` only, which lands with the client-model package."""
-    is_public = (
-        client.get("tokenEndpointAuthMethod") == "none"
-        or client.get("type") in ("native", "user-agent-based")
-        or client.get("public") is True
-    )
-    if is_public:
+    Only ``tokenEndpointAuthMethod == "none"`` marks a public client (utils/index.ts:1112)."""
+    if client.get("tokenEndpointAuthMethod") == "none":
         return PKCE_PUBLIC_CLIENT
     scopes = requested_scopes or []
     has_oidc_nonce = "openid" in scopes and isinstance(nonce, str) and len(nonce) > 0

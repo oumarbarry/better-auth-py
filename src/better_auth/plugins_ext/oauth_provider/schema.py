@@ -17,6 +17,8 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         # Important fields
         "clientId": Field("string", unique=True, required=True),
         "clientSecret": Field("string", required=False, returned=False),
+        # Owner of a client created through client-id discovery (TS schema.ts:17, 5c45abcd2).
+        "clientDiscoveryId": Field("string", required=False),
         "disabled": Field("boolean", required=False, default=False),
         "skipConsent": Field("boolean", required=False),
         "enableEndSession": Field("boolean", required=False),
@@ -42,13 +44,19 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         # Authentication metadata
         "redirectUris": Field("string[]", required=True),
         "postLogoutRedirectUris": Field("string[]", required=False),
+        "backchannelLogoutUri": Field("string", required=False),
+        "backchannelLogoutSessionRequired": Field("boolean", required=False),
         "tokenEndpointAuthMethod": Field("string", required=False),
+        # OIDC Registration application_type ("web" | "native"); TS 1.7 drops the 1.0
+        # ``public``/``type`` columns (schema.ts:122-145).
+        "applicationType": Field("string", required=False),
+        # Client key metadata: an inline JWK Set (JSON string) or a jwks_uri.
+        "jwks": Field("string", required=False),
+        "jwksUri": Field("string", required=False),
         "grantTypes": Field("string[]", required=False),
         "responseTypes": Field("string[]", required=False),
-        # RFC6749
-        "public": Field("boolean", required=False),
-        "type": Field("string", required=False),
         "requirePKCE": Field("boolean", required=False),
+        "dpopBoundAccessTokens": Field("boolean", required=False, default=False),
         # Other
         "referenceId": Field("string", required=False),
         "metadata": Field("json", required=False),

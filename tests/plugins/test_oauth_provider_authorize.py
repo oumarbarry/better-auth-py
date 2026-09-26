@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from better_auth.crypto import default_key_hasher
@@ -42,7 +43,6 @@ async def seed_client(auth, **fields):
         "redirectUris": ["https://app.example.com/cb"],
         "scopes": ["openid", "profile", "email", "offline_access"],
         "grantTypes": ["authorization_code"],
-        "public": False,
         "disabled": False,
         "requirePKCE": False,
         "skipConsent": False,
@@ -133,10 +133,47 @@ async def test_non_loopback_different_port_rejected():
     assert "invalid_redirect" in loc
 
 
-async def test_dns_localhost_not_port_agnostic():
+async def test_localhost_different_port_matches():
+    # RFC 8252 port variance extends to localhost (authorize.ts:250, 4d09d5022).
     loc = await _redirect_probe(
         provider_auth(), "http://localhost:8080/cb", "http://localhost:9090/cb"
     )
+    assert loc.startswith(LOGIN)
+
+
+async def test_localhost_without_registered_port_matches_any_port():
+    loc = await _redirect_probe(
+        provider_auth(),
+        "http://localhost/callback?source=cli",
+        "http://localhost:51234/callback?source=cli",
+    )
+    assert loc.startswith(LOGIN)
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "http://localhost:51234/other?source=cli",  # path
+        "http://localhost:51234/callback?source=other",  # query
+        "https://localhost:51234/callback?source=cli",  # protocol
+        "http://tenant.localhost:51234/callback?source=cli",  # localhost subdomain
+        "http://user:password@localhost:51234/callback?source=cli",  # userinfo
+        "HTTP://localhost:51234/callback?source=cli",  # scheme casing
+        "http://LOCALHOST:51234/callback?source=cli",  # hostname casing
+        "http://localhost:51234/path/../callback?source=cli",  # dot segment
+    ],
+)
+async def test_localhost_port_variance_keeps_every_other_character(requested):
+    # authorize-loopback.test.ts:11-80: only the port may vary.
+    loc = await _redirect_probe(provider_auth(), "http://localhost/callback?source=cli", requested)
+    assert "invalid_redirect" in loc
+
+
+@pytest.mark.parametrize(
+    "requested", ["http://127.0.0.1:51234/callback?", "http://127.1:51234/callback"]
+)
+async def test_ipv4_loopback_rejects_query_marker_and_shorthand(requested):
+    loc = await _redirect_probe(provider_auth(), "http://127.0.0.1/callback", requested)
     assert "invalid_redirect" in loc
 
 
@@ -165,10 +202,17 @@ async def _pkce_probe(client_fields, **query):
 
 
 async def test_public_client_without_pkce_fails():
-    loc = await _pkce_probe({"public": True}, scope="openid")
+    # Only token_endpoint_auth_method "none" marks a public client (utils/index.ts:1112).
+    loc = await _pkce_probe({"tokenEndpointAuthMethod": "none"}, scope="openid")
     q = parse_qs(urlsplit(loc).query)
     assert q["error"] == ["invalid_request"]
     assert "public" in q["error_description"][0]
+
+
+async def test_legacy_public_column_no_longer_marks_a_public_client():
+    # TS 1.7 dropped the ``public``/``type`` columns; a leftover value is ignored.
+    loc = await _pkce_probe({"public": True, "requirePKCE": False}, scope="openid")
+    assert loc.startswith(LOGIN)
 
 
 async def test_confidential_without_pkce_fails_by_default():

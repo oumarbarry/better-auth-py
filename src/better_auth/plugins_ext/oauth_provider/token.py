@@ -63,6 +63,7 @@ from .utils import (
     destructure_credentials,
     extract_client_credentials,
     get_jwt_plugin,
+    get_supported_grant_types,
     is_pkce_required,
     normalize_timestamp_value,
     parse_client_metadata,
@@ -568,8 +569,8 @@ async def _resolve_resource_grant_issuance(
 
 
 def _client_requires_dpop(client: dict[str, Any]) -> bool:
-    """TS ``clientRequiresDpopBoundAccessTokens``. ``dpopBoundAccessTokens`` is an oauthClient
-    column added with the client model; read it when present."""
+    """TS ``clientRequiresDpopBoundAccessTokens`` (token.ts:778): the client column or the
+    ``dpop_bound_access_tokens`` metadata flag."""
     metadata = parse_client_metadata(client.get("metadata")) or {}
     return (
         client.get("dpopBoundAccessTokens") is True
@@ -1332,8 +1333,6 @@ async def handle_refresh_token_grant(ctx: Ctx, opts: Any, body: dict[str, Any]):
 
 # --- endpoint ------------------------------------------------------------------------
 
-_DEFAULT_GRANT_TYPES = ["authorization_code", "client_credentials", "refresh_token"]
-
 
 def _type_issue(field: str, value: Any) -> str:
     """TS ``describeIssue`` for a present value of the wrong type (oauth-endpoint.ts:272)."""
@@ -1402,9 +1401,11 @@ def no_store(error: OAuthError) -> OAuthError:
 
 async def token_endpoint(ctx: Ctx, opts: Any):
     """POST /oauth2/token: validate the body, then dispatch by ``grant_type`` (TS
-    ``tokenEndpoint``, token.ts:96).
+    ``tokenEndpoint``, token.ts:96). Grants a companion plugin registered in
+    ``opts.extension_grants`` (the device grant) run after the built-in ones.
 
-    ponytail: extension grant handlers (TS ``extensions.ts``) are not ported."""
+    ponytail: only grant handlers and metadata of the TS extension surface (extensions.ts)
+    exist; extension client authentication, claims and client discovery do not."""
     body = _read_body(ctx)
     validate_token_body(body)
     # RFC 8707 §2: keep every repeated form ``resource`` (oauth.ts:1063).
@@ -1419,8 +1420,7 @@ async def token_endpoint(ctx: Ctx, opts: Any):
 
 async def _dispatch_grant(ctx: Ctx, opts: Any, body: dict[str, Any]):
     grant_type = body["grant_type"]
-    supported = getattr(opts, "grant_types", None) or _DEFAULT_GRANT_TYPES
-    if grant_type not in supported:
+    if grant_type not in get_supported_grant_types(opts):
         raise OAuthError(400, "unsupported_grant_type", f"unsupported grant_type {grant_type}")
     if grant_type == "authorization_code":
         return await handle_authorization_code_grant(ctx, opts, body)
@@ -1428,4 +1428,7 @@ async def _dispatch_grant(ctx: Ctx, opts: Any, body: dict[str, Any]):
         return await handle_client_credentials_grant(ctx, opts, body)
     if grant_type == "refresh_token":
         return await handle_refresh_token_grant(ctx, opts, body)
+    handler = (getattr(opts, "extension_grants", None) or {}).get(grant_type)
+    if handler is not None:
+        return await handler(ctx, opts, body)
     raise OAuthError(400, "unsupported_grant_type", f"unsupported grant_type {grant_type}")

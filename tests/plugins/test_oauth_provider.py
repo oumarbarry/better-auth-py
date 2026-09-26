@@ -146,40 +146,39 @@ async def test_dcr_disabled_by_default():
         assert res.json()["error"] == "access_denied"
 
 
-async def test_confidential_registration_preserves_method_and_type():
+async def test_confidential_registration_preserves_method_and_application_type():
+    # register.test.ts:314: no legacy public/type on the wire (1.7 client model).
     async with provider_client(allow_dynamic_client_registration=True) as client:
         await sign_up(client)
         res = await _register(
             client,
             redirect_uris=["https://app.example.com/cb"],
-            token_endpoint_auth_method="client_secret_basic",
-            type="web",
+            token_endpoint_auth_method="client_secret_post",
+            application_type="web",
+            type="web",  # the 1.0 field is no longer part of the request schema
         )
         assert res.status_code == 201, res.text
         body = res.json()
-        assert body["public"] is False
-        assert body["token_endpoint_auth_method"] == "client_secret_basic"
-        assert body["type"] == "web"
+        assert body["token_endpoint_auth_method"] == "client_secret_post"
+        assert body["application_type"] == "web"
         assert body["client_secret"]  # confidential clients get a secret
+        assert "public" not in body
+        assert "type" not in body
 
 
-async def test_unauthenticated_dcr_forces_none_and_clears_type():
+async def test_unauthenticated_dcr_applies_client_secret_basic_default():
+    # register.test.ts:773 (a8200b297): open registration may create a confidential client.
     async with provider_client(
         allow_dynamic_client_registration=True,
         allow_unauthenticated_client_registration=True,
     ) as client:
-        res = await _register(
-            client,
-            redirect_uris=["https://app.example.com/cb"],
-            token_endpoint_auth_method="client_secret_basic",
-            type="web",
-        )
+        res = await _register(client, redirect_uris=["https://app.example.com/cb"])
         assert res.status_code == 201, res.text
         body = res.json()
-        assert body["public"] is True
-        assert body["token_endpoint_auth_method"] == "none"
-        assert "type" not in body
-        assert "client_secret" not in body
+        assert body["token_endpoint_auth_method"] == "client_secret_basic"
+        assert body["client_secret"]
+        assert "user_id" not in body
+        assert "public" not in body
 
 
 async def test_anonymous_client_credentials_rejected():
@@ -196,9 +195,9 @@ async def test_anonymous_client_credentials_rejected():
         assert res.json()["error"] == "invalid_client_metadata"
 
 
-def test_wire_schema_round_trip_and_extra_field_collapse():
-    # register.ts:302/407 — unknown wire keys collapse into the metadata JSON column and are
-    # spread back at the top level on read; the explicit metadata object merges in too.
+def test_wire_schema_round_trip_keeps_only_explicit_metadata():
+    # register.ts:1290/1374 (5c45abcd2): only the explicit metadata object is stored, without
+    # reserved client fields, and spread back at the top level on read.
     from better_auth.plugins_ext.oauth_provider.register import oauth_to_schema, schema_to_oauth
 
     schema = oauth_to_schema(
@@ -207,17 +206,22 @@ def test_wire_schema_round_trip_and_extra_field_collapse():
             "redirect_uris": ["https://app.example.com/cb"],
             "client_name": "My App",
             "scope": "openid email",
-            "metadata": {"foo": "bar"},
+            "application_type": "native",
+            "metadata": {"foo": "bar", "type": "web", "client_id": "spoofed"},
             "custom_vendor_field": "vendor-value",
         }
     )
-    assert isinstance(schema["metadata"], str)  # JSON-stringified on write
+    assert schema["metadata"] == '{"foo":"bar"}'
     assert schema["scopes"] == ["openid", "email"]
-    wire = schema_to_oauth(schema)
+    assert schema["applicationType"] == "native"
+    wire = schema_to_oauth({**schema, "metadata": '{"foo":"bar","public":true}'})
     assert wire["client_name"] == "My App"
     assert wire["scope"] == "openid email"
-    assert wire["foo"] == "bar"  # explicit metadata spread
-    assert wire["custom_vendor_field"] == "vendor-value"  # unknown key collapsed + spread
+    assert wire["application_type"] == "native"
+    assert wire["foo"] == "bar"
+    assert wire["client_id"] == "abc"
+    assert "custom_vendor_field" not in wire
+    assert "public" not in wire
 
 
 async def test_dcr_strips_unknown_wire_fields():
@@ -340,7 +344,7 @@ async def test_update_cannot_flip_public_or_change_secret():
         assert res.status_code == 200, res.text
         body = res.json()
         assert body["client_name"] == "Renamed"
-        assert body["public"] is False  # not flipped
+        assert body["token_endpoint_auth_method"] == "client_secret_basic"  # not flipped
         assert "client_secret" not in body
         stored_after = (await auth.adapter.find_one("oauthClient", [Where("clientId", cid)]))[
             "clientSecret"
@@ -370,7 +374,7 @@ async def test_rotate_returns_new_prefixed_secret():
 async def test_rotate_refuses_public_clients():
     async with provider_client() as client:
         await sign_up(client)
-        created = (await _create(client, token_endpoint_auth_method="none", type="native")).json()
+        created = (await _create(client, token_endpoint_auth_method="none")).json()
         res = await client.post(
             "/api/auth/oauth2/client/rotate-secret", json={"client_id": created["client_id"]}
         )

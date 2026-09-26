@@ -726,3 +726,167 @@ async def test_burns_expired_approved_device_code_instead_of_issuing_token():
 
     record = await auth.adapter.find_one("deviceCode", [Where("deviceCode", code["device_code"])])
     assert record is None
+
+
+# --- v1.7.6: RFC requirements, lookup indexes, user-code matching (3ca2c08dc, 49b5cf650) ---
+
+FORM = {"content-type": "application/x-www-form-urlencoded"}
+
+
+def test_code_columns_are_unique_lookup_keys():
+    fields = device_auth().schema["deviceCode"]
+    assert fields["deviceCode"].unique is True
+    assert fields["userCode"].unique is True
+    assert "oauthClientId" not in fields
+
+
+def test_generated_code_lengths_fit_the_indexed_columns():
+    # index.ts:58: at most 191 characters (DEVICE_AUTHORIZATION_CODE_MAX_LENGTH).
+    with pytest.raises(ValueError, match="at most 191"):
+        DeviceAuthorizationPlugin(device_code_length=192)
+    with pytest.raises(ValueError, match="at most 191"):
+        DeviceAuthorizationPlugin(user_code_length=192)
+
+
+async def test_generated_codes_are_validated():
+    auth = device_auth(generate_user_code=lambda: "U" * 192)
+    async with make_client(auth) as client:
+        res = await client.post("/api/auth/device/code", json={"client_id": "test-client"})
+        assert res.status_code == 400
+        assert res.json() == {
+            "error": "invalid_request",
+            "error_description": "Generated user code must be at most 191 characters",
+        }
+
+
+async def test_device_code_response_forbids_caching():
+    async with make_client(device_auth()) as client:
+        res = await client.post("/api/auth/device/code", json={"client_id": "test-client"})
+        assert res.headers["cache-control"] == "no-store"
+        assert res.headers["pragma"] == "no-cache"
+
+
+async def test_form_encoded_requests_and_repeated_base_parameters():
+    async with make_client(device_auth()) as client:
+        ok = await client.post(
+            "/api/auth/device/code", content="client_id=test-client&scope=read", headers=FORM
+        )
+        assert ok.status_code == 200, ok.text
+        repeated = await client.post(
+            "/api/auth/device/code",
+            content="client_id=test-client&scope=read&scope=write",
+            headers=FORM,
+        )
+        assert repeated.json() == {
+            "error": "invalid_request",
+            "error_description": "scope must not be repeated",
+        }
+        empty = await client.post(
+            "/api/auth/device/code", content="client_id=&scope=read", headers=FORM
+        )
+        assert empty.json() == {
+            "error": "invalid_request",
+            "error_description": "client_id is required",
+        }
+
+
+async def test_colliding_generators_retry_then_fail_with_server_error():
+    # routes.ts:386: three attempts, then a controlled server_error.
+    from better_auth.plugins_ext.device_authorization import DeviceAuthorizationError
+
+    class UniqueAdapter(MemoryAdapter):
+        async def create(self, model, data, **kwargs):
+            existing = await self.find_one(model, [Where("deviceCode", data.get("deviceCode"))])
+            if model == "deviceCode" and existing:
+                raise RuntimeError("UNIQUE constraint failed: deviceCode.deviceCode")
+            return await super().create(model, data, **kwargs)
+
+    calls: list[int] = []
+
+    def device_code():
+        calls.append(1)
+        return "same-device-code"
+
+    auth = make_auth(
+        adapter=UniqueAdapter(),
+        plugins=[DeviceAuthorizationPlugin(generate_device_code=device_code)],
+    )
+    async with make_client(auth) as client:
+        first = await client.post("/api/auth/device/code", json={"client_id": "test-client"})
+        assert first.status_code == 200
+        second = await client.post("/api/auth/device/code", json={"client_id": "test-client"})
+        assert second.status_code == 500
+        assert second.json() == {
+            "error": "server_error",
+            "error_description": "Failed to generate a unique device code",
+        }
+        assert len(calls) == 4
+    assert DeviceAuthorizationError(400, "x", "y").to_response().status == 400
+
+
+async def test_verification_normalizes_default_user_codes():
+    async with make_client(device_auth()) as client:
+        code = await _request_code(client)
+        user_code = code["user_code"]
+        spaced = f" {user_code[:4].lower()} - {user_code[4:].lower()} "
+        res = await client.get("/api/auth/device", params={"user_code": spaced})
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "pending"
+
+
+async def test_custom_user_codes_match_exactly():
+    auth = device_auth(generate_user_code=lambda: "custom-Code")
+    async with make_client(auth) as client:
+        await _request_code(client)
+        assert (
+            await client.get("/api/auth/device", params={"user_code": "custom-Code"})
+        ).status_code == 200
+        lowered = await client.get("/api/auth/device", params={"user_code": "CUSTOMCODE"})
+        assert lowered.json()["error_description"] == ERROR_CODES["INVALID_USER_CODE"]
+
+
+async def test_verification_context_is_only_shown_to_the_owner():
+    async with make_client(device_auth()) as client:
+        code = await _request_code(client, scope="read write")
+        anonymous = await client.get("/api/auth/device", params={"user_code": code["user_code"]})
+        assert anonymous.json() == {"user_code": code["user_code"], "status": "pending"}
+        await sign_up(client)
+        owner = await client.get("/api/auth/device", params={"user_code": code["user_code"]})
+        assert owner.json() == {
+            "user_code": code["user_code"],
+            "status": "pending",
+            "client_id": "test-client",
+            "scope": "read write",
+        }
+
+
+def test_verification_page_is_rate_limited():
+    # index.ts:264: five verification guesses per code lifetime on /device.
+    (rule,) = DeviceAuthorizationPlugin(expires_in="30m").rate_limit()
+    assert (rule.window, rule.max) == (1800, 5)
+    assert rule.path_matcher("/device") and not rule.path_matcher("/device/token")
+
+
+async def test_user_lookup_failure_preserves_the_approved_code():
+    # routes.ts:620: fallible lookups run before the destructive claim.
+    auth = device_auth()
+    async with make_client(auth) as client:
+        await sign_up(client)
+        code = await _request_code(client)
+        await client.get("/api/auth/device", params={"user_code": code["user_code"]})
+        await client.post("/api/auth/device/approve", json={"userCode": code["user_code"]})
+        record = await auth.adapter.find_one(
+            "deviceCode", [Where("deviceCode", code["device_code"])]
+        )
+        await auth.adapter.update("deviceCode", [Where("id", record["id"])], {"userId": "ghost"})
+        res = await _poll_token(client, code["device_code"])
+        assert res.status_code == 500
+        assert res.json()["error_description"] == ERROR_CODES["USER_NOT_FOUND"]
+        assert await auth.adapter.find_one("deviceCode", [Where("id", record["id"])])
+
+
+async def test_device_endpoint_errors_are_not_cached():
+    async with make_client(device_auth()) as client:
+        res = await _poll_token(client, "unknown-code")
+        assert res.json()["error"] == "invalid_grant"
+        assert res.headers["cache-control"] == "no-store"

@@ -721,22 +721,61 @@ def _created_at(session: dict[str, Any]) -> datetime:
     return normalize_timestamp_value(session.get("createdAt")) or utcnow()
 
 
+_PORT_DIGITS = re.compile(r"^\d*$")
+
+
+def _strip_loopback_redirect_port(uri: str) -> str | None:
+    """TS ``stripLoopbackRedirectPort`` (authorize.ts:250, 4d09d5022): an ``http`` loopback
+    URI (IP literal or ``localhost``) with its port removed, everything else kept verbatim;
+    ``None`` when the URI is not an http loopback redirect."""
+    try:
+        parsed = urlsplit(uri)
+        host = parsed.hostname or ""
+    except ValueError:
+        return None
+    if parsed.scheme != "http" or not (is_loopback_ip(host) or host == "localhost"):
+        return None
+    separator = uri.find("://")
+    if separator < 0:
+        return None
+    start = separator + 3
+    end_match = re.search(r"[/?#]", uri[start:])
+    end = start + end_match.start() if end_match else len(uri)
+    authority = uri[start:end]
+    if authority.startswith("["):
+        closing = authority.find("]")
+        if closing < 0:
+            return None
+        if authority[closing + 1 : closing + 2] != ":":
+            return uri
+        port_start = closing + 1
+    else:
+        port_start = authority.rfind(":")
+        if port_start < 0:
+            return uri
+    if not _PORT_DIGITS.match(authority[port_start + 1 :]):
+        return None
+    return uri[: start + port_start] + uri[end:]
+
+
 def _match_redirect_uri(registered_uris: list[str], requested: str | None) -> bool:
+    """TS ``findRegisteredRedirectUri`` (authorize.ts:306): an exact match, or an http loopback
+    redirect that differs from a registered one only by its port (RFC 8252 §7.3, RFC 9700
+    §4.1.3). A requested URI with a fragment or userinfo never matches."""
     if not requested:
         return False
-    req = urlsplit(requested)
+    try:
+        parsed = urlsplit(requested)
+        has_userinfo = bool(parsed.username or parsed.password)
+    except ValueError:
+        return False
+    if not parsed.scheme or "#" in requested or has_userinfo:
+        return False
+    without_port = _strip_loopback_redirect_port(requested)
     for registered in registered_uris:
         if registered == requested:
             return True
-        reg = urlsplit(registered)
-        if (
-            reg.hostname
-            and is_loopback_ip(reg.hostname)
-            and reg.hostname == req.hostname
-            and reg.path == req.path
-            and reg.scheme == req.scheme
-            and reg.query == req.query
-        ):
+        if without_port and _strip_loopback_redirect_port(registered) == without_port:
             return True
     return False
 

@@ -13,7 +13,12 @@ from urllib.parse import urlsplit, urlunsplit
 from ...types import AuthResponse
 from .claims import LEVEL_0_ACR, get_supported_claims
 from .dpop import DPOP_SIGNING_ALGORITHMS
-from .utils import PRIVATE_KEY_JWT_SIGNING_ALGORITHMS, get_jwt_plugin, is_loopback_host
+from .utils import (
+    PRIVATE_KEY_JWT_SIGNING_ALGORITHMS,
+    get_jwt_plugin,
+    get_supported_grant_types,
+    is_loopback_host,
+)
 
 if TYPE_CHECKING:
     from ...auth import BetterAuth
@@ -39,6 +44,14 @@ def _base_url(auth: BetterAuth) -> str:
     return f"{auth.base_url}{auth.base_path}"
 
 
+def _apply_metadata_extensions(auth: BetterAuth, opts: Any, document: dict[str, Any]) -> None:
+    """TS ``applyOAuthProviderMetadataExtensions`` (extensions.ts:315): companion plugins add
+    keys first-wins, never overriding what the provider already wrote."""
+    for contribute in getattr(opts, "extension_metadata", None) or []:
+        for key, value in contribute(auth).items():
+            document.setdefault(key, value)
+
+
 def _issuer(auth: BetterAuth, opts: Any) -> str:
     jwt_plugin = None if getattr(opts, "disable_jwt_plugin", False) else get_jwt_plugin(auth)
     raw = (getattr(jwt_plugin, "issuer", None) if jwt_plugin else None) or _base_url(auth)
@@ -54,7 +67,7 @@ def build_auth_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
 
     advertised = getattr(opts, "advertised_metadata", None) or {}
     scopes_supported = advertised.get("scopes_supported") or getattr(opts, "scopes", None)
-    grant_types = getattr(opts, "grant_types", None)
+    grant_types = get_supported_grant_types(opts)
     dcr = bool(getattr(opts, "allow_dynamic_client_registration", False))
     public_client = bool(getattr(opts, "allow_unauthenticated_client_registration", False))
 
@@ -64,9 +77,7 @@ def build_auth_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
         jwks_path = getattr(jwt_plugin, "jwks_path", "/jwks")
         jwks_uri = getattr(jwt_plugin, "remote_url", None) or f"{base}{jwks_path}"
 
-    response_types_supported = (
-        [] if (grant_types is not None and "authorization_code" not in grant_types) else ["code"]
-    )
+    response_types_supported = [] if "authorization_code" not in grant_types else ["code"]
     token_endpoint_auth_methods = [
         *(["none"] if public_client else []),
         "client_secret_basic",
@@ -86,8 +97,7 @@ def build_auth_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
         "revocation_endpoint": f"{base}/oauth2/revoke",
         "response_types_supported": response_types_supported,
         "response_modes_supported": ["query"],
-        "grant_types_supported": grant_types
-        or ["authorization_code", "client_credentials", "refresh_token"],
+        "grant_types_supported": grant_types,
         # private_key_jwt on every client-authenticated endpoint (TS metadata.ts:68, aebf66d8e).
         "token_endpoint_auth_methods_supported": token_endpoint_auth_methods,
         "token_endpoint_auth_signing_alg_values_supported": signing_algs,
@@ -105,7 +115,9 @@ def build_auth_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
         "backchannel_logout_supported": not jwt_disabled,
         "backchannel_logout_session_supported": not jwt_disabled,
     }
-    return {k: v for k, v in metadata.items() if v is not None}
+    document = {k: v for k, v in metadata.items() if v is not None}
+    _apply_metadata_extensions(auth, opts, document)
+    return document
 
 
 def build_oidc_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
@@ -140,6 +152,7 @@ def build_oidc_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
             "prompt_values_supported": ["login", "consent", "create", "select_account", "none"],
         }
     )
+    _apply_metadata_extensions(auth, opts, metadata)
     return metadata
 
 

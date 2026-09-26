@@ -51,7 +51,6 @@ async def seed(auth, *, client_id="client-1", secret=SECRET, public=False, redir
         "redirectUris": [redirect],
         "scopes": ["openid", "profile", "email", "offline_access"],
         "grantTypes": ["authorization_code", "client_credentials", "refresh_token"],
-        "public": public,
         # TS 1.7 binds a client to its registered authentication method (utils/index.ts:737).
         "tokenEndpointAuthMethod": "none" if public else "client_secret_post",
         "disabled": False,
