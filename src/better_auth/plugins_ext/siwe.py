@@ -473,7 +473,9 @@ class SiwePlugin(Plugin):
                         "name": ens.get("name") or wallet_address,
                         "email": user_email,
                         "image": ens.get("avatar") or "",
-                    }
+                    },
+                    source={"method": "siwe"},  # siwe/index.ts:338-346
+                    ctx=ctx,
                 )
 
             try:

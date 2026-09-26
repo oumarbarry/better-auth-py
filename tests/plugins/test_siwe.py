@@ -796,3 +796,33 @@ async def test_email_taken_during_creation_retries_with_wallet_email(monkeypatch
         r = await _verify(client, email="race@example.com")
         assert r.status_code == 200, r.text
         assert calls == ["race@example.com", f"{WALLET}@siwe.placeholder.invalid"]
+
+
+async def test_validate_user_info_rejects_new_siwe_user():
+    """TS v1.7.6 siwe/index.ts:338-346: createUser passes ``{method: "siwe"}``; the
+    rejection is an API error, so the verify wrapper rethrows it unchanged."""
+    from better_auth.config import UserOptions
+
+    calls = []
+
+    def validate(data, ctx):
+        calls.append(data["source"])
+        return {"error": "siwe_blocked", "errorDescription": "SIWE sign-up is not allowed"}
+
+    auth = make_auth(
+        plugins=[
+            SiwePlugin(
+                domain=DOMAIN,
+                get_nonce=_default_get_nonce,
+                verify_message=_default_verify_message,
+            )
+        ],
+        user=UserOptions(validate_user_info=validate),
+    )
+    async with make_client(auth) as client:
+        await _issue_nonce(client)
+        r = await _verify(client)
+    assert r.status_code == 403
+    assert r.json() == {"code": "siwe_blocked", "message": "SIWE sign-up is not allowed"}
+    assert calls == [{"method": "siwe", "action": "create-user"}]
+    assert await auth.adapter.count("user") == 0

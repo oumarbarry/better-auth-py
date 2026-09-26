@@ -1131,3 +1131,74 @@ async def test_send_allows_cookieless_request_without_origin():
     r = await send_otp_raw(auth, {}, email="s2s@email.com", type="email-verification")
     assert r.status == 200, r.body
     assert len(box["calls"]) == 1
+
+
+async def test_validate_user_info_rejects_otp_sign_up():
+    """TS v1.7.6 email-otp/routes.ts:669-678: createUser passes ``{method: "email-otp"}``."""
+    calls: list[Any] = []
+
+    def validate(data: dict[str, Any], ctx: Any) -> dict[str, str]:
+        calls.append(data["source"])
+        return {"error": "otp_blocked", "errorDescription": "OTP sign-up is not allowed"}
+
+    auth, box, _ = otp_auth(user=UserOptions(validate_user_info=validate))
+    async with make_client(auth) as client:
+        await send_otp(client, "new-user@domain.com", "sign-in")
+        res = await signin_otp(client, "new-user@domain.com", box["otp"])
+    assert res.status_code == 403
+    assert res.json() == {"code": "otp_blocked", "message": "OTP sign-up is not allowed"}
+    assert calls == [{"method": "email-otp", "action": "create-user"}]
+    assert await user_by_email(auth, "new-user@domain.com") is None
+
+
+def _jwks_cache_otp_auth(**kw: Any):
+    from better_auth.plugins_ext.jwt import JWTPlugin
+
+    box: dict[str, Any] = {}
+
+    async def send(data: dict[str, Any], ctx: Any = None) -> None:
+        box["otp"] = data["otp"]
+
+    auth = make_auth(
+        plugins=[
+            EmailOTPPlugin(send_verification_otp=send, **kw),
+            JWTPlugin(session_cookie_cache=True),
+        ],
+        session=SessionOptions(cookie_cache=CookieCache(enabled=True, strategy="jwt")),
+    )
+    assert auth.cookie_cache_signer is not None
+    return auth, box
+
+
+def _session_data_cookie(res: Any) -> str:
+    (cache,) = [
+        h for h in res.headers.get_list("set-cookie") if h.startswith("better-auth.session_data=")
+    ]
+    return cache.split(";", 1)[0].split("=", 1)[1]
+
+
+def _signed_by_jwks(value: str) -> bool:
+    import jwt as pyjwt
+
+    return "kid" in pyjwt.get_unverified_header(value)
+
+
+async def test_verify_email_refreshes_a_jwks_signed_cookie_cache():
+    """TS v1.7.6 cookies/index.ts:202-210: signed by the JWT plugin, not skipped."""
+    auth, box = _jwks_cache_otp_auth()
+    async with make_client(auth) as client:
+        await signup(client, "owner@test.com")
+        await send_otp(client, "owner@test.com", "email-verification")
+        res = await verify_email(client, "owner@test.com", box["otp"])
+    assert res.status_code == 200, res.text
+    assert _signed_by_jwks(_session_data_cookie(res))
+
+
+async def test_change_email_refreshes_a_jwks_signed_cookie_cache():
+    auth, box = _jwks_cache_otp_auth(change_email={"enabled": True})
+    async with make_client(auth) as client:
+        await signup(client, "owner@test.com")
+        await request_change(client, "changed@test.com")
+        res = await change_email(client, "changed@test.com", box["otp"])
+    assert res.status_code == 200, res.text
+    assert _signed_by_jwks(_session_data_cookie(res))

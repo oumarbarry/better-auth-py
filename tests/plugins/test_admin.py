@@ -998,3 +998,28 @@ async def test_list_sessions_hides_impersonated_sessions():
         r = await client.get("/api/auth/list-sessions")
         assert r.status_code == 200
         assert all(not s.get("impersonatedBy") for s in r.json())
+
+
+async def test_create_user_runs_validate_user_info_with_admin_source():
+    """TS v1.7.6 admin/routes.ts:445-456: createUser passes ``{method: "admin"}``."""
+    from better_auth.config import UserOptions
+
+    calls = []
+
+    def validate(data, ctx):
+        calls.append(data["source"])
+        if data["source"]["method"] == "admin":
+            return {"error": "admin_blocked", "errorDescription": "No admin sign-ups"}
+        return None
+
+    auth = make_auth(plugins=[AdminPlugin()], user=UserOptions(validate_user_info=validate))
+    async with make_client(auth) as client:
+        await _become_admin(auth, client)
+        r = await client.post(
+            "/api/auth/admin/create-user",
+            json={"email": "new@x.com", "name": "New", "password": PASSWORD},
+        )
+    assert r.status_code == 403
+    assert r.json() == {"code": "admin_blocked", "message": "No admin sign-ups"}
+    assert calls[-1] == {"method": "admin", "action": "create-user"}
+    assert await auth.adapter.find_one("user", [Where("email", "new@x.com")]) is None

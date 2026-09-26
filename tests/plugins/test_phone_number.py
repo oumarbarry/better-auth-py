@@ -800,3 +800,25 @@ async def test_consume_phone_number_otp_uses_custom_verifier():
         assert getattr(exc, "code", None) == "INVALID_OTP"
     else:
         raise AssertionError("expected INVALID_OTP")
+
+
+async def test_validate_user_info_rejects_phone_sign_up():
+    """TS v1.7.6 phone-number/routes.ts:598-611: createUser passes
+    ``{method: "phone-number"}``."""
+    calls: list[Any] = []
+
+    def validate(data: dict[str, Any], ctx: Any) -> dict[str, str]:
+        calls.append(data["source"])
+        return {"error": "phone_blocked"}
+
+    otp: dict[str, Any] = {}
+    auth = make_auth(plugins=[phone_plugin(otp)], user=UserOptions(validate_user_info=validate))
+    async with make_client(auth) as client:
+        await send_otp(client, "+15550001111")
+        res = await client.post(
+            f"{BASE}/phone-number/verify", json={"phoneNumber": "+15550001111", "code": otp["code"]}
+        )
+    assert res.status_code == 403
+    assert res.json() == {"code": "phone_blocked", "message": "phone_blocked"}
+    assert calls == [{"method": "phone-number", "action": "create-user"}]
+    assert await auth.adapter.count("user") == 0

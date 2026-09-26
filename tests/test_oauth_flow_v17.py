@@ -256,7 +256,8 @@ def gate(calls: list, reject: dict | None = None, raises: bool = False):
         calls.append(data)
         if raises:
             raise RuntimeError("boom")
-        return reject
+        # the email sign-up that seeds a local user is gated too (sign-up.ts:333-343)
+        return None if data["source"]["method"] == "email-password" else reject
 
     return UserOptions(validate_user_info=validate)
 

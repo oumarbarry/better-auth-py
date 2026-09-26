@@ -227,6 +227,18 @@ class BetterAuth:
         self.database_hooks = database_hooks
         self.adapter = adapter if adapter is not None else MemoryAdapter()
         self.adapter.init(self.schema)
+        # TS v1.7.6 auth/base.ts:20-26: say so when the adapter cannot validate the schema.
+        validate_schema = self.adapter.advanced.validate_schema
+        if (
+            type(self.adapter).check_schema is BaseAdapter.check_schema
+            and validate_schema is not False
+        ):
+            logger.log(
+                logging.WARNING if validate_schema is True else logging.DEBUG,
+                'Schema validation is not available for adapter "%s". Skipping schema '
+                "validation. Database operations will proceed normally.",
+                type(self.adapter).__name__,
+            )
         #: the domain seam every core write routes through so databaseHooks fire.
         self.internal = InternalAdapter(
             self.adapter,
@@ -235,6 +247,7 @@ class BetterAuth:
             session_expires_in=self.session_options.expires_in,
             verification_store_identifier=self.verification.store_identifier,
             verification_store_in_database=self.verification.store_in_database,
+            validate_user_info=self.user.validate_user_info,
         )
 
         self._http = http_client
@@ -405,6 +418,10 @@ class BetterAuth:
         # --- onRequest phase: disabledPaths -> rate limit -> plugin.on_request -----------
         if request.path in self.disabled_paths:
             return AuthResponse(status=404, body={"message": "Not Found"})
+
+        # TS v1.7.6 api/index.ts:305-306: a schema mismatch fails every auth request,
+        # including routes that never reach the database.
+        await self.adapter.check_schema()
 
         retry_after = await self._rate_limiter.check(request)
         if retry_after is not None:

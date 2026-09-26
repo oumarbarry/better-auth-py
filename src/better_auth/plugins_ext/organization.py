@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..access_control import ORG_DEFAULT_ROLES, AccessControl, Role
 from ..adapters.base import Where
-from ..cookie_cache import set_cookie_cache
+from ..cookie_cache import set_cookie_cache_async
 from ..crypto import b64url_encode_nopad
 from ..endpoints import validate_email
 from ..internal_adapter import _call_hook
@@ -869,14 +869,14 @@ class OrganizationPlugin(Plugin):
     ) -> dict[str, Any] | None:
         return await ctx.internal.update_session(token, {"activeOrganizationId": org_id})
 
-    def _apply_session_cookie(
+    async def _apply_session_cookie(
         self, ctx: Ctx, resp: AuthResponse, token: str, session: dict[str, Any] | None, user: Any
     ) -> None:
         """Refresh the session cookie (and cache cookie, if enabled) — TS setSessionCookie."""
         resp.set_cookie(refresh_session_cookie(ctx.auth, ctx.request, token))
         if session is not None and ctx.auth.session_options.cookie_cache.enabled:
             dont_remember = cookie_name(ctx.auth, "dont_remember") in ctx.request.cookies()
-            cache = set_cookie_cache(ctx.auth, session, user, dont_remember)
+            cache = await set_cookie_cache_async(ctx.auth, session, user, dont_remember)
             if cache is not None:
                 resp.set_cookie(cache)
 
@@ -1134,7 +1134,7 @@ class OrganizationPlugin(Plugin):
                 return AuthResponse(body=None)
             updated = await self._set_active_org(ctx, token, None)
             resp = AuthResponse(body=None)
-            self._apply_session_cookie(ctx, resp, token, updated, session["user"])
+            await self._apply_session_cookie(ctx, resp, token, updated, session["user"])
             return resp
 
         if not org_id and not org_slug:
@@ -1160,7 +1160,7 @@ class OrganizationPlugin(Plugin):
             raise _err(400, "ORGANIZATION_NOT_FOUND")
         updated = await self._set_active_org(ctx, token, organization["id"])
         resp = AuthResponse(body=organization)
-        self._apply_session_cookie(ctx, resp, token, updated, session["user"])
+        await self._apply_session_cookie(ctx, resp, token, updated, session["user"])
         return resp
 
     async def _get_organization(self, ctx: Ctx) -> AuthResponse:
@@ -1703,7 +1703,7 @@ class OrganizationPlugin(Plugin):
         )
         resp = AuthResponse(body={"invitation": accepted, "member": member})
         if team_active_session is not None:
-            self._apply_session_cookie(
+            await self._apply_session_cookie(
                 ctx, resp, session["session"]["token"], team_active_session, user
             )
         return resp
@@ -2251,7 +2251,7 @@ class OrganizationPlugin(Plugin):
                 return AuthResponse(body=None)
             updated = await self._set_active_team(ctx, token, None)
             resp = AuthResponse(body=None)
-            self._apply_session_cookie(ctx, resp, token, updated, session["user"])
+            await self._apply_session_cookie(ctx, resp, token, updated, session["user"])
             return resp
 
         team_id = body.get("teamId")
@@ -2271,7 +2271,7 @@ class OrganizationPlugin(Plugin):
             raise _err(403, "USER_IS_NOT_A_MEMBER_OF_THE_TEAM")
         updated = await self._set_active_team(ctx, token, team["id"])
         resp = AuthResponse(body=team)
-        self._apply_session_cookie(ctx, resp, token, updated, session["user"])
+        await self._apply_session_cookie(ctx, resp, token, updated, session["user"])
         return resp
 
     async def _list_user_teams_route(self, ctx: Ctx) -> AuthResponse:

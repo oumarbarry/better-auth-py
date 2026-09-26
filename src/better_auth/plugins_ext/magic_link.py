@@ -217,7 +217,9 @@ class MagicLinkPlugin(Plugin):
                 return _redirect_with_error(error_callback_url, "new_user_signup_disabled")
             try:
                 user = await ctx.internal.create_user(
-                    {"email": email, "emailVerified": True, "name": name or ""}
+                    {"email": email, "emailVerified": True, "name": name or ""},
+                    source={"method": "magic-link"},
+                    ctx=ctx,
                 )
             except APIError as error:
                 # Browser flow: forward a rejection's code to the error URL instead of a

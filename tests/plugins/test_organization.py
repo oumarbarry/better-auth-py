@@ -3105,3 +3105,28 @@ async def test_invite_member_unknown_role_rejected_with_dac():
         assert res.status_code == 400
         assert res.json()["code"] == "ROLE_NOT_FOUND"
         assert res.json()["message"] == f"{ERROR_CODES['ROLE_NOT_FOUND']}: ghost"
+
+
+async def test_set_active_refreshes_a_jwks_signed_cookie_cache():
+    """TS v1.7.6 cookies/index.ts:202-210: the refreshed cache cookie is signed by the
+    JWT plugin when it owns the cache, not skipped."""
+    import jwt as pyjwt
+
+    from better_auth.config import CookieCache, SessionOptions
+    from better_auth.plugins_ext.jwt import JWTPlugin
+
+    auth = make_auth(
+        plugins=[OrganizationPlugin(), JWTPlugin(session_cookie_cache=True)],
+        session=SessionOptions(cookie_cache=CookieCache(enabled=True, strategy="jwt")),
+    )
+    async with make_client(auth) as client:
+        await sign_up(client)
+        org = (await _create_org(client)).json()
+        res = await client.post(
+            "/api/auth/organization/set-active", json={"organizationId": org["id"]}
+        )
+    (cache,) = [
+        h for h in res.headers.get_list("set-cookie") if h.startswith("better-auth.session_data=")
+    ]
+    value = cache.split(";", 1)[0].split("=", 1)[1]
+    assert "kid" in pyjwt.get_unverified_header(value)  # signed with the JWKS key

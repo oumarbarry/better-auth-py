@@ -350,7 +350,9 @@ class AdminPlugin(Plugin):
                     if requested_role is not None
                     else self.default_role
                 ),
-            }
+            },
+            source={"method": "admin"},  # admin/routes.ts:445-456
+            ctx=ctx,
         )
         if user is None:
             raise _err(500, "FAILED_TO_CREATE_USER")

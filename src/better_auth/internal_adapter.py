@@ -27,8 +27,9 @@ from typing import Any
 
 from .adapters.base import BaseAdapter, Where
 from .crypto import b64url_encode_nopad, default_key_hasher, generate_id
+from .oauth.validate_user_info import assert_valid_user_info, assert_valid_user_info_source
 from .secondary_storage import SecondaryStorage
-from .types import BetterAuthError
+from .types import APIError, BetterAuthError
 
 logger = logging.getLogger("better_auth")
 
@@ -226,8 +227,11 @@ class InternalAdapter:
         store_session_in_database: bool = False,
         verification_store_identifier: Any = None,
         verification_store_in_database: bool = False,
+        validate_user_info: Callable[..., Any] | None = None,
     ) -> None:
         self.adapter = adapter
+        #: ``options.user.validateUserInfo``: when set, ``create_user`` gates on it
+        self.validate_user_info = validate_user_info
         self.secondary_storage = secondary_storage
         self.hooks = _normalize_hooks(database_hooks)
         self.session_expires_in = session_expires_in
@@ -401,6 +405,7 @@ class InternalAdapter:
                 verification_store_in_database=self.verification_store_in_database,
             )
             tx.hooks = self.hooks
+            tx.validate_user_info = self.validate_user_info
             tx._after_queue = self._after_queue
             return await callback(tx)
 
@@ -420,13 +425,34 @@ class InternalAdapter:
     # --- user --------------------------------------------------------------------------
 
     async def create_user(
-        self, user: dict[str, Any], *, force_allow_id: bool = False
+        self,
+        user: dict[str, Any],
+        *,
+        source: dict[str, Any] | None = None,
+        ctx: Any = None,
+        force_allow_id: bool = False,
     ) -> dict[str, Any] | None:
+        """``source`` names the provisioning method (``{"method": "email-password"}``);
+        ``ctx`` is the endpoint context. Both are required once ``validate_user_info``
+        is configured (TS v1.7.6 internal-adapter.ts:268-306)."""
         now = _now()
         data = {"createdAt": now, "updatedAt": now, **user}
         if data.get("email"):
             data["email"] = data["email"].lower()
-        return await self._create("user", data, force_allow_id=force_allow_id, custom_fn=None)
+        if self.validate_user_info is not None:
+            validation_source = {**(source or {}), "action": "create-user"}
+            assert_valid_user_info_source(validation_source)
+            if ctx is None:
+                logger.error("Unable to run validateUserInfo: missing endpoint context")
+                raise APIError(
+                    403,
+                    "validation_context_missing",
+                    "User validation requires an endpoint context",
+                )
+            await assert_valid_user_info(ctx, data, validation_source)
+        return await self._create(
+            "user", data, force_allow_id=force_allow_id, custom_fn=None, ctx=ctx
+        )
 
     async def update_user(self, user_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
         return await self._update("user", [Where("id", user_id)], data, custom_fn=None)

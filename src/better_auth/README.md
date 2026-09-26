@@ -148,7 +148,7 @@ auth = BetterAuth(secret=..., adapter=adapter, ...)
 await adapter.create_tables()  # dev convenience; use Alembic in production
 ```
 
-A custom adapter implements nine async methods over dict rows. See `better_auth.adapters.base.BaseAdapter` (`create`, `find_one`, `find_many`, `update`, `update_many`, `delete`, `delete_many`, `count`, `transaction`); atomic `consume_one`/`increment_one` are derived from `transaction` for free.
+A custom adapter implements nine async methods over dict rows. See `better_auth.adapters.base.BaseAdapter` (`create`, `find_one`, `find_many`, `update`, `update_many`, `delete`, `delete_many`, `count`, `transaction`); atomic `consume_one`/`increment_one` come for free as guarded fallbacks built on those methods, and an adapter can override them with a native single statement.
 
 ## Social providers
 

@@ -450,3 +450,29 @@ async def test_verify_forwards_user_creation_rejection_to_error_url():
         params = parse_qs(urlsplit(r.headers["location"]).query)
         assert params["error"] == ["SIGNUP_BLOCKED"]
         assert params["error_description"] == ["Sign up is closed"]
+
+
+async def test_validate_user_info_rejection_redirects_to_error_url():
+    """TS v1.7.6 magic-link/index.ts:401-425: a gate rejection on a new user redirects
+    with ``error`` and ``error_description``."""
+    calls: list[Any] = []
+
+    def validate(data: dict[str, Any], ctx: Any) -> dict[str, str]:
+        calls.append(data["source"])
+        return {
+            "error": "magic_link_blocked",
+            "errorDescription": "Magic link sign-up is not allowed",
+        }
+
+    holder: dict[str, Any] = {}
+    auth = _auth(holder, user=UserOptions(validate_user_info=validate))
+    async with make_client(auth) as client:
+        await _sign_in(client, "new-magic-link@example.com")
+        r = await _verify(client, holder["token"], errorCallbackURL="/err")
+    assert r.status_code == 302
+    assert r.headers["location"] == (
+        "http://testserver/err?error=magic_link_blocked"
+        "&error_description=Magic+link+sign-up+is+not+allowed"
+    )
+    assert calls == [{"method": "magic-link", "action": "create-user"}]
+    assert await auth.adapter.count("user") == 0

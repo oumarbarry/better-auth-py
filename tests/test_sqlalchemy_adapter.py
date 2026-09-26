@@ -251,3 +251,46 @@ async def test_schema_mismatch_fails_requests_with_a_500(caplog):
     assert response.status_code == 500
     assert any("Database schema mismatch" in r.getMessage() for r in caplog.records)
     await engine.dispose()
+
+
+async def test_schema_mismatch_fails_a_route_that_never_touches_the_database():
+    """TS v1.7.6 api/index.ts:305-306: onRequest awaits the schema check, so even
+    ``/ok`` fails on a mismatched database."""
+    adapter, engine = await _sa()
+    auth = make_auth(adapter=adapter)
+    async with make_client(auth) as client:
+        response = await client.get("/api/auth/ok")
+        assert response.status_code == 500
+        await adapter.create_tables()
+        assert (await client.get("/api/auth/ok")).status_code == 200
+    await engine.dispose()
+
+
+@pytest.mark.parametrize(("validate_schema", "level"), [(None, "DEBUG"), (True, "WARNING")])
+def test_adapter_without_schema_validation_is_logged(caplog, validate_schema, level):
+    """TS v1.7.6 auth/base.ts:20-26: an adapter that cannot validate is reported at
+    ``warn`` when validation was asked for explicitly, ``debug`` otherwise."""
+    import logging
+
+    from better_auth import MemoryAdapter
+    from better_auth.config import AdvancedDatabase
+
+    caplog.set_level(logging.DEBUG, logger="better_auth")
+    make_auth(adapter=MemoryAdapter(AdvancedDatabase(validate_schema=validate_schema)))
+    (record,) = [r for r in caplog.records if "Schema validation" in r.getMessage()]
+    assert record.levelname == level
+    assert record.getMessage() == (
+        'Schema validation is not available for adapter "MemoryAdapter". Skipping schema '
+        "validation. Database operations will proceed normally."
+    )
+
+
+def test_adapter_without_schema_validation_is_silent_when_disabled(caplog):
+    import logging
+
+    from better_auth import MemoryAdapter
+    from better_auth.config import AdvancedDatabase
+
+    caplog.set_level(logging.DEBUG, logger="better_auth")
+    make_auth(adapter=MemoryAdapter(AdvancedDatabase(validate_schema=False)))
+    assert not [r for r in caplog.records if "Schema validation" in r.getMessage()]

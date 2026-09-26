@@ -751,3 +751,71 @@ async def test_revoke_unproven_runs_without_lock_on_secondary_only_storage():
     promoted = await ia.revoke_unproven_account_access(user["id"])
     assert _row(promoted)["emailVerified"] is True
     assert await adapter.count("account", [Where("userId", user["id"])]) == 0
+
+
+# --- user.validateUserInfo gate on createUser (TS v1.7.6 internal-adapter.ts:282-306) ---
+
+
+def _gated_auth(calls: list[Any]) -> Any:
+    from better_auth.config import UserOptions
+    from conftest import make_auth
+
+    def validate(data: dict[str, Any], ctx: Any) -> None:
+        calls.append(data)
+
+    return make_auth(user=UserOptions(validate_user_info=validate))
+
+
+def _endpoint_ctx(auth: Any) -> Any:
+    from better_auth.types import AuthRequest, Ctx
+
+    return Ctx(auth=auth, request=AuthRequest(method="POST", path="/test"))
+
+
+async def _gate_error(coro: Any) -> tuple[int, str, str | None]:
+    from better_auth.types import APIError
+
+    with pytest.raises(APIError) as caught:
+        await coro
+    return caught.value.status, caught.value.code, caught.value.message
+
+
+async def test_create_user_gate_requires_a_source():
+    auth = _gated_auth([])
+    data = {"email": "missing-source@example.com", "name": "Missing Source"}
+    assert await _gate_error(auth.internal.create_user(data, ctx=_endpoint_ctx(auth))) == (
+        403,
+        "validation_source_missing",
+        "User validation source is required",
+    )
+    assert await auth.adapter.count("user") == 0
+
+
+async def test_create_user_gate_requires_an_endpoint_context():
+    auth = _gated_auth([])
+    data = {"email": "missing-context@example.com", "name": "Missing Context"}
+    assert await _gate_error(auth.internal.create_user(data, source={"method": "test"})) == (
+        403,
+        "validation_context_missing",
+        "User validation requires an endpoint context",
+    )
+    assert await auth.adapter.count("user") == 0
+
+
+async def test_create_user_gate_forces_the_create_user_action():
+    calls: list[Any] = []
+    auth = _gated_auth(calls)
+    user = await auth.internal.create_user(
+        {"email": "Canonical-Action@example.com", "name": "Canonical Action"},
+        source={"method": "test", "action": "sign-in"},
+        ctx=_endpoint_ctx(auth),
+    )
+    assert _row(user)["email"] == "canonical-action@example.com"
+    (call,) = calls
+    assert call["source"] == {"method": "test", "action": "create-user"}
+    assert call["user"]["email"] == "canonical-action@example.com"
+
+
+async def test_create_user_without_a_gate_needs_no_source_or_context():
+    ia = InternalAdapter(_adapter())
+    assert _row(await ia.create_user({"email": "a@b.c", "name": "A"}))["email"] == "a@b.c"

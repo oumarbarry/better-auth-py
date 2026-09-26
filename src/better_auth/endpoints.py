@@ -179,7 +179,10 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
         "updatedAt": now,
     }
     try:
-        created = await ctx.internal.create("user", user, ctx=ctx)
+        # sign-up.ts:333-343: createUser with the email-password provisioning source
+        created = await ctx.internal.create_user(
+            user, source={"method": "email-password"}, ctx=ctx, force_allow_id=True
+        )
     except APIError as error:
         # sign-up.ts:350-357: a gate rejection (403) under generic-duplicate mode gets
         # the same opaque success as an existing email, closing an enumeration channel
@@ -193,6 +196,7 @@ async def sign_up_email(ctx: Ctx) -> AuthResponse:
         raise
     if created is None:  # sign-up.ts:343-348
         raise APIError(400, "FAILED_TO_CREATE_USER", "Failed to create user")
+    user = created  # sign-up.ts:366-420: the rest of the flow uses the stored row
     await ctx.internal.create(
         "account",
         {

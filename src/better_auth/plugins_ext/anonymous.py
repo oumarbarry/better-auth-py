@@ -173,7 +173,9 @@ class AnonymousPlugin(Plugin):
         name = await _maybe_await(self.generate_name(ctx)) if self.generate_name else None
         name = name or "Anonymous"
         new_user = await ctx.internal.create_user(
-            {"email": email, "emailVerified": False, "isAnonymous": True, "name": name}
+            {"email": email, "emailVerified": False, "isAnonymous": True, "name": name},
+            source={"method": "anonymous"},  # anonymous/index.ts:168-178
+            ctx=ctx,
         )
         if new_user is None:
             raise _err(500, "FAILED_TO_CREATE_USER")

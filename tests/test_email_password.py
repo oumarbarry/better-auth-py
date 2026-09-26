@@ -440,3 +440,48 @@ async def test_sign_up_aborted_by_a_hook_fails_to_create_user():
     assert response.status_code == 400
     assert response.json() == {"code": "FAILED_TO_CREATE_USER", "message": "Failed to create user"}
     assert await auth.adapter.find_many("account", []) == []
+
+
+# --- user.validateUserInfo on email sign-up (TS v1.7.6 sign-up.ts:333-365) -------------
+
+
+def _gate(calls, reject=None):
+    from better_auth.config import UserOptions
+
+    def validate(data, ctx):
+        calls.append(data)
+        return reject
+
+    return UserOptions(validate_user_info=validate)
+
+
+async def test_validate_user_info_sees_email_sign_up():
+    calls = []
+    async with make_client(make_auth(user=_gate(calls))) as client:
+        await sign_up(client)
+    (call,) = calls
+    assert call["source"] == {"method": "email-password", "action": "create-user"}
+    assert call["user"]["email"] == SIGNUP["email"]
+
+
+async def test_validate_user_info_rejects_email_sign_up():
+    reject = {"error": "blocked_domain", "errorDescription": "Sign-up is not allowed"}
+    auth = make_auth(user=_gate([], reject))
+    async with make_client(auth) as client:
+        r = await client.post("/api/auth/sign-up/email", json=SIGNUP)
+    assert r.status_code == 403
+    assert r.json() == {"code": "blocked_domain", "message": "Sign-up is not allowed"}
+    assert await auth.adapter.count("user") == 0
+
+
+async def test_validate_user_info_rejection_hides_behind_generic_duplicate():
+    auth = make_auth(
+        user=_gate([], {"error": "blocked"}),
+        email_and_password=EmailAndPassword(enabled=True, require_email_verification=True),
+    )
+    async with make_client(auth) as client:
+        r = await client.post("/api/auth/sign-up/email", json=SIGNUP)
+    assert r.status_code == 200
+    assert r.json()["token"] is None
+    assert r.json()["user"]["email"] == SIGNUP["email"]
+    assert await auth.adapter.count("user") == 0

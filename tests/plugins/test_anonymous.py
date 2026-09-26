@@ -395,3 +395,22 @@ def test_error_codes_surface_on_auth_instance():
     assert auth.error_codes["ANONYMOUS_USERS_CANNOT_SIGN_IN_AGAIN_ANONYMOUSLY"] == (
         "Anonymous users cannot sign in again anonymously"
     )
+
+
+async def test_validate_user_info_rejects_anonymous_sign_in():
+    """TS v1.7.6 anonymous/index.ts:168-178: createUser passes ``{method: "anonymous"}``."""
+    from better_auth.config import UserOptions
+
+    calls = []
+
+    def validate(data, ctx):
+        calls.append(data["source"])
+        return {"error": "no_anonymous"}
+
+    auth = make_auth(plugins=[AnonymousPlugin()], user=UserOptions(validate_user_info=validate))
+    async with make_client(auth) as client:
+        r = await client.post("/api/auth/sign-in/anonymous")
+    assert r.status_code == 403
+    assert r.json() == {"code": "no_anonymous", "message": "no_anonymous"}
+    assert calls == [{"method": "anonymous", "action": "create-user"}]
+    assert await auth.adapter.count("user") == 0

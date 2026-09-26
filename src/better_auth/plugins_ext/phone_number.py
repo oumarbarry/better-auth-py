@@ -390,7 +390,9 @@ class PhoneNumberPlugin(Plugin):
                 "name": get_temp_name(phone) if get_temp_name else phone,
                 _PHONE_FIELD: phone,
                 _VERIFIED_FIELD: True,
-            }
+            },
+            source={"method": "phone-number"},  # phone-number/routes.ts:598-611
+            ctx=ctx,
         )
         if user is None:
             raise APIError(500, "FAILED_TO_CREATE_USER", "Failed to create user")

@@ -73,8 +73,9 @@ over plain dict rows:
 | Atomicity | `transaction` |
 
 `consume_one` and `increment_one` (the atomic single-use-token and
-attempt-counter primitives the plugins rely on) are derived from
-`transaction`, so implementing `transaction` correctly gets them for free.
+attempt-counter primitives the plugins rely on) come for free: the base
+class builds them as guarded updates on top of the methods above, and an
+adapter can override them with a native single statement.
 
 Filters arrive as a list of `Where` objects rather than raw SQL, and the
 adapter is also what generates ids, which is why

@@ -21,7 +21,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..adapters.base import Where
-from ..cookie_cache import set_cookie_cache
+from ..cookie_cache import set_cookie_cache_async
 from ..crypto import default_key_hasher, generate_otp, symmetric_decrypt, symmetric_encrypt
 from ..endpoints import require_fields, validate_email, validate_password
 from ..origin import validate_form_csrf
@@ -435,7 +435,7 @@ class EmailOTPPlugin(Plugin):
             assert current is not None
             # only update THIS session's cache, and only when it's the verified user
             dont_remember = cookie_name(self.auth, "dont_remember") in ctx.request.cookies()
-            cache_cookie = set_cookie_cache(
+            cache_cookie = await set_cookie_cache_async(
                 self.auth,
                 current["session"],
                 {**current["user"], "emailVerified": True},
@@ -465,7 +465,9 @@ class EmailOTPPlugin(Plugin):
                     "emailVerified": True,
                     "name": body.get("name") or "",
                     "image": body.get("image"),
-                }
+                },
+                source={"method": "email-otp"},  # email-otp/routes.ts:669-678
+                ctx=ctx,
             )
             assert new_user is not None
             return await self._session_response(new_user, ctx)
@@ -632,7 +634,7 @@ class EmailOTPPlugin(Plugin):
         response.set_cookie(refresh_session_cookie(self.auth, ctx.request, session_obj["token"]))
         if self.auth.session_options.cookie_cache.enabled:
             dont_remember = cookie_name(self.auth, "dont_remember") in ctx.request.cookies()
-            cache_cookie = set_cookie_cache(
+            cache_cookie = await set_cookie_cache_async(
                 self.auth,
                 session_obj,
                 {**session_user, "email": new_email, "emailVerified": True},
