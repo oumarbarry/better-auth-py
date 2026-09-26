@@ -18,6 +18,8 @@ from typing import Any
 from ...adapters.base import Where
 from ...session import utcnow
 from ...types import Ctx
+from .dpop import strip_access_token_authorization_scheme
+from .resources import is_audience_claim_allowed, user_info_resource
 from .token import (
     authenticate_client,
     decode_refresh_token,
@@ -29,11 +31,9 @@ from .utils import (
     JwsAccessTokenExpired,
     JwsAccessTokenInvalid,
     OAuthError,
-    audience_allowed,
     get_jwt_plugin,
     resolved_issuer,
     store_token,
-    strip_access_token_authorization_scheme,
     verify_jws_access_token,
 )
 
@@ -64,7 +64,9 @@ async def _revoke_jwt_access_token(ctx: Ctx, opts: Any, token: str) -> None:
         raise OAuthError(400, "invalid_request", "invalid JWT signature") from None
     except (JwsAccessTokenExpired, JwsAccessTokenClaimInvalid):
         return None
-    if not payload.get("azp") or not audience_allowed(ctx, opts, payload.get("aud")):
+    if not payload.get("azp") or not await is_audience_claim_allowed(
+        ctx, opts, payload.get("aud"), [user_info_resource(ctx)]
+    ):
         return None
     raise OAuthError(
         400,

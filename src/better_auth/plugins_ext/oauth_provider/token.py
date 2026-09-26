@@ -6,9 +6,12 @@ public client, and must use the method they registered. Handles ``authorization_
 (single-use code redemption; a replayed code revokes the tokens already issued for it),
 ``client_credentials`` (machine scopes from ``clientCredentialsScopes``), and ``refresh_token``
 (rotation via a ``revoked=null`` CAS, an optional reuse window that replays the stored response,
-and RFC 9700 §4.14 family teardown on replay). Access tokens are ``at+jwt`` JWTs when a validated
-``resource`` audience is present (signed on the jwt plugin's keys), otherwise opaque and stored
-hashed; id tokens carry pinned OIDC claims plus ``at_hash``.
+and RFC 9700 §4.14 family teardown on replay). RFC 8707 ``resource`` values must name
+``oauthResource`` rows whose policy narrows scopes and lifetimes; a request may narrow, never
+widen, the resources bound to the grant. Access tokens are ``at+jwt`` JWTs when a resource
+audience is present (signed on the jwt plugin's keys), otherwise opaque and stored hashed; a DPoP
+proof binds them to a key (``cnf.jkt``, ``token_type: DPoP``). ID tokens carry pinned OIDC
+claims plus ``at_hash``; profile and email claims are served by UserInfo.
 
 When ``disable_jwt_plugin`` is set, access tokens are always opaque and id tokens are HS256-signed
 with the client's decrypted secret (TS token.ts:180); public clients without a secret get none.
@@ -33,7 +36,26 @@ from ...crypto import generate_random_string, symmetric_decrypt, symmetric_encry
 from ...session import utcnow
 from ...types import AuthResponse, Ctx
 from ..jwt import to_exp_jwt
+from . import dpop
+from .claims import (
+    LEVEL_0_ACR,
+    STANDARD_CLAIM_NAMES,
+    get_requested_user_info_claims,
+    get_supported_claims,
+    is_claims_request_input,
+    is_valid_oidc_claims_request,
+    resolve_access_token_claims,
+    strip_reserved_id_token_claims,
+    user_normal_claims,
+)
 from .client_crud import get_client
+from .resources import (
+    extract_repeated_resource_from_form,
+    resolve_resource_policy,
+    resource_uri_issue,
+    to_audience_claim,
+    to_resource_list,
+)
 from .utils import (
     OAuthError,
     _decrypt_stored_client_secret,
@@ -61,16 +83,8 @@ NO_STORE_HEADERS = [("Cache-Control", "no-store"), ("Pragma", "no-cache")]
 #: Scopes that only a resource owner can delegate (oauthClient/client-credentials.ts:5).
 USER_DELEGATED_SCOPES = frozenset({"openid", "profile", "email", "offline_access"})
 
-#: Claim names the AS owns on a JWT access token (claims.ts:19).
-_RESERVED_ACCESS_TOKEN_CLAIMS = frozenset(
-    {"iss", "sub", "aud", "exp", "iat", "jti", "client_id", "scope", "auth_time", "acr", "amr"}
-    | {"cnf"}
-)
-
 #: TS ``generateRandomString(32, "A-Z", "a-z")`` — opaque access / refresh token charset.
 _TOKEN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
-_ACR_BRONZE = "urn:mace:incommon:iap:bronze"
 
 
 async def _await(value: Any) -> Any:
@@ -191,25 +205,6 @@ async def authenticate_client(
     return destructure_credentials(creds)
 
 
-# --- shared OIDC/user claims (userinfo.ts:13) ----------------------------------------
-
-
-def user_normal_claims(user: dict[str, Any], scopes: list[str]) -> dict[str, Any]:
-    """OIDC normal claims for the id_token / userinfo — TS ``userNormalClaims`` (``sub`` plus
-    profile/email claim groups). ``None`` values are dropped downstream."""
-    name = [v for v in (user.get("name") or "").split(" ") if v]
-    claims: dict[str, Any] = {"sub": user.get("id")}
-    if "profile" in scopes:
-        claims["name"] = user.get("name")
-        claims["picture"] = user.get("image")
-        claims["given_name"] = " ".join(name[:-1]) if len(name) > 1 else None
-        claims["family_name"] = name[-1] if len(name) > 1 else None
-    if "email" in scopes:
-        claims["email"] = user.get("email")
-        claims["email_verified"] = user.get("emailVerified") or False
-    return claims
-
-
 # --- refresh token encode/decode (prefix + formatRefreshToken hooks) ------------------
 
 
@@ -237,57 +232,30 @@ async def decode_refresh_token(opts: Any, tok: str) -> dict[str, Any]:
 # --- token minters -------------------------------------------------------------------
 
 
-def _strip_reserved_access_claims(claims: dict[str, Any] | None) -> dict[str, Any]:
-    """TS ``stripReservedClaims`` (claims.ts:40): the AS owns the RFC 9068 names."""
-    claims = claims or {}
-    stripped = [k for k in claims if k in _RESERVED_ACCESS_TOKEN_CLAIMS]
-    if stripped:
-        logger.warning(
-            "oauth-provider: stripped reserved access-token claim name(s): %s. "
-            "The AS owns these claim values.",
-            ", ".join(stripped),
-        )
-    return {k: v for k, v in claims.items() if k not in _RESERVED_ACCESS_TOKEN_CLAIMS}
-
-
 async def _create_jwt_access_token(
     ctx: Ctx,
     opts: Any,
-    body: dict[str, Any],
     user: dict[str, Any] | None,
     client: dict[str, Any],
     audience: str | list[str],
     scopes: list[str],
-    reference_id: str | None,
+    *,
     iat: int,
     exp: int,
     sid: str | None,
+    signing_key_id: str | None = None,
+    signing_algorithm: str | None = None,
+    access_token_claims: dict[str, Any] | None = None,
+    confirmation: dict[str, Any] | None = None,
 ) -> str:
     """Signed ``at+jwt`` access token, TS ``createJwtAccessToken`` (token.ts:223). ``sub`` is
     the real user id (never pairwise) or the client itself for ``client_credentials`` (RFC 9068
-    §2.2); ``client_id``/``azp`` bind it to its client; ``jti`` is a fresh 32-char id."""
-    custom = getattr(opts, "custom_access_token_claims", None)
-    custom_claims = (
-        await _await(
-            custom(
-                {
-                    "user": user,
-                    "scopes": scopes,
-                    "resource": body.get("resource"),
-                    "referenceId": reference_id,
-                    "metadata": parse_client_metadata(client.get("metadata")),
-                }
-            )
-        )
-        if custom
-        else {}
-    )
-    aud = audience[0] if isinstance(audience, list) and len(audience) == 1 else audience
+    §2.2); the enriched claims come first so every AS-owned claim, ``cnf`` last, wins."""
     payload = _strip_none(
         {
-            **_strip_reserved_access_claims(custom_claims),
+            **(access_token_claims or {}),
             "sub": user.get("id") if user else client.get("clientId"),
-            "aud": aud,
+            "aud": to_audience_claim(audience),
             "client_id": client.get("clientId"),
             "azp": client.get("clientId"),
             "scope": " ".join(scopes),
@@ -296,10 +264,21 @@ async def _create_jwt_access_token(
             "iat": iat,
             "exp": exp,
             "jti": generate_random_string(32),
+            "cnf": confirmation,
         }
     )
     jwt_plugin = get_jwt_plugin(ctx.auth)
-    return await jwt_plugin.sign_jwt(payload=payload, header={"typ": "at+jwt"})
+    if signing_algorithm and signing_algorithm != jwt_plugin._alg():
+        # ponytail: the jwt plugin signs with one algorithm (no multi-alg keyring yet), so a
+        # resource pinned to another alg fails like TS resolveSigningKey does when no key with
+        # that alg exists and none may be minted. Lift this with jwks keyPairConfigs.
+        raise ValueError(
+            f'signJWT: no key with alg "{signing_algorithm}" found in JWKS. The plugin '
+            f'auto-mints only one key matching keyPairConfig.alg="{jwt_plugin._alg()}".'
+        )
+    return await jwt_plugin.sign_jwt(
+        payload=payload, header={"typ": "at+jwt"}, signing_key_id=signing_key_id
+    )
 
 
 async def _create_opaque_access_token(
@@ -308,14 +287,19 @@ async def _create_opaque_access_token(
     user: dict[str, Any] | None,
     client: dict[str, Any],
     scopes: list[str],
+    *,
     iat: int,
     exp: int,
     sid: str | None,
+    resources: list[str] | None,
     reference_id: str | None,
+    authorization_code_id: str | None,
     refresh_id: str | None,
-    authorization_code_id: str | None = None,
+    confirmation: dict[str, Any] | None,
+    requested_user_info_claims: list[str] | None,
 ) -> str:
-    """Opaque access token stored hashed in ``oauthAccessToken`` — TS ``createOpaqueAccessToken``."""  # noqa: E501
+    """Opaque access token stored hashed in ``oauthAccessToken``, TS
+    ``createOpaqueAccessToken`` (token.ts:473)."""
     gen = getattr(opts, "generate_opaque_access_token", None)
     tok = await _await(gen()) if gen else generate_random_string(32, _TOKEN_ALPHABET)
     await ctx.adapter.create(
@@ -327,7 +311,10 @@ async def _create_opaque_access_token(
             "userId": user.get("id") if user else None,
             "referenceId": reference_id,
             "authorizationCodeId": authorization_code_id,
+            "resources": resources,
             "refreshId": refresh_id,
+            "confirmation": confirmation,
+            "requestedUserInfoClaims": requested_user_info_claims or None,
             "scopes": scopes,
             "createdAt": datetime.fromtimestamp(iat, tz=timezone.utc),
             "expiresAt": datetime.fromtimestamp(exp, tz=timezone.utc),
@@ -335,6 +322,21 @@ async def _create_opaque_access_token(
     )
     prefix = (getattr(opts, "prefix", None) or {}).get("opaqueAccessToken", "")
     return prefix + tok
+
+
+#: TS ``ID_TOKEN_SCOPE_CLAIM_GUARDS`` (token.ts:75): the standard UserInfo claim names seeded
+#: unset so they reach the ID token only through ``custom_id_token_claims``.
+_ID_TOKEN_SCOPE_CLAIM_GUARDS = dict.fromkeys(STANDARD_CLAIM_NAMES)
+
+
+def _legacy_profile_claims(opts: Any, user: dict[str, Any], scopes: list[str]) -> dict[str, Any]:
+    """Port-only, deprecated: the 1.0 scope-based profile and email claims for the ID token,
+    behind ``legacy_id_token_profile_claims`` (default off, TS behavior)."""
+    if not getattr(opts, "legacy_id_token_profile_claims", False):
+        return {}
+    claims = user_normal_claims(user, scopes)
+    claims.pop("sub", None)  # always the pinned, possibly pairwise, subject
+    return claims
 
 
 async def _create_id_token(
@@ -348,20 +350,20 @@ async def _create_id_token(
     auth_time: datetime | None,
     access_token: str | None = None,
 ) -> str | None:
-    """OIDC id_token — TS ``createIdToken``. Custom claims may override ``acr``/``auth_time`` and
-    user claims, but the pinned security claims (iss/sub/aud/nonce/iat/exp/sid) always win.
+    """OIDC id_token, TS ``createIdToken`` (token.ts:324). Standard profile/email claims live
+    at UserInfo only (d368217ef); ``custom_id_token_claims`` may add claims but never replace
+    the protocol claims it owns (335cda702), and ``acr`` is ``"0"`` (a966815b1).
 
     Signed on the jwt plugin's keys, or HS256 with the client's decrypted secret when
     ``disable_jwt_plugin``. A public client without a secret gets no id_token (it could not be
-    verified) — returns ``None``."""
+    verified): returns ``None``."""
     iat = _now_s()
     exp = iat + (getattr(opts, "id_token_expires_in", None) or 36000)
-    user_claims = user_normal_claims(user, scopes)
     resolved_sub = resolve_subject_identifier(client, opts, user["id"])
     auth_time_sec = math.floor(auth_time.timestamp()) if auth_time is not None else None
 
     custom = getattr(opts, "custom_id_token_claims", None)
-    custom_claims = (
+    custom_claims = strip_reserved_id_token_claims(
         await _await(
             custom(
                 {
@@ -372,30 +374,29 @@ async def _create_id_token(
             )
         )
         if custom
-        else {}
+        else None
     )
-
+    disabled = getattr(opts, "disable_jwt_plugin", False)
+    alg = "HS256" if disabled else get_jwt_plugin(ctx.auth)._alg()
+    emit_sid = bool(client.get("enableEndSession") or client.get("backchannelLogoutUri"))
     payload: dict[str, Any] = {
-        **user_claims,
+        **_ID_TOKEN_SCOPE_CLAIM_GUARDS,
+        **_legacy_profile_claims(opts, user, scopes),
         "auth_time": auth_time_sec,
-        "acr": _ACR_BRONZE,
+        "acr": LEVEL_0_ACR,
         **custom_claims,
+        "at_hash": _oidc_hash(access_token, alg) if access_token else None,
+        "iss": _token_issuer(ctx, opts),
+        "sub": resolved_sub,
+        "aud": client.get("clientId"),
+        "nonce": nonce,
+        "iat": iat,
+        "exp": exp,
+        "sid": session_id if emit_sid else None,
     }
-    # Pinned claims override any custom-supplied value.
-    payload["iss"] = _token_issuer(ctx, opts)
-    payload["sub"] = resolved_sub
-    payload["aud"] = client.get("clientId")
-    payload["nonce"] = nonce
-    payload["iat"] = iat
-    payload["exp"] = exp
-    payload["sid"] = session_id if client.get("enableEndSession") else None
-    if access_token:
-        disabled = getattr(opts, "disable_jwt_plugin", False)
-        alg = "HS256" if disabled else get_jwt_plugin(ctx.auth)._alg()
-        payload["at_hash"] = _oidc_hash(access_token, alg)
 
-    if getattr(opts, "disable_jwt_plugin", False):
-        # HS256 with the client's decrypted secret — TS token.ts:176-191.
+    if disabled:
+        # HS256 with the client's decrypted secret, TS token.ts:398.
         client_secret = client.get("clientSecret")
         if not client_secret:  # public client, cannot be verified -> no id_token
             return None
@@ -463,20 +464,24 @@ async def _create_refresh_token(
     ctx: Ctx,
     opts: Any,
     user: dict[str, Any],
-    reference_id: str | None,
     client: dict[str, Any],
     scopes: list[str],
+    *,
     iat: int,
+    exp: int,
     session_id: str | None,
+    reference_id: str | None,
+    authorization_code_id: str | None,
     original_refresh: dict[str, Any] | None,
     auth_time: datetime | None,
-    authorization_code_id: str | None = None,
+    resources: list[str] | None,
+    confirmation: dict[str, Any] | None,
+    requested_user_info_claims: list[str] | None,
 ) -> dict[str, Any]:
     """Mint a refresh row. Initial issuance is a single insert; rotation is an atomic CAS on the
     parent's ``revoked=null`` guard (loser -> ``invalid_grant``) that also stamps ``rotatedAt``
     and, with a reuse interval, ``rotationReplayExpiresAt``, TS ``createRefreshToken``
     (token.ts:593)."""
-    exp = iat + (getattr(opts, "refresh_token_expires_in", None) or 2592000)
     gen = getattr(opts, "generate_refresh_token", None)
     tok = await _await(gen()) if gen else generate_random_string(32, _TOKEN_ALPHABET)
     new_row = {
@@ -487,7 +492,10 @@ async def _create_refresh_token(
         "referenceId": reference_id,
         "authorizationCodeId": authorization_code_id,
         "authTime": auth_time,
+        "confirmation": confirmation,
+        "requestedUserInfoClaims": requested_user_info_claims or None,
         "scopes": scopes,
+        "resources": resources,
         "createdAt": datetime.fromtimestamp(iat, tz=timezone.utc),
         "expiresAt": datetime.fromtimestamp(exp, tz=timezone.utc),
     }
@@ -517,18 +525,170 @@ async def _create_refresh_token(
     return {"id": created["id"], "token": await encode_refresh_token(opts, tok, session_id)}
 
 
+# --- resource grant issuance (token.ts:710-770) --------------------------------------
+
+
+async def _resolve_resource_grant_issuance(
+    ctx: Ctx,
+    opts: Any,
+    *,
+    client_id: str,
+    requested_scopes: list[str],
+    resources: list[str] | None,
+    original_resources: list[str] | None,
+    refresh_token: dict[str, Any] | None,
+    iat: int,
+    scope_expires_at: int,
+) -> dict[str, Any]:
+    """TS ``resolveResourceGrantIssuance``: the resource policy plus the effective access and
+    refresh expiry (a resource may shorten, never extend, the plugin refresh lifetime)."""
+    policy = await resolve_resource_policy(
+        ctx, opts, resource=resources, client_id=client_id, requested_scopes=requested_scopes
+    )
+    resource_expires_at = (
+        iat + policy["accessTokenTtl"] if policy["accessTokenTtl"] is not None else scope_expires_at
+    )
+    default_refresh_ttl = getattr(opts, "refresh_token_expires_in", None) or 2592000
+    refresh_ttl = (
+        min(policy["refreshTokenTtl"], default_refresh_ttl)
+        if policy["refreshTokenTtl"] is not None
+        else default_refresh_ttl
+    )
+    return {
+        **policy,
+        "accessTokenExpiresAt": min(scope_expires_at, resource_expires_at),
+        "refreshTokenExpiresAt": iat + refresh_ttl,
+        "refreshResources": (refresh_token or {}).get("resources")
+        or original_resources
+        or resources,
+    }
+
+
+# --- DPoP binding (token.ts:771-834, aedcb974f) --------------------------------------
+
+
+def _client_requires_dpop(client: dict[str, Any]) -> bool:
+    """TS ``clientRequiresDpopBoundAccessTokens``. ``dpopBoundAccessTokens`` is an oauthClient
+    column added with the client model; read it when present."""
+    metadata = parse_client_metadata(client.get("metadata")) or {}
+    return (
+        client.get("dpopBoundAccessTokens") is True
+        or metadata.get("dpop_bound_access_tokens") is True
+    )
+
+
+async def _resolve_dpop_token_binding(
+    ctx: Ctx,
+    opts: Any,
+    *,
+    client: dict[str, Any],
+    grant_issuance: dict[str, Any],
+    verification_value: dict[str, Any] | None = None,
+    refresh_token: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """TS ``resolveDpopTokenBinding``: verify a DPoP proof on the token request and return the
+    ``{jkt}`` confirmation to bind; a proof is required when the client, a resource, the
+    authorization request (``dpop_jkt``) or the refresh family asks for DPoP."""
+    auth_code_jkt = ((verification_value or {}).get("query") or {}).get("dpop_jkt")
+    refresh_jkt = dpop.get_confirmation_jkt((refresh_token or {}).get("confirmation"))
+    expected_jkt = refresh_jkt or auth_code_jkt
+    proof_jwt = dpop.get_dpop_proof_jwt(ctx)
+    required = (
+        _client_requires_dpop(client)
+        or grant_issuance["dpopBoundAccessTokensRequired"]
+        or bool(auth_code_jkt)
+        or bool(refresh_jkt)
+    )
+    if not proof_jwt:
+        if required:
+            raise OAuthError(400, "invalid_dpop_proof", "DPoP proof header is required")
+        return None
+    dpop_opts = getattr(opts, "dpop", None) or {}
+    try:
+        proof = await dpop.verify_dpop_proof(
+            proof_jwt=proof_jwt,
+            method="POST",
+            url=dpop.get_endpoint_url(ctx, "/oauth2/token"),
+            expected_jkt=expected_jkt,
+            proof_max_age_seconds=dpop_opts.get("proofMaxAgeSeconds"),
+            signing_algorithms=dpop_opts.get("signingAlgorithms"),
+            replay_store=dpop.create_dpop_replay_store(ctx.auth.internal),
+        )
+    except dpop.DpopProofError as error:
+        raise OAuthError(400, "invalid_dpop_proof", str(error)) from None
+    return {"jkt": proof.jkt}
+
+
+def confirmation_token_type(confirmation: Any) -> str:
+    """TS ``confirmationTokenType`` (token.ts:86): a DPoP ``jkt`` makes the token ``DPoP``."""
+    return "DPoP" if dpop.get_confirmation_jkt(confirmation) else "Bearer"
+
+
 # --- refresh rotation replay (token.ts:835-1092, 5838df2f4) --------------------------
 
 
-def _replay_request(scopes: list[str], resources: Any) -> dict[str, Any]:
-    """TS ``buildRefreshTokenRotationReplayRequest``: deduplicated, sorted scopes (and
-    resources when present). The replay only answers an identical request."""
-    request: dict[str, Any] = {"effectiveScopes": sorted(set(scopes))}
-    if resources:
-        request["requestedResources"] = sorted(
-            set([resources] if isinstance(resources, str) else resources)
-        )
+def _normalize_replay_values(values: Any) -> list[str] | None:
+    return sorted(set(values)) if values is not None else None
+
+
+def _confirmation_replay_key(confirmation: Any) -> str | None:
+    if not confirmation:
+        return None
+    if "jkt" in confirmation:
+        return f"jkt:{confirmation['jkt']}"
+    return f"x5t#S256:{confirmation.get('x5t#S256')}"
+
+
+def _is_confirmation(value: Any) -> bool:
+    return isinstance(value, dict) and (
+        (isinstance(value.get("jkt"), str) and "x5t#S256" not in value)
+        or (isinstance(value.get("x5t#S256"), str) and "jkt" not in value)
+    )
+
+
+def _replay_request(
+    effective_scopes: list[str], resources: list[str] | None, confirmation: Any
+) -> dict[str, Any]:
+    """TS ``buildRefreshTokenRotationReplayRequest``: the replay only answers the same
+    effective scopes, requested resources and sender constraint."""
+    request: dict[str, Any] = {"effectiveScopes": _normalize_replay_values(effective_scopes) or []}
+    requested = _normalize_replay_values(resources)
+    if requested:
+        request["requestedResources"] = requested
+    if confirmation:
+        request["confirmation"] = confirmation
     return request
+
+
+def _same_replay_request(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """TS ``sameRefreshTokenRotationReplayRequest``."""
+    return (
+        _normalize_replay_values(left.get("effectiveScopes"))
+        == _normalize_replay_values(right.get("effectiveScopes"))
+        and _normalize_replay_values(left.get("requestedResources"))
+        == _normalize_replay_values(right.get("requestedResources"))
+        and _confirmation_replay_key(left.get("confirmation"))
+        == _confirmation_replay_key(right.get("confirmation"))
+    )
+
+
+def _is_replay(value: Any) -> bool:
+    """TS ``isRefreshTokenRotationReplay``."""
+    if not isinstance(value, dict) or not isinstance(value.get("request"), dict):
+        return False
+    request = value["request"]
+    scopes = request.get("effectiveScopes")
+    resources = request.get("requestedResources")
+    return (
+        isinstance(scopes, list)
+        and all(isinstance(s, str) for s in scopes)
+        and (
+            resources is None
+            or (isinstance(resources, list) and all(isinstance(r, str) for r in resources))
+        )
+        and ("confirmation" not in request or _is_confirmation(request["confirmation"]))
+        and _is_token_response(value.get("response"))
+    )
 
 
 def _within_reuse_interval(refresh: dict[str, Any]) -> bool:
@@ -544,6 +704,8 @@ def _is_token_response(value: Any) -> bool:
         and isinstance(value.get("expires_at"), (int, float))
         and value.get("token_type") in ("Bearer", "DPoP")
         and isinstance(value.get("scope"), str)
+        and (value.get("refresh_token") is None or isinstance(value["refresh_token"], str))
+        and (value.get("id_token") is None or isinstance(value["id_token"], str))
     )
 
 
@@ -558,37 +720,44 @@ def _stored_replay(ctx: Ctx, refresh: dict[str, Any], request: dict[str, Any]) -
     except Exception:
         logger.exception("refresh token rotation replay failed")
         return None
-    if not isinstance(replay, dict) or not _is_token_response(replay.get("response")):
-        return None
-    if replay.get("request") != request:
+    if not _is_replay(replay) or not _same_replay_request(replay["request"], request):
         return None
     return replay["response"]
 
 
-async def _check_resource(ctx: Ctx, opts: Any, body: dict[str, Any], scopes: list[str]):
-    """Resolve + validate the requested ``resource`` audience against ``validAudiences`` — TS
-    ``checkResource``. Returns the audience (str / list) or ``None`` when no resource requested."""
-    resource = body.get("resource")
-    if resource is None:
-        return None
-    audience = [resource] if isinstance(resource, str) else list(resource)
-    base = _base_url(ctx)
-    if "openid" in scopes:
-        audience.append(f"{base}/oauth2/userinfo")
-    valid = set(getattr(opts, "valid_audiences", None) or [base])
-    if "openid" in scopes:
-        valid.add(f"{base}/oauth2/userinfo")
-    for aud in audience:
-        if aud not in valid:
-            raise OAuthError(400, "invalid_request", "requested resource invalid")
-    return audience[0] if len(audience) == 1 else audience
+async def _resolve_replay_request(
+    ctx: Ctx,
+    opts: Any,
+    *,
+    client: dict[str, Any],
+    refresh_token: dict[str, Any],
+    scopes: list[str],
+    resources: list[str] | None,
+) -> dict[str, Any]:
+    """TS ``resolveRefreshTokenRotationReplayRequest``: the request a retry must match, with
+    the resource policy and DPoP binding recomputed for this request."""
+    iat = _now_s()
+    grant_issuance = await _resolve_resource_grant_issuance(
+        ctx,
+        opts,
+        client_id=client["clientId"],
+        requested_scopes=scopes,
+        resources=resources,
+        original_resources=None,
+        refresh_token=refresh_token,
+        iat=iat,
+        scope_expires_at=iat + (getattr(opts, "access_token_expires_in", None) or 3600),
+    )
+    confirmation = await _resolve_dpop_token_binding(
+        ctx, opts, client=client, grant_issuance=grant_issuance, refresh_token=refresh_token
+    )
+    return _replay_request(grant_issuance["effectiveScopes"], resources, confirmation)
 
 
 async def create_user_tokens(
     ctx: Ctx,
     opts: Any,
     *,
-    body: dict[str, Any],
     client: dict[str, Any],
     scopes: list[str],
     grant_type: str,
@@ -600,10 +769,14 @@ async def create_user_tokens(
     auth_time: datetime | None = None,
     verification_value: dict[str, Any] | None = None,
     authorization_code_id: str | None = None,
+    resources: list[str] | None = None,
+    original_resources: list[str] | None = None,
+    requested_user_info_claims: list[str] | None = None,
 ):
-    """Assemble the token response, TS ``createUserTokens`` (token.ts:1094). JWT access when an
-    audience is present else opaque; refresh only when the client may use it and
-    ``offline_access`` is granted; id_token (with ``at_hash``) only for a user with ``openid``."""
+    """Assemble the token response, TS ``createUserTokens`` (token.ts:1094). The resource policy
+    narrows scopes and lifetimes; JWT access when an audience is present else opaque; refresh
+    only when the client may use it and ``offline_access`` is granted; id_token (with
+    ``at_hash``) only for a user with ``openid``."""
     iat = _now_s()
     base_expiry = (
         (getattr(opts, "access_token_expires_in", None) or 3600)
@@ -611,17 +784,31 @@ async def create_user_tokens(
         else (getattr(opts, "m2m_access_token_expires_in", None) or 3600)
     )
     default_exp = iat + base_expiry
-    exp = default_exp
+    scope_exp = default_exp
     scope_expirations = getattr(opts, "scope_expirations", None)
     if scope_expirations:
         for sc in scopes:
             cand = (
-                to_exp_jwt(scope_expirations[sc], iat) if sc in scope_expirations else default_exp
+                to_exp_jwt(scope_expirations[sc], iat) if scope_expirations.get(sc) else default_exp
             )
-            exp = min(exp, cand)
-    exp = int(exp)
+            scope_exp = min(scope_exp, cand)
+    scope_exp = int(scope_exp)
 
-    audience = await _check_resource(ctx, opts, body, scopes)
+    grant_issuance = await _resolve_resource_grant_issuance(
+        ctx,
+        opts,
+        client_id=client["clientId"],
+        requested_scopes=scopes,
+        resources=resources,
+        original_resources=original_resources,
+        refresh_token=refresh_token,
+        iat=iat,
+        scope_expires_at=scope_exp,
+    )
+    audience = grant_issuance["audienceClaim"]
+    effective_scopes = grant_issuance["effectiveScopes"]
+    exp = int(grant_issuance["accessTokenExpiresAt"])
+    refresh_exp = int(grant_issuance["refreshTokenExpiresAt"])
 
     is_refresh_token = bool(
         user
@@ -632,8 +819,9 @@ async def create_user_tokens(
         )
     )
     # JWT access tokens require the jwt plugin: disabled mode is always opaque (TS token.ts:1150).
-    is_jwt_access_token = audience is not None and not getattr(opts, "disable_jwt_plugin", False)
-    is_id_token = bool(user and "openid" in scopes)
+    is_jwt_access_token = bool(audience) and not getattr(opts, "disable_jwt_plugin", False)
+    is_id_token = bool(user and "openid" in effective_scopes)
+    metadata = parse_client_metadata(client.get("metadata"))
 
     custom_fields_fn = getattr(opts, "custom_token_response_fields", None)
     custom_fields = (
@@ -642,8 +830,8 @@ async def create_user_tokens(
                 {
                     "grantType": grant_type,
                     "user": user,
-                    "scopes": scopes,
-                    "metadata": parse_client_metadata(client.get("metadata")),
+                    "scopes": effective_scopes,
+                    "metadata": metadata,
                     "verificationValue": verification_value,
                 }
             )
@@ -652,27 +840,69 @@ async def create_user_tokens(
         else {}
     ) or {}
 
-    # An opaque access token references the refresh row's id, so mint the refresh first in that
-    # case; the JWT path stores nothing and needs no back-reference.
-    refresh = None
-    if is_refresh_token and user and not is_jwt_access_token:
-        refresh = await _create_refresh_token(
+    confirmation = await _resolve_dpop_token_binding(
+        ctx,
+        opts,
+        client=client,
+        grant_issuance=grant_issuance,
+        verification_value=verification_value,
+        refresh_token=refresh_token,
+    )
+    user_info_claims = (
+        requested_user_info_claims
+        if requested_user_info_claims is not None
+        else ((refresh_token or {}).get("requestedUserInfoClaims") or [])
+    )
+
+    async def mint_refresh() -> dict[str, Any]:
+        assert user is not None
+        return await _create_refresh_token(
             ctx,
             opts,
             user,
-            reference_id,
             client,
-            scopes,
-            iat,
-            session_id,
-            refresh_token,
-            auth_time,
-            authorization_code_id,
+            effective_scopes,
+            iat=iat,
+            exp=refresh_exp,
+            session_id=session_id,
+            reference_id=reference_id,
+            authorization_code_id=authorization_code_id,
+            original_refresh=refresh_token,
+            auth_time=auth_time,
+            resources=grant_issuance["refreshResources"],
+            confirmation=confirmation,
+            requested_user_info_claims=user_info_claims,
         )
 
+    # An opaque access token references the refresh row's id, so mint the refresh first in that
+    # case; the JWT path stores nothing and needs no back-reference.
+    refresh = await mint_refresh() if is_refresh_token and not is_jwt_access_token else None
+
     if is_jwt_access_token:
+        access_token_claims = await resolve_access_token_claims(
+            ctx,
+            opts,
+            user=user,
+            scopes=effective_scopes,
+            resources=resources,
+            reference_id=reference_id,
+            metadata=metadata,
+            resource_policy_claims=grant_issuance["rawCustomClaims"],
+        )
         access_token = await _create_jwt_access_token(
-            ctx, opts, body, user, client, audience, scopes, reference_id, iat, exp, session_id
+            ctx,
+            opts,
+            user,
+            client,
+            audience,
+            effective_scopes,
+            iat=iat,
+            exp=exp,
+            sid=session_id,
+            signing_key_id=grant_issuance["signingKeyId"],
+            signing_algorithm=grant_issuance["signingAlgorithm"],
+            access_token_claims=access_token_claims,
+            confirmation=confirmation,
         )
     else:
         access_token = await _create_opaque_access_token(
@@ -680,33 +910,24 @@ async def create_user_tokens(
             opts,
             user,
             client,
-            scopes,
-            iat,
-            exp,
-            session_id,
-            reference_id,
-            refresh["id"] if refresh else None,
-            authorization_code_id,
+            effective_scopes,
+            iat=iat,
+            exp=exp,
+            sid=session_id,
+            resources=resources,
+            reference_id=reference_id,
+            authorization_code_id=authorization_code_id,
+            refresh_id=refresh["id"] if refresh else None,
+            confirmation=confirmation,
+            requested_user_info_claims=user_info_claims,
         )
 
-    if refresh is None and is_refresh_token and user:
-        refresh = await _create_refresh_token(
-            ctx,
-            opts,
-            user,
-            reference_id,
-            client,
-            scopes,
-            iat,
-            session_id,
-            refresh_token,
-            auth_time,
-            authorization_code_id,
-        )
+    if refresh is None and is_refresh_token:
+        refresh = await mint_refresh()
 
     id_token = (
         await _create_id_token(
-            ctx, opts, user, client, scopes, nonce, session_id, auth_time, access_token
+            ctx, opts, user, client, effective_scopes, nonce, session_id, auth_time, access_token
         )
         if is_id_token and user
         else None
@@ -716,16 +937,20 @@ async def create_user_tokens(
     body_out["access_token"] = access_token
     body_out["expires_in"] = exp - iat
     body_out["expires_at"] = exp
-    body_out["token_type"] = "Bearer"
-    body_out["scope"] = " ".join(scopes)
+    body_out["token_type"] = confirmation_token_type(confirmation)
     if refresh:
         body_out["refresh_token"] = refresh["token"]
+    body_out["scope"] = " ".join(effective_scopes)
     if id_token:
         body_out["id_token"] = id_token
 
     if refresh_token and refresh_token.get("id") and refresh:
         await _store_replay(
-            ctx, opts, refresh_token, _replay_request(scopes, body.get("resource")), body_out
+            ctx,
+            opts,
+            refresh_token,
+            _replay_request(effective_scopes, resources, confirmation),
+            body_out,
         )
 
     return AuthResponse(body=body_out, headers=list(NO_STORE_HEADERS))
@@ -755,8 +980,9 @@ async def _store_replay(
 def _is_verification_value(value: Any) -> bool:
     """The shape TS ``verificationValueSchema`` requires (types/zod.ts:166).
 
-    ponytail: checks the envelope and field types, not every authorization-query field."""
-    return (
+    ponytail: checks the envelope, field types, the bound resources and the claims request, not
+    every authorization-query field."""
+    if not (
         isinstance(value, dict)
         and value.get("type") == "authorization_code"
         and isinstance(value.get("query"), dict)
@@ -764,14 +990,30 @@ def _is_verification_value(value: Any) -> bool:
         and isinstance(value.get("userId"), str)
         and isinstance(value.get("referenceId"), (str, type(None)))
         and (value.get("authTime") is None or isinstance(value["authTime"], (int, float)))
+    ):
+        return False
+    resource = value.get("resource")
+    if resource is not None and not (
+        isinstance(resource, list) and all(isinstance(r, str) for r in resource)
+    ):
+        return False
+    claims = value["query"].get("claims")
+    return claims is None or (
+        is_claims_request_input(claims) and is_valid_oidc_claims_request(claims)
     )
 
 
 async def _check_verification_value(
-    ctx: Ctx, opts: Any, code: str, client_id: str, redirect_uri: str | None
-) -> tuple[dict[str, Any], str]:
-    """Atomic single-use code redemption + verification-value validation — TS
-    ``checkVerificationValue`` (token.ts:1361). Returns the value and the stored code id."""
+    ctx: Ctx,
+    opts: Any,
+    code: str,
+    client_id: str,
+    redirect_uri: str | None,
+    resources: list[str] | None,
+) -> tuple[dict[str, Any], str, list[str] | None, list[str] | None]:
+    """Atomic single-use code redemption + verification-value validation, TS
+    ``checkVerificationValue`` (token.ts:1361). Returns the value, the stored code id, the
+    effective resources and the resources the grant authorized."""
     code_id = await store_token(opts.store_tokens, code, "authorization_code")
     verification = await ctx.internal.consume_verification_value(code_id)
     if not verification:
@@ -797,7 +1039,16 @@ async def _check_verification_value(
             raise OAuthError(400, "invalid_grant", "redirect_uri mismatch")
     elif redirect_uri:
         raise OAuthError(400, "invalid_grant", "redirect_uri mismatch")
-    return value, code_id
+    # RFC 8707: the token request may narrow the resources bound at /authorize, never widen
+    # them (b4b086722). The top-level field wins over the legacy query.resource.
+    stored = to_resource_list(value.get("resource")) or to_resource_list(
+        value["query"].get("resource")
+    )
+    if resources and stored:
+        for resource in resources:
+            if resource not in stored:
+                raise OAuthError(400, "invalid_target", "requested resource not authorized")
+    return value, code_id, resources or stored, stored
 
 
 async def handle_authorization_code_grant(ctx: Ctx, opts: Any, body: dict[str, Any]):
@@ -821,7 +1072,10 @@ async def handle_authorization_code_grant(ctx: Ctx, opts: Any, body: dict[str, A
             400, "invalid_request", "Either code_verifier or client_secret is required"
         )
 
-    value, code_id = await _check_verification_value(ctx, opts, code, client_id, redirect_uri)
+    resources = to_resource_list(body.get("resource"))
+    value, code_id, effective_resources, authorized_resources = await _check_verification_value(
+        ctx, opts, code, client_id, redirect_uri, resources
+    )
     query = value["query"]
     scope_str = query.get("scope")
     scopes = scope_str.split(" ") if scope_str else None
@@ -891,7 +1145,6 @@ async def handle_authorization_code_grant(ctx: Ctx, opts: Any, body: dict[str, A
     return await create_user_tokens(
         ctx,
         opts,
-        body=body,
         client=client,
         scopes=scopes,
         user=user,
@@ -902,6 +1155,11 @@ async def handle_authorization_code_grant(ctx: Ctx, opts: Any, body: dict[str, A
         auth_time=auth_time,
         verification_value=value,
         authorization_code_id=code_id,
+        requested_user_info_claims=get_requested_user_info_claims(
+            query.get("claims"), get_supported_claims(opts)
+        ),
+        resources=effective_resources,
+        original_resources=authorized_resources,
     )
 
 
@@ -967,10 +1225,10 @@ async def handle_client_credentials_grant(ctx: Ctx, opts: Any, body: dict[str, A
     return await create_user_tokens(
         ctx,
         opts,
-        body=body,
         client=client,
         scopes=requested_scopes,
         grant_type="client_credentials",
+        resources=to_resource_list(body.get("resource")),
     )
 
 
@@ -1002,6 +1260,11 @@ async def handle_refresh_token_grant(ctx: Ctx, opts: Any, body: dict[str, Any]):
         raise OAuthError(400, "invalid_grant", "invalid refresh token")
     if refresh_token["expiresAt"] < utcnow():
         raise OAuthError(400, "invalid_grant", "invalid refresh token")
+    # A refresh request may narrow the grant's resources, never widen them (token.ts:1868).
+    resources = to_resource_list(body.get("resource"))
+    stored_resources = refresh_token.get("resources")
+    if resources and stored_resources and not all(r in stored_resources for r in resources):
+        raise OAuthError(400, "invalid_target", "requested resource invalid")
 
     scopes = refresh_token.get("scopes")
     requested_scopes = scope.split(" ") if scope else None
@@ -1024,7 +1287,14 @@ async def handle_refresh_token_grant(ctx: Ctx, opts: Any, body: dict[str, Any]):
 
     if refresh_token.get("revoked"):
         if _within_reuse_interval(refresh_token):
-            request = _replay_request(requested_scopes or scopes or [], body.get("resource"))
+            request = await _resolve_replay_request(
+                ctx,
+                opts,
+                client=client,
+                refresh_token=refresh_token,
+                scopes=requested_scopes or scopes or [],
+                resources=resources or stored_resources,
+            )
             replay = _stored_replay(ctx, refresh_token, request)
             if replay:
                 replay = {**replay, "expires_in": max(0, replay["expires_at"] - _now_s())}
@@ -1046,7 +1316,6 @@ async def handle_refresh_token_grant(ctx: Ctx, opts: Any, body: dict[str, Any]):
     return await create_user_tokens(
         ctx,
         opts,
-        body=body,
         client=client,
         scopes=requested_scopes or scopes,
         user=user,
@@ -1056,6 +1325,8 @@ async def handle_refresh_token_grant(ctx: Ctx, opts: Any, body: dict[str, Any]):
         refresh_token=refresh_token,
         auth_time=auth_time,
         authorization_code_id=refresh_token.get("authorizationCodeId"),
+        resources=resources or stored_resources,
+        requested_user_info_claims=refresh_token.get("requestedUserInfoClaims"),
     )
 
 
@@ -1096,6 +1367,30 @@ def validate_token_body(body: dict[str, Any]) -> None:
         issue = safe_url_issue(redirect_uri)
         if issue:
             raise OAuthError(400, "invalid_request", f"redirect_uri: {issue}")
+    # ``resource: ResourceUriSchema | ResourceUriSchema[]`` (oauth.ts:919). A malformed or
+    # wrong-typed value fails the zod union ("Invalid input"); the refinements that pass the
+    # absolute-URI gate report their own message. Neither maps to invalid_target there.
+    resource = body.get("resource")
+    if resource is not None:
+        issue = _resource_issue(resource)
+        if issue:
+            raise OAuthError(400, "invalid_request", f"resource: {issue}")
+
+
+def _resource_issue(resource: Any) -> str | None:
+    if isinstance(resource, str):
+        issue = resource_uri_issue(resource)
+        return "Invalid input" if issue == "resource must be an absolute URI" else issue
+    if isinstance(resource, list):
+        if not resource:
+            return "Too small: expected array to have >=1 items"
+        if all(isinstance(r, str) for r in resource):
+            issues = [resource_uri_issue(r) for r in resource]
+            if "resource must be an absolute URI" in issues:
+                return "Invalid input"
+            first = next((i for i in issues if i), None)
+            return first
+    return "Invalid input"
 
 
 def no_store(error: OAuthError) -> OAuthError:
@@ -1112,6 +1407,10 @@ async def token_endpoint(ctx: Ctx, opts: Any):
     ponytail: extension grant handlers (TS ``extensions.ts``) are not ported."""
     body = _read_body(ctx)
     validate_token_body(body)
+    # RFC 8707 §2: keep every repeated form ``resource`` (oauth.ts:1063).
+    repeated = extract_repeated_resource_from_form(ctx)
+    if repeated and len(repeated) > 1:
+        body["resource"] = repeated
     try:
         return await _dispatch_grant(ctx, opts, body)
     except OAuthError as error:

@@ -412,6 +412,7 @@ class JWTPlugin(Plugin):
         expiration_time: Any,
         sign_fn: Any,
         header: dict[str, Any] | None = None,
+        signing_key_id: str | None = None,
     ) -> str:
         now_seconds = math.floor(time.time())
         iat = payload.get("iat")
@@ -436,7 +437,16 @@ class JWTPlugin(Plugin):
                 full["nbf"] = payload["nbf"]
             return await _maybe_await(sign_fn(full))
 
-        key = await self._get_latest_or_new_key()
+        if signing_key_id is not None:
+            # TS resolveSigningKey (sign.ts:115): a pinned kid must exist, never auto-minted.
+            key = next((k for k in await self._get_all_keys() if k["id"] == signing_key_id), None)
+            if key is None:
+                raise ValueError(
+                    f'signJWT: signingKeyId "{signing_key_id}" not found in JWKS. The key must '
+                    "be provisioned before it can be referenced."
+                )
+        else:
+            key = await self._get_latest_or_new_key()
         priv = key_from_jwk(self._decode_private(key))
 
         # jose sets exp/iss/aud unconditionally; iat/sub/nbf/jti stay as provided in payload.
@@ -536,9 +546,11 @@ class JWTPlugin(Plugin):
         payload: dict[str, Any],
         override_options: dict[str, Any] | None = None,
         header: dict[str, Any] | None = None,
+        signing_key_id: str | None = None,
     ) -> str:
-        """TS server-only ``signJWT`` — sign ``payload`` with the newest key. ``override_options``
-        may override ``issuer``/``audience``/``expiration_time``/``sign`` for this call."""
+        """TS server-only ``signJWT``: sign ``payload`` with the newest key, or the key whose id
+        is ``signing_key_id``. ``override_options`` may override
+        ``issuer``/``audience``/``expiration_time``/``sign`` for this call."""
         o = override_options or {}
         return await self._sign(
             dict(payload),
@@ -547,6 +559,7 @@ class JWTPlugin(Plugin):
             expiration_time=o.get("expiration_time", self.expiration_time),
             sign_fn=o.get("sign", self.sign),
             header=header,
+            signing_key_id=signing_key_id,
         )
 
     async def verify_jwt(self, token: str, issuer: str | None = None) -> dict[str, Any] | None:

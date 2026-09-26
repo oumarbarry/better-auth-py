@@ -17,13 +17,24 @@ pairing: jwt-disabled rejects hashed/{hash} secrets, jwt-enabled rejects encrypt
 
 from __future__ import annotations
 
+import math
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import quote_plus, urlencode, urlsplit
 
+from ...oauth.flow import add_oauth_server_context
+from ...oauth.flow import get_oauth_state as get_flow_oauth_state
 from ...plugins import HookSet, Plugin, PluginHook, RateLimitRule, Route
 from ...schema import Schema
 from ...types import APIError, AuthResponse, Ctx
-from .authorize import authorize_endpoint, get_oauth_state, set_oauth_state
+from .authorize import (
+    authorize_endpoint,
+    form_query,
+    get_oauth_state,
+    request_query,
+    set_oauth_state,
+)
+from .claims import STANDARD_CLAIM_NAMES, STANDARD_CLAIMS
 from .client_crud import (
     admin_create_client_endpoint,
     create_client_endpoint,
@@ -43,7 +54,11 @@ from .consent_crud import (
     update_consent_endpoint,
 )
 from .introspect import introspect_endpoint
-from .logout import rp_initiated_logout_endpoint
+from .logout import (
+    end_session_confirmation_endpoint,
+    end_session_endpoint,
+    session_delete_hooks,
+)
 from .metadata import (
     build_auth_server_metadata,
     build_oidc_server_metadata,
@@ -51,6 +66,16 @@ from .metadata import (
 )
 from .oauth_continue import continue_endpoint  # `continue` is a reserved word -> oauth_continue
 from .register import register_endpoint
+from .resource_crud import (
+    create_resource_endpoint,
+    delete_resource_endpoint,
+    get_resource_endpoint,
+    link_client_resource_endpoint,
+    list_resources_endpoint,
+    unlink_client_resource_endpoint,
+    update_resource_endpoint,
+)
+from .resources import log_enforce_per_client_resources_resolution
 from .revoke import revoke_endpoint
 from .schema import OAUTH_PROVIDER_SCHEMA
 from .signed_query import (
@@ -64,6 +89,8 @@ from .userinfo import userinfo_endpoint
 from .utils import (
     OAuthError,
     get_jwt_plugin,
+    is_session_fresh_for_signed_query,
+    remove_max_age_from_query,
     remove_prompt_from_query,
     search_params_to_query,
     verify_oauth_query_params,
@@ -74,15 +101,25 @@ if TYPE_CHECKING:
 
 _DEFAULT_SCOPES = ["openid", "profile", "email", "offline_access"]
 
+#: serverContext key for the signed query's issue time (TS oauth.ts:118).
+_SIGNED_QUERY_ISSUED_AT_MS = "signedQueryIssuedAtMs"
+
+
+def _server_context_issued_at(value: Any) -> datetime | None:
+    """TS ``getServerContextSignedQueryIssuedAt`` (oauth.ts:120)."""
+    try:
+        issued_ms = float(value) if isinstance(value, (int, float, str)) else None
+    except ValueError:
+        return None
+    if not issued_ms or not math.isfinite(issued_ms) or issued_ms <= 0:
+        return None
+    return datetime.fromtimestamp(issued_ms / 1000, tz=timezone.utc)
+
 
 def _compute_claims(scopes: set[str]) -> list[str]:
-    """TS oauth.ts:107 — base claims plus email/profile claims when those scopes are present."""
+    """TS oauth.ts:201: protocol claims plus the standard claims whose scope is configured."""
     claims = ["sub", "iss", "aud", "exp", "iat", "sid", "scope", "azp"]
-    if "email" in scopes:
-        claims += ["email", "email_verified"]
-    if "profile" in scopes:
-        claims += ["name", "picture", "family_name", "given_name"]
-    return claims
+    return claims + [name for name in STANDARD_CLAIM_NAMES if STANDARD_CLAIMS[name][0] in scopes]
 
 
 class OAuthProviderPlugin(Plugin):
@@ -133,11 +170,19 @@ class OAuthProviderPlugin(Plugin):
         custom_token_response_fields: Any = None,
         client_reference: Any = None,
         client_privileges: Any = None,
+        resource_privileges: Any = None,
         cached_trusted_clients: set[str] | None = None,
         pairwise_secret: str | None = None,
         request_uri_resolver: Any = None,
+        resources: list[Any] | None = None,
+        resource_seed_mode: str | None = None,
+        cached_resources: set[str] | None = None,
+        enforce_per_client_resources: bool | None = None,
+        identifier_validator: Any = None,
+        dpop: dict[str, Any] | None = None,
         allow_public_client_prelogin: bool = False,
         disable_jwt_plugin: bool = False,
+        legacy_id_token_profile_claims: bool = False,
         silence_warnings: dict[str, Any] | None = None,
         rate_limit: dict[str, Any] | None = None,
     ) -> None:
@@ -194,6 +239,8 @@ class OAuthProviderPlugin(Plugin):
 
         self.scopes = list(scope_set)
         self.claims = _compute_claims(scope_set)
+        # Port-only, kept from 1.0: resource identifiers accepted without an oauthResource row
+        # (no policy, no client linkage). TS 1.7 removed validAudiences; unset by default.
         self.valid_audiences = valid_audiences
         self.advertised_metadata = advertised_metadata
         self.code_expires_in = code_expires_in
@@ -237,11 +284,24 @@ class OAuthProviderPlugin(Plugin):
         self.custom_token_response_fields = custom_token_response_fields
         self.client_reference = client_reference
         self.client_privileges = client_privileges
+        # Gate for the admin resource CRUD (TS types/index.ts:608).
+        self.resource_privileges = resource_privileges
         self.cached_trusted_clients = cached_trusted_clients
         self.pairwise_secret = pairwise_secret
         self.request_uri_resolver = request_uri_resolver
+        # OAuth protected resources (TS types/index.ts:539-601, d2a79bae7).
+        self.resources = resources
+        self.resource_seed_mode = resource_seed_mode
+        self.cached_resources = cached_resources
+        self.enforce_per_client_resources = enforce_per_client_resources
+        self.identifier_validator = identifier_validator
+        # DPoP proof settings {proofMaxAgeSeconds, signingAlgorithms} (TS types/index.ts:1370).
+        self.dpop = dpop or {}
         self.allow_public_client_prelogin = allow_public_client_prelogin
         self.disable_jwt_plugin = disable_jwt_plugin
+        # Deprecated, port-only: True puts the scope-based profile and email claims back in the
+        # ID token, as the 1.0 port did. TS 1.7 serves them from UserInfo only (d368217ef).
+        self.legacy_id_token_profile_claims = legacy_id_token_profile_claims
         self.silence_warnings = silence_warnings or {}
         self.rate_limit_config = rate_limit
         self._auth: BetterAuth | None = None
@@ -250,6 +310,10 @@ class OAuthProviderPlugin(Plugin):
 
     def init(self, auth: BetterAuth) -> None:
         self._auth = auth
+        # Resource rows are seeded on first resource lookup (resources.seed_resources_once).
+        log_enforce_per_client_resources_resolution(self)
+        # Back-channel logout on every session deletion, jwt plugin or not (oauth.ts:557-605).
+        auth.internal.hooks.append(session_delete_hooks(self))
         # The disabled path signs with the client secret (HS256) and installs no jwt plugin.
         if self.disable_jwt_plugin:
             return
@@ -274,12 +338,15 @@ class OAuthProviderPlugin(Plugin):
             ("POST", "/oauth2/client/rotate-secret", self._rotate),
             ("POST", "/oauth2/delete-client", self._delete),
             ("GET", "/oauth2/authorize", self._authorize),
+            ("POST", "/oauth2/authorize", self._authorize_post),
             ("POST", "/oauth2/token", self._token),
             ("POST", "/oauth2/introspect", self._introspect),
             ("POST", "/oauth2/revoke", self._revoke),
             ("GET", "/oauth2/userinfo", self._userinfo),
             ("POST", "/oauth2/userinfo", self._userinfo),
             ("GET", "/oauth2/end-session", self._end_session),
+            ("POST", "/oauth2/end-session", self._end_session),
+            ("POST", "/oauth2/end-session/confirm", self._end_session_confirm),
             ("POST", "/oauth2/consent", self._consent),
             ("POST", "/oauth2/continue", self._continue),
             ("GET", "/oauth2/get-consent", self._get_consent),
@@ -339,15 +406,22 @@ class OAuthProviderPlugin(Plugin):
                 "post_login_cleared_for_session": post_login_cleared,
             },
         )
-        # /sign-in/social + /sign-in/oauth2 carry the query through the provider round-trip.
+        # The social sign-in round trip carries the authorize query in the server-trusted OAuth
+        # state channel, so a client cannot inject its own query through the request body
+        # (TS oauth.ts:641, 0cbaf81be). /sign-in/oauth2 is the port's legacy generic-oauth alias
+        # of /sign-in/social (generic_oauth.py), so it gets the same channel.
         if ctx.request.path in ("/sign-in/social", "/sign-in/oauth2"):
-            body = ctx.body()
-            additional = body.get("additionalData")
-            if isinstance(additional, dict) and additional.get("query"):
-                return None
-            if not isinstance(additional, dict):
-                body["additionalData"] = additional = {}
-            additional["query"] = stripped_query
+            await add_oauth_server_context(
+                ctx,
+                {
+                    "query": stripped_query,
+                    **(
+                        {_SIGNED_QUERY_ISSUED_AT_MS: int(issued_at.timestamp() * 1000)}
+                        if issued_at
+                        else {}
+                    ),
+                },
+            )
         return None
 
     def _session_was_set(self, ctx: Ctx) -> bool:
@@ -355,9 +429,13 @@ class OAuthProviderPlugin(Plugin):
 
     async def _after_resume_authorize(self, ctx: Ctx) -> AuthResponse | None:
         state = get_oauth_state(ctx)
-        stashed = state.get("query") if state else None
-        if not stashed:
+        server_context = (get_flow_oauth_state(ctx) or {}).get("serverContext") or {}
+        stashed = (state.get("query") if state else None) or server_context.get("query")
+        if not stashed or not isinstance(stashed, str):
             return None
+        issued_at = (state or {}).get("signed_query_issued_at") or _server_context_issued_at(
+            server_context.get(_SIGNED_QUERY_ISSUED_AT_MS)
+        )
         # Make the freshly created session visible to authorize's session lookup
         # (TS sets ctx.context.session from the just-set session cookie).
         ctx._session = ctx.new_session
@@ -371,6 +449,11 @@ class OAuthProviderPlugin(Plugin):
         if not is_navigation:
             headers["accept"] = "application/json"
         pairs = remove_prompt_from_query(parse_query(stashed), "login")
+        # A login fresher than the signed query satisfies max_age (TS oauth.ts:703, 0e1770ac7).
+        if is_session_fresh_for_signed_query(
+            (ctx.new_session or {}).get("session", {}).get("createdAt"), issued_at
+        ):
+            pairs = remove_max_age_from_query(pairs)
         result = await authorize_endpoint(ctx, self, search_params_to_query(pairs), {})
         # Preserve the login's Set-Cookie headers on the resume redirect — replacing the
         # sign-in response wholesale would otherwise drop the freshly issued session cookie.
@@ -424,7 +507,11 @@ class OAuthProviderPlugin(Plugin):
     # --- authorization + consent + continue -----------------------------------------
 
     async def _authorize(self, ctx: Ctx) -> AuthResponse:
-        return await authorize_endpoint(ctx, self, dict(ctx.request.query), {"isAuthorize": True})
+        return await authorize_endpoint(ctx, self, request_query(ctx), {"isAuthorize": True})
+
+    async def _authorize_post(self, ctx: Ctx) -> AuthResponse:
+        """Form-encoded POST authorization request (TS oauth.ts:267, 267229bd2)."""
+        return await authorize_endpoint(ctx, self, form_query(ctx), {"isAuthorize": True})
 
     async def _token(self, ctx: Ctx) -> AuthResponse:
         return await token_endpoint(ctx, self)
@@ -438,8 +525,11 @@ class OAuthProviderPlugin(Plugin):
     async def _userinfo(self, ctx: Ctx) -> Any:
         return await userinfo_endpoint(ctx, self)
 
-    async def _end_session(self, ctx: Ctx) -> Any:
-        return await rp_initiated_logout_endpoint(ctx, self)
+    async def _end_session(self, ctx: Ctx) -> AuthResponse:
+        return await end_session_endpoint(ctx, self)
+
+    async def _end_session_confirm(self, ctx: Ctx) -> AuthResponse:
+        return await end_session_confirmation_endpoint(ctx, self)
 
     async def _run_authorize(
         self, ctx: Ctx, query: dict[str, Any], settings: dict[str, Any]
@@ -479,6 +569,62 @@ class OAuthProviderPlugin(Plugin):
             return await update_client_endpoint(ctx, self, admin=True)
         except OAuthError as error:
             return error.to_response()
+
+    # Admin CRUD for OAuth protected resources (TS oauthResource/index.ts, SERVER_ONLY).
+    # Path params are passed as arguments and percent-decoded like TS decodePathParam.
+
+    async def admin_create_oauth_resource(self, ctx: Ctx) -> AuthResponse:
+        """POST /admin/oauth2/resources (SERVER_ONLY): 201 with the stored row."""
+        try:
+            return await create_resource_endpoint(ctx, self)
+        except OAuthError as error:
+            return error.to_response()
+
+    async def admin_list_oauth_resources(self, ctx: Ctx) -> list[dict[str, Any]]:
+        """GET /admin/oauth2/resources (SERVER_ONLY)."""
+        return await list_resources_endpoint(ctx, self)
+
+    async def admin_get_oauth_resource(
+        self, ctx: Ctx, identifier: str
+    ) -> dict[str, Any] | AuthResponse:
+        """GET /admin/oauth2/resources/:identifier (SERVER_ONLY)."""
+        try:
+            return await get_resource_endpoint(ctx, self, identifier)
+        except OAuthError as error:
+            return error.to_response()
+
+    async def admin_update_oauth_resource(
+        self, ctx: Ctx, identifier: str
+    ) -> dict[str, Any] | AuthResponse:
+        """PATCH /admin/oauth2/resources/:identifier (SERVER_ONLY)."""
+        try:
+            return await update_resource_endpoint(ctx, self, identifier)
+        except OAuthError as error:
+            return error.to_response()
+
+    async def admin_delete_oauth_resource(
+        self, ctx: Ctx, identifier: str
+    ) -> dict[str, Any] | AuthResponse:
+        """DELETE /admin/oauth2/resources/:identifier (SERVER_ONLY)."""
+        try:
+            return await delete_resource_endpoint(ctx, self, identifier)
+        except OAuthError as error:
+            return error.to_response()
+
+    async def admin_link_client_resource(
+        self, ctx: Ctx, identifier: str, client_id: str
+    ) -> dict[str, Any] | AuthResponse:
+        """POST /admin/oauth2/resources/:identifier/clients/:client_id (SERVER_ONLY)."""
+        try:
+            return await link_client_resource_endpoint(ctx, self, identifier, client_id)
+        except OAuthError as error:
+            return error.to_response()
+
+    async def admin_unlink_client_resource(
+        self, ctx: Ctx, identifier: str, client_id: str
+    ) -> dict[str, Any]:
+        """DELETE /admin/oauth2/resources/:identifier/clients/:client_id (SERVER_ONLY)."""
+        return await unlink_client_resource_endpoint(ctx, self, identifier, client_id)
 
     async def get_oauth_server_config(self) -> dict[str, Any]:
         """SERVER_ONLY — the auth-server (or OIDC, when ``openid`` is a scope) metadata body."""

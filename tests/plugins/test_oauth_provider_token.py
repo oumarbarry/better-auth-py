@@ -242,9 +242,11 @@ async def test_custom_token_response_fields_cannot_override_standard():
         assert body["extra"] == "x"
 
 
-async def test_custom_id_token_claims_override_acr_not_pinned():
+async def test_custom_id_token_claims_cannot_set_protocol_claims():
+    # TS authentication-context.ts:12 + token.ts:371 (335cda702): acr/auth_time are AS-owned.
     auth = provider_auth(
         custom_id_token_claims=lambda ctx: {
+            "https://example.com/role": "admin",
             "acr": "custom-acr",
             "auth_time": 123,
             "iss": "evil",
@@ -269,8 +271,9 @@ async def test_custom_id_token_claims_override_acr_not_pinned():
             )
         ).json()
         claims = unverified(body["id_token"])
-        assert claims["acr"] == "custom-acr"  # overridable
-        assert claims["auth_time"] == 123  # overridable
+        assert claims["acr"] == "0"  # LEVEL_0_ACR, a966815b1
+        assert claims["auth_time"] != 123
+        assert claims["https://example.com/role"] == "admin"  # namespaced claims still appear
         assert claims["iss"] == ISSUER  # pinned
         assert claims["aud"] == "client-1"  # pinned
         assert claims["iss"] != "evil" and claims["sub"] != "evil"

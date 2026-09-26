@@ -1,7 +1,7 @@
 """Discovery metadata — RFC 8414 authorization-server + OIDC discovery documents.
 
 Port of TS ``packages/oauth-provider/src/metadata.ts`` and ``authorize.ts``
-(``validateIssuerUrl``) at v1.6.23. TS ``ctx.context.baseURL`` maps to
+(``validateIssuerUrl``) at v1.7.6. TS ``ctx.context.baseURL`` maps to
 ``auth.base_url + auth.base_path``.
 """
 
@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
 from ...types import AuthResponse
+from .claims import LEVEL_0_ACR, get_supported_claims
+from .dpop import DPOP_SIGNING_ALGORITHMS
 from .utils import PRIVATE_KEY_JWT_SIGNING_ALGORITHMS, get_jwt_plugin, is_loopback_host
 
 if TYPE_CHECKING:
@@ -95,6 +97,13 @@ def build_auth_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
         "revocation_endpoint_auth_signing_alg_values_supported": signing_algs,
         "code_challenge_methods_supported": ["S256"],
         "authorization_response_iss_parameter_supported": True,
+        # RFC 9449 (TS metadata.ts:100, aedcb974f).
+        "dpop_signing_alg_values_supported": list(
+            (getattr(opts, "dpop", None) or {}).get("signingAlgorithms") or DPOP_SIGNING_ALGORITHMS
+        ),
+        # Logout Tokens are verified on the jwt plugin's JWKS (metadata.ts:40-42,103-104).
+        "backchannel_logout_supported": not jwt_disabled,
+        "backchannel_logout_session_supported": not jwt_disabled,
     }
     return {k: v for k, v in metadata.items() if v is not None}
 
@@ -104,13 +113,6 @@ def build_oidc_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
     base = _base_url(auth)
     jwt_disabled = bool(getattr(opts, "disable_jwt_plugin", False))
     jwt_plugin = None if jwt_disabled else get_jwt_plugin(auth)
-
-    advertised = getattr(opts, "advertised_metadata", None) or {}
-    claims_supported = (
-        advertised.get("claims_supported")
-        if advertised.get("claims_supported") is not None
-        else (getattr(opts, "claims", None) or [])
-    )
 
     key_pair_alg = (getattr(jwt_plugin, "key_pair_config", None) or {}).get("alg")
     if key_pair_alg:
@@ -123,14 +125,18 @@ def build_oidc_server_metadata(auth: BetterAuth, opts: Any) -> dict[str, Any]:
     metadata = dict(build_auth_server_metadata(auth, opts))
     metadata.update(
         {
-            "claims_supported": claims_supported,
+            "claims_supported": get_supported_claims(opts),
+            # TS metadata.ts:171-199 (e3125e872, a966815b1, 267229bd2).
+            "claims_parameter_supported": True,
             "userinfo_endpoint": f"{base}/oauth2/userinfo",
             "subject_types_supported": ["public", "pairwise"]
             if getattr(opts, "pairwise_secret", None)
             else ["public"],
+            "acr_values_supported": [LEVEL_0_ACR],
             "id_token_signing_alg_values_supported": id_token_algs,
             "end_session_endpoint": f"{base}/oauth2/end-session",
-            "acr_values_supported": ["urn:mace:incommon:iap:bronze"],
+            "request_parameter_supported": False,
+            "request_uri_parameter_supported": False,
             "prompt_values_supported": ["login", "consent", "create", "select_account", "none"],
         }
     )

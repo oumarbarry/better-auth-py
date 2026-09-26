@@ -1,10 +1,11 @@
-"""oauth-provider database schema: 5 tables, exact camelCase columns.
+"""oauth-provider database schema: 7 tables, exact camelCase columns.
 
-Port of TS ``packages/oauth-provider/src/schema.ts`` (v1.6.23). Column names match the TS
-provider exactly so a DB written by the TS provider is readable by the Python port. All 4
-tables are in active use: ``oauthClient``/``oauthConsent`` back client management and
-consent, ``oauthAccessToken``/``oauthRefreshToken`` back the token, introspect, and revoke
-endpoints.
+Port of TS ``packages/oauth-provider/src/schema.ts`` (v1.7.6). Column names match the TS
+provider exactly so a DB written by the TS provider is readable by the Python port.
+``oauthClient``/``oauthConsent`` back client management and consent,
+``oauthAccessToken``/``oauthRefreshToken`` back the token, introspect, and revoke endpoints,
+``oauthResource``/``oauthClientResource`` model protected resources, and
+``oauthClientAssertion`` records single-use ``private_key_jwt`` ids.
 """
 
 from __future__ import annotations
@@ -58,9 +59,49 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         ),
         "userId": Field("string", required=False, references=Reference("user", "id"), index=True),
         "referenceId": Field("string", required=False),
+        # RFC 8707 resources and OIDC claims.userinfo names bound to the grant (TS schema.ts).
+        "resources": Field("string[]", required=False),
+        "requestedUserInfoClaims": Field("string[]", required=False),
         "scopes": Field("string[]", required=True),
         "createdAt": Field("datetime", required=False),
         "updatedAt": Field("datetime", required=False),
+    },
+    # A protected resource the AS issues access tokens for (TS schema.ts oauthResource,
+    # d2a79bae7). A null policy column inherits the plugin default at issuance time.
+    "oauthResource": {
+        "identifier": Field("string", required=True, unique=True),
+        "name": Field("string", required=True),
+        "accessTokenTtl": Field("number", required=False),
+        "refreshTokenTtl": Field("number", required=False),
+        "signingAlgorithm": Field("string", required=False),
+        "signingKeyId": Field("string", required=False),
+        "allowedScopes": Field("string[]", required=False),
+        "customClaims": Field("json", required=False),
+        "dpopBoundAccessTokensRequired": Field("boolean", required=False, default=False),
+        "disabled": Field("boolean", required=False, default=False),
+        "createdAt": Field("datetime", required=False),
+        "updatedAt": Field("datetime", required=False),
+        "policyVersion": Field("number", required=False, default=1),
+        "metadata": Field("json", required=False),
+    },
+    # Which clients may request which resources (TS schema.ts oauthClientResource).
+    # ponytail: the TS composite unique index on (clientId, resourceId) is not expressible in
+    # this schema model; the link endpoint checks for an existing pair before inserting.
+    "oauthClientResource": {
+        "clientId": Field(
+            "string",
+            required=True,
+            references=Reference("oauthClient", "clientId", on_delete="cascade"),
+            index=True,
+        ),
+        "resourceId": Field(
+            "string",
+            required=True,
+            references=Reference("oauthResource", "identifier", on_delete="cascade"),
+            index=True,
+        ),
+        "metadata": Field("json", required=False),
+        "createdAt": Field("datetime", required=False),
     },
     # An opaque refresh token created with "offline_access" (linked to a session).
     "oauthRefreshToken": {
@@ -78,6 +119,8 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         "referenceId": Field("string", required=False),
         # Hashed code the token family was issued for (TS schema.ts, 508d8d6f0).
         "authorizationCodeId": Field("string", required=False, index=True),
+        "resources": Field("string[]", required=False),
+        "requestedUserInfoClaims": Field("string[]", required=False),
         "expiresAt": Field("datetime", required=False),
         "createdAt": Field("datetime", required=False),
         "revoked": Field("datetime", required=False),
@@ -86,6 +129,8 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         "rotationReplayResponse": Field("string", required=False),
         "rotationReplayExpiresAt": Field("datetime", required=False),
         "authTime": Field("datetime", required=False),
+        # RFC 7800 cnf sender constraint (DPoP {jkt}), carried forward on rotation.
+        "confirmation": Field("json", required=False),
         "scopes": Field("string[]", required=True),  # immutable
     },
     # An opaque access token (created at issuance, destroyed at revoke, read at introspection;
@@ -104,11 +149,17 @@ OAUTH_PROVIDER_SCHEMA: Schema = {
         "userId": Field("string", required=False, references=Reference("user", "id"), index=True),
         "referenceId": Field("string", required=False),
         "authorizationCodeId": Field("string", required=False, index=True),
+        "resources": Field("string[]", required=False),
+        "requestedUserInfoClaims": Field("string[]", required=False),
         "refreshId": Field(
             "string", required=False, references=Reference("oauthRefreshToken", "id"), index=True
         ),
         "expiresAt": Field("datetime", required=False),
         "createdAt": Field("datetime", required=False),
+        # Set by back-channel logout as a stored backstop (TS schema.ts, e0d2b9eb9).
+        "revoked": Field("datetime", required=False),
+        # RFC 7800 cnf sender constraint (DPoP {jkt}), surfaced as cnf at introspection.
+        "confirmation": Field("json", required=False),
         "scopes": Field("string[]", required=True),
     },
     # Single-use private_key_jwt assertion jti markers; the id is a digest of the namespaced jti,
