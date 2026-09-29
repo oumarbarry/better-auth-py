@@ -47,5 +47,5 @@ All shared [`ProviderConfig` options](/providers/#per-provider-options) apply.
 
 - Default scopes: `email name`.
 - Register `{base_url}{base_path}/callback/apple` (e.g. `https://example.com/api/auth/callback/apple`) as the return URL in the Apple developer console. Apple **POSTs** the callback: the authorize URL uses `response_type=code id_token` with `response_mode=form_post`.
-- Id-token verification: JWKS `https://appleid.apple.com/auth/keys`, issuer `https://appleid.apple.com`, 1-hour max token age. The nonce is accepted either raw or as `sha256hex(nonce)`. Apple's native SDKs sometimes hash it client-side. `email_verified` / `is_private_email` arrive as booleans or the strings `"true"`/`"false"` and are coerced.
+- Id-token verification: JWKS `https://appleid.apple.com/auth/keys`, issuer `https://appleid.apple.com`, 1-hour max token age. The nonce is accepted either raw or as `sha256hex(nonce)`. Apple's native SDKs sometimes hash it client-side. `email_verified` arrives as a boolean or the string `"true"`/`"false"` and is coerced.
 - `Apple.generate_client_secret(client_id=…, team_id=…, key_id=…, private_key=…)` builds the ES256 client-secret JWT from your `.p8` key (Apple rejects secrets expiring more than six months out).

@@ -74,3 +74,17 @@ with TS.
 - `get_verification_otp` raises a 400 when `store_otp` is hashed: the plain
   text is unrecoverable.
 - Codes are consumed atomically: one code can never satisfy two verifications.
+- Signing in an existing unverified user with `/sign-in/email-otp` deletes
+  every account linked to it (the password and any OAuth links) and all of its
+  sessions, then marks the email verified. The response returns the user with
+  `emailVerified: true`.
+- When `user.validate_user_info` is set, it runs before `/sign-in/email-otp`
+  creates a new user, with `source` set to
+  `{"action": "create-user", "method": "email-otp"}`. A refusal is a 403 with
+  the hook's error code.
+
+::: warning Changed in 1.1
+Before 1.1, only the password account was removed when an unverified user
+signed in with an email OTP. OAuth links are now deleted too. See
+[Upgrade from 1.0](/migrate/from-1-0).
+:::

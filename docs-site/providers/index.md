@@ -4,7 +4,7 @@ title: Social providers
 
 # Social providers
 
-35 OAuth2/OIDC providers are built in. Every one gets PKCE where the provider
+36 OAuth2/OIDC providers are built in. Every one gets PKCE where the provider
 supports it, single-use database-backed state with a signed state cookie,
 token refresh, and JWKS or id-token verification where the provider is OIDC.
 
@@ -38,7 +38,7 @@ auth = BetterAuth(
 
 ::: tip Import path
 `GitHub`, `Google` and `Discord` are re-exported at the package root. The other
-32 classes live in `better_auth.oauth.providers_ext`:
+33 classes live in `better_auth.oauth.providers_ext`:
 
 ```python
 from better_auth.oauth.providers_ext import Apple, MicrosoftEntraId, Slack
@@ -56,7 +56,10 @@ curl -s -X POST localhost:8000/api/auth/sign-in/social \
 ```
 
 ```json
-{ "url": "https://github.com/login/oauth/authorize?…", "redirect": true }
+{
+  "url": "https://github.com/login/oauth/authorize?…",
+  "redirect": true
+}
 ```
 
 Send the browser to `url`. The provider comes back to
@@ -69,13 +72,14 @@ The redirect URI you register with the provider is
 `https://example.com/api/auth/callback/github`. Override it with
 `redirect_uri=` when the provider insists on something else.
 
-## The 35 providers
+## The 36 providers
 
 Each page covers endpoints, real dataclass options, default scopes, and
 per-provider quirks:
 
 - [Apple](/providers/apple)
 - [Atlassian](/providers/atlassian)
+- [Cloudflare](/providers/cloudflare)
 - [Amazon Cognito](/providers/cognito)
 - [Discord](/providers/discord)
 - [Dropbox](/providers/dropbox)
@@ -117,7 +121,7 @@ runtime:
 ```python
 from better_auth.oauth import PROVIDER_REGISTRY
 
-len(PROVIDER_REGISTRY)   # 35
+len(PROVIDER_REGISTRY)   # 36
 ```
 
 ## Per-provider options
@@ -138,8 +142,71 @@ GitHub(
     disable_implicit_sign_up=False,          # require requestSignUp:true to register
     override_user_info_on_sign_in=False,     # re-sync the profile on every sign-in
     authentication="post",                   # or "basic" for the token endpoint
+    token_endpoint_auth=None,                # explicit client auth, wins over the above
+    require_email_verification=False,        # no session while the email is unverified
+    allow_idp_initiated=False,               # accept a callback that has no state
 )
 ```
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `require_email_verification` | `False` | A user whose email is unverified gets no session. The callback redirects with `error=email_not_verified` (ID token sign-in answers `403 EMAIL_NOT_VERIFIED`), and a verification email goes out on sign-up (and on sign-in with `send_on_sign_in`) when `send_verification_email` is set. |
+| `allow_idp_initiated` | `False` | A callback that carries a `code` but no `state` (sign-in started from the provider's side) restarts the flow with fresh state and PKCE instead of failing with `state_not_found`. |
+| `token_endpoint_auth` | `None` | A `TokenEndpointAuth` for token and refresh requests. Methods: `"client_secret_basic"`, `"client_secret_post"`, `"none"`, `"private_key_jwt"` (needs `get_client_assertion`) and `"custom"` (needs `customize_request`). `None` falls back to `authentication`. |
+
+`TokenEndpointAuth` and the assertion helper live in `better_auth.oauth.machinery`.
+For `private_key_jwt`, `create_private_key_jwt_client_assertion_getter` signs a
+fresh RFC 7523 assertion for each request from a JWK or a PEM key:
+
+```python
+from better_auth.oauth.machinery import (
+    TokenEndpointAuth,
+    create_private_key_jwt_client_assertion_getter,
+)
+
+auth_method = TokenEndpointAuth(
+    "private_key_jwt",
+    get_client_assertion=create_private_key_jwt_client_assertion_getter(
+        private_key_pem=PEM, kid="key-1"
+    ),
+)
+```
+
+A client secret cannot be combined with `private_key_jwt` or `none`.
+
+### Per-request parameters
+
+`POST /sign-in/social` and `POST /link-social` also accept:
+
+- `loginHint`: sent as `login_hint` by providers that support it.
+- `additionalParams`: an object of string values added to the authorize URL. They
+  win over the provider's `authorize_params`. The framework-owned parameters
+  `state`, `client_id`, `redirect_uri`, `response_type`, `code_challenge`,
+  `code_challenge_method`, `nonce` and `scope` are refused with a
+  `400 VALIDATION_ERROR`. A few providers keep their own required values (Notion
+  `owner`, Atlassian `audience`, TikTok `client_key`, WeChat `appid`).
+
+Reserved parameters cannot be overridden through `authorize_params` either: they
+are dropped from the URL. On token refresh, extra parameters never replace
+`grant_type` or `refresh_token`.
+
+::: warning Changed in 1.1
+Several behaviors changed for every provider. See
+[Upgrade from 1.0](/migrate/from-1-0).
+
+- ID tokens go through one shared verifier: signature against the provider JWKS
+  (every key with the token's `kid` is tried), issuer, audience, nonce, and the
+  provider's algorithm and maximum age rules.
+- New users of providers that return no email (Reddit, Roblox, TikTok, Twitter,
+  WeChat) get a placeholder email `<id>@<provider>.placeholder.invalid`, for
+  example `12345@reddit.placeholder.invalid`. Existing users keep their stored email.
+- A provider response with an empty account id is refused with
+  `unable_to_get_user_info` (`401 FAILED_TO_GET_USER_INFO` for ID token sign-in).
+:::
+
+To refuse an OAuth sign-up, account link or returning sign-in from your own code
+(an email domain rule, say), set `validate_user_info` on the user options. See
+[Configuration](/guide/configuration).
 
 ## A custom provider
 

@@ -52,5 +52,17 @@ No extra tables: tokens live in the core `verification` table, keyed by the
   one session; invalid/expired tokens redirect to
   `errorCallbackURL?error=INVALID_TOKEN`.
 - Each callback URL is origin-checked before redirecting.
-- Adopting an existing unverified user revokes its unproven credential and
-  sessions before marking the email verified.
+- Signing in an existing unverified user deletes every account linked to it
+  (the password and any OAuth links) and all of its sessions, then marks the
+  email verified. Only then is the new session created.
+- When `user.validate_user_info` is set, it runs before a new user is created,
+  with `source` set to `{"action": "create-user", "method": "magic-link"}`.
+- If user creation is refused (by `validate_user_info` or a database hook),
+  the verify endpoint redirects to `errorCallbackURL` with the error code in
+  `error` and the message in `error_description`.
+
+::: warning Changed in 1.1
+Before 1.1, only the password account was removed when an unverified user
+signed in with a magic link. OAuth links are now deleted too. See
+[Upgrade from 1.0](/migrate/from-1-0).
+:::

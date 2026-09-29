@@ -64,6 +64,12 @@ auth = BetterAuth(
   camelCase (`"singleDevice"`/`"multiDevice"`). A row written by the TS plugin
   verifies here and vice versa.
 - Challenges are single-use: a signed cookie (max age 300s) plus a verification
-  row consumed atomically on verify.
+  row consumed atomically on verify. A challenge only works for the ceremony
+  it was created for: a registration challenge cannot finish an
+  authentication, and a challenge with no ceremony type is refused with
+  `CHALLENGE_NOT_FOUND`.
+- `/passkey/verify-registration` accepts `createSession: true` to sign the
+  user in right after the passkey is saved. The response is then the passkey
+  row plus `session` and `user`, and the session cookie is set.
 - Importing `better_auth.plugins_ext` without the `passkey` extra installed
   raises `ModuleNotFoundError`.

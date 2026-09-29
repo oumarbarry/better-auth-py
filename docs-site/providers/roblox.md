@@ -45,4 +45,9 @@ All shared [`ProviderConfig` options](/providers/#per-provider-options) apply.
 - Default scopes: `openid profile`.
 - Register `{base_url}{base_path}/callback/roblox` as the redirect URL on the Roblox OAuth app.
 - The authorize URL carries `prompt=select_account consent` by default (default `authorize_params`).
-- Roblox never returns an email: `email` is filled with `preferred_username` as a placeholder and `email_verified` is always `False` (matching TS). Display name prefers `nickname`.
+- Roblox never returns an email: `email` is the placeholder `{sub}@roblox.placeholder.invalid` and `email_verified` is always `False`. Display name prefers `nickname`.
+
+::: warning Changed in 1.1
+The email of a new Roblox user was the `preferred_username` and is now the placeholder `{sub}@roblox.placeholder.invalid`. Existing users keep the address stored at sign-up.
+See [Upgrade from 1.0](/migrate/from-1-0).
+:::

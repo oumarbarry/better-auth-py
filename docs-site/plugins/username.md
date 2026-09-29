@@ -31,6 +31,8 @@ auth = BetterAuth(
 | `display_username_normalization` | `callable \| bool` | `False` | Normalizer for `displayUsername`. |
 | `validation_order` | `dict \| None` | `None` | Run validation before or after normalization. |
 | `schema` | `dict \| None` | `None` | Field-name overrides for the added columns. |
+| `immutable_username` | `bool` | `False` | Once a user has a username, `/update-user` refuses to change it with a 400 `USERNAME_IS_IMMUTABLE`. Sending the same username again is allowed. |
+| `display_username` | `bool` | `True` | `False` drops the `displayUsername` column, and sign-up and update no longer write it. |
 
 ## Endpoints
 
@@ -43,7 +45,7 @@ auth = BetterAuth(
 
 | Table | Added columns |
 | --- | --- |
-| `user` | `username` (unique), `displayUsername` |
+| `user` | `username` (unique), `displayUsername` (unless `display_username=False`) |
 
 ## Notes
 

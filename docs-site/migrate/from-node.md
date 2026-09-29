@@ -60,6 +60,13 @@ auth = BetterAuth(secret=..., adapter=adapter)
 The tables already exist with the right shape. `create_tables()` is a
 development convenience for a fresh database. Skip it here.
 
+::: tip Match the TypeScript version
+Better Auth for Python follows better-auth **v1.7.6**. Run the Node app on
+1.7 first, with its schema migrated, before you point Python at the same
+database. The SQLAlchemy adapter checks the schema on first use and fails
+every auth request while a table or column is missing.
+:::
+
 **4. Re-declare your options.** Configuration does not live in the database, so
 it has to be restated. TypeScript camelCase becomes Python snake_case, one to
 one:
@@ -153,6 +160,9 @@ project's parity decision log:
 - **`open-api`** (developer tooling, no wire or storage contract) and the
   telemetry and logger option groups (logging stays on the standard library's
   `logging`).
+- The **account cookie** (`account.storeAccountCookie`). A request that
+  selects an account with `useAccountCookie: true` finds no account; pass
+  `accountId` instead.
 - The JavaScript **`client`**, **expo**, **electron** and **cli** packages.
   Your frontend does not need to change: the HTTP API is identical, so an
   existing `better-auth` JavaScript client keeps working unchanged against the
@@ -160,8 +170,7 @@ project's parity decision log:
   [`better-auth-client`](https://pypi.org/project/better-auth-client/) package
   covers the HTTP client role.
 
-Also still open, and not blockers for a migration: framework integrations
-beyond FastAPI (Litestar, Django, Flask) and CLI schema migrations.
+Also still open, and not a blocker for a migration: CLI schema migrations.
 
 ## After the cutover
 

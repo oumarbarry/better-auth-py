@@ -2,7 +2,7 @@
 
 `better-auth-server` is a server-side Python port of
 [Better Auth](https://better-auth.com), at full parity with the TypeScript
-library **v1.6.29**. The PyPI package is `better-auth-server`; the import name
+library **v1.7.6**. The PyPI package is `better-auth-server`; the import name
 is `better_auth`.
 
 ## Install
@@ -223,5 +223,5 @@ An `AsyncAuthClient` offers the same surface, awaited. See the
 - [Core concepts](/guide/concepts): sessions, adapters, plugins, what parity buys you.
 - [Configuration](/guide/configuration): every option on `BetterAuth`.
 - [Python client](/guide/client): `better-auth-client`, the PyPI client for this server.
-- [Social providers](/providers/): the 35 built-ins and custom ones.
+- [Social providers](/providers/): the 36 built-ins and custom ones.
 - [Production deploy](/deploy/production): secrets, proxies, rate limits.

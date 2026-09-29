@@ -94,8 +94,8 @@ const sources = new Map(pages.map((p) => [p.file, readFileSync(p.file, 'utf8')])
 let index = `# Better Auth for Python\n\n`
 index +=
   `> \`better-auth-server\` is a server-side Python port of Better Auth, at wire and ` +
-  `storage parity with the TypeScript library v1.6.25 — same routes, JSON shapes, error ` +
-  `codes and database schema. 35 social providers, 26 plugins, FastAPI, Litestar, Flask ` +
+  `storage parity with the TypeScript library v1.7.6: same routes, JSON shapes, error ` +
+  `codes and database schema. 36 social providers, 27 plugins, FastAPI, Litestar, Flask ` +
   `and Django integrations, plus \`better-auth-client\`, a Python HTTP client for any ` +
   `Better Auth server.\n`
 for (const group of ['Guide', 'Plugins', 'Providers', 'Migrate', 'Deploy']) {

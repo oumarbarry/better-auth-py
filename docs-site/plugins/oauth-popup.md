@@ -36,8 +36,9 @@ None. The plugin takes no options (same as TS).
 - Pair it with [Bearer Token](./bearer) so the opener can use the posted token.
 - The completion page's inline script is byte-identical to TS and its sha256
   is pinned in the response CSP.
-- Implementation note: state is stored as a verification row plus a signed
-  CSRF cookie
-  (this port's OAuth-state convention), so the normal `/callback` and
-  `/oauth2/callback` routes consume it unchanged; `additionalData` keys sit at
-  the top level of the state, with internal state keys stripped.
+- Implementation note: state is stored through the verification storage plus
+  a signed CSRF cookie, as for every OAuth sign-in, so the normal
+  `/callback/{provider}` route consumes it unchanged (also `/oauth2/callback/{provider}` when
+  [Generic OAuth](./generic-oauth) runs with `legacy_routes=True`);
+  `additionalData` keys sit at the top level of the state, with internal
+  state keys stripped.

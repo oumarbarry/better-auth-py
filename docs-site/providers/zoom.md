@@ -43,7 +43,7 @@ All shared [`ProviderConfig` options](/providers/#per-provider-options) apply.
 
 ## Notes
 
-- Default scopes: none. The hand-built authorize URL never carries a `scope` param, even if you set `scopes` (matching TS, which ignores them for Zoom; scopes are configured on the Zoom app itself).
+- Default scopes: none. The authorize URL never carries a `scope` param or a login hint, even if you set `scopes` (matching TS, which ignores them for Zoom; scopes are configured on the Zoom app itself).
 - Register `{base_url}{base_path}/callback/zoom` as the redirect URL on the Zoom OAuth app.
 - The token exchange forwards the PKCE `code_verifier` unconditionally when present, even with `use_pkce=False`. Only the authorize-URL side is gated (matching TS).
 - `email_verified` maps from Zoom's `verified` flag; the avatar from `pic_url`.

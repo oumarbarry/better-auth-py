@@ -33,18 +33,32 @@ auth = BetterAuth(
 
 | Method | Path |
 | --- | --- |
-| GET | `/oauth-proxy-callback` |
+| GET | `/callback/{provider}/oauth-proxy` |
+| GET | `/oauth-proxy-callback` (deprecated alias) |
 
 The rest of the plugin is request hooks around `/sign-in/social`,
-`/sign-in/oauth2` and `/callback/{provider}`.
+`/link-social` and `/callback/{provider}`.
+
+::: warning Changed in 1.1
+Proxied sign-ins now complete on `/callback/{provider}/oauth-proxy`, so hooks
+that match `/callback/` (such as [Last Login Method](./last-login-method))
+run for them. `/oauth-proxy-callback` still works but is deprecated. The 1.0
+Generic OAuth route `/sign-in/oauth2` is no longer proxied: use
+`/sign-in/social`. See [Upgrade from 1.0](/migrate/from-1-0).
+:::
 
 ## Notes
 
 - Production runs the code-to-token-to-userinfo exchange, encrypts the resulting
   profile under the shared secret, and 302s it back to the preview's
-  `/oauth-proxy-callback`, which creates the user and session locally. The
+  `/callback/{provider}/oauth-proxy`, which creates the user and session
+  locally. The
   preview and production do not need to share `BETTER_AUTH_SECRET` (set
   `secret` if they don't).
 - Deploy checklist: see [production deployment](/deploy/production).
+- Account linking through `/link-social` is proxied the same way: the
+  preview links the provider account to the signed-in user instead of
+  creating a session.
 - Works with both registry [providers](/providers/) and
-  [Generic OAuth](./generic-oauth).
+  [Generic OAuth](./generic-oauth) providers, through `/sign-in/social` and
+  `/link-social`.

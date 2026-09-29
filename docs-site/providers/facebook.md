@@ -47,6 +47,10 @@ All shared [`ProviderConfig` options](/providers/#per-provider-options) apply.
 
 - Default scopes: `email public_profile`.
 - Register `{base_url}{base_path}/callback/facebook` as a valid OAuth redirect URI in the Meta developer console.
-- Two token paths on direct sign-in: a 3-segment JWT is a **Limited Login** token, verified against `https://limited.facebook.com/.well-known/oauth/openid/jwks/` (issuer `https://www.facebook.com`); anything else is an opaque access token, validated through Graph `debug_token` (must be valid, bound to a configured app id, and carry a `user_id`).
+- Two token paths on direct sign-in: a 3-segment JWT is a **Limited Login** token, verified against `https://limited.facebook.com/.well-known/oauth/openid/jwks/` (issuer `https://www.facebook.com`, RS256 only); anything else is treated as opaque, and the identity comes from the access token sent as `idToken.accessToken`: it is validated through Graph `debug_token` (must be valid, bound to a configured app id, and carry a `user_id`), then the Graph profile is read. A missing or rejected access token answers `401 FAILED_TO_GET_USER_INFO`.
+
+::: warning Changed in 1.1
+Opaque token sign-in reads the identity from `idToken.accessToken`, not from `idToken.token`. Clients that sent only the opaque token must also send it as `accessToken`. See [Upgrade from 1.0](/migrate/from-1-0).
+:::
 - The Graph `/me` endpoint is not app-bound, so the access token is app-verified via `debug_token` before its profile is trusted, and the returned profile `id` must match the token's `user_id`.
 - Limited-Login id tokens carry no `email_verified` claim, mapped as `False`.

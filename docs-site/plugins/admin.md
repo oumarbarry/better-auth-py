@@ -32,7 +32,7 @@ auth = BetterAuth(
 | `roles` | `dict[str, Role] \| None` | `None` | Custom role set built from an access-control statement set. |
 | `admin_user_ids` | `list[str] \| None` | `None` | Explicit user ids granted admin access regardless of role. |
 | `ac` | `AccessControl \| None` | `None` | Access-control instance backing custom `roles`. |
-| `banned_user_message` | `str \| None` | `None` | Message returned when a banned user tries to sign in. |
+| `banned_user_message` | `str \| callable \| None` | `None` (a default message) | Message returned with the 403 `BANNED_USER` when a banned user tries to sign in. A callable receives the banned user dict and returns the message; it may be sync or async. |
 | `allow_impersonating_admins` | `bool` | `False` | Allow impersonating users who are themselves admins. |
 
 ## Endpoints
@@ -72,4 +72,6 @@ auth = BetterAuth(
 - TS's trusted null-session server calls (`create-user` / `has-permission`
   without a request) are not reachable through this HTTP-only router; both
   endpoints simply require a session.
+- `/admin/create-user` runs `user.validate_user_info` when it is set, with
+  `source` set to `{"action": "create-user", "method": "admin"}`.
 - Dynamic per-organization roles live in [Organization](./organization), not here.

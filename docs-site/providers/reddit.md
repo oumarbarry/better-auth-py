@@ -44,5 +44,11 @@ All shared [`ProviderConfig` options](/providers/#per-provider-options) apply. R
 
 - Default scopes: `identity`.
 - Register `{base_url}{base_path}/callback/reddit` as the redirect URI in the Reddit app preferences.
-- Reddit blocks generic HTTP clients: the token exchange sends `accept: text/plain` and a non-default `User-Agent` (`better-auth-py`); userinfo (`GET /api/v1/me`) carries the same `User-Agent`.
-- The `identity` scope never returns an email, so a stable non-routable placeholder is synthesized: `{id}@reddit.invalid` (RFC 2606), always unverified. Avatar URLs are stripped of their query string.
+- Token requests use `client_secret_basic` (HTTP Basic) client authentication.
+- Reddit blocks generic HTTP clients: the code exchange sends `accept: text/plain` and a non-default `User-Agent` (`better-auth`); userinfo (`GET /api/v1/me`) carries the same `User-Agent`. Token refresh sends neither header.
+- The `identity` scope never returns an email, so a stable non-routable placeholder is synthesized: `{id}@reddit.placeholder.invalid` (RFC 6761), always unverified. Avatar URLs are stripped of their query string.
+
+::: warning Changed in 1.1
+The placeholder email for new users was `{id}@reddit.invalid` and is now `{id}@reddit.placeholder.invalid`. Existing users keep the address stored at sign-up.
+See [Upgrade from 1.0](/migrate/from-1-0).
+:::

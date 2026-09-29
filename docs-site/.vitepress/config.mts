@@ -5,7 +5,7 @@ const PYPI = 'https://pypi.org/project/better-auth-server/'
 
 const DESCRIPTION =
   'Authentication for Python, ported from Better Auth. Full parity with the ' +
-  'TypeScript v1.6.29 wire and storage format: 35 social providers, 26 plugins, ' +
+  'TypeScript v1.7.6 wire and storage format: 36 social providers, 27 plugins, ' +
   'FastAPI, Litestar, Flask and Django integrations, a Python client, your database.'
 
 // Absolute URLs (og:url, sitemap) need a real hostname. Vercel exposes one; a
@@ -87,6 +87,7 @@ export default defineConfig({
           { text: 'Plugins', link: '/plugins/' },
           { text: 'Social providers', link: '/providers/' },
           { text: 'Migrate from Node', link: '/migrate/from-node' },
+          { text: 'Upgrade from 1.0', link: '/migrate/from-1-0' },
           { text: 'Production deploy', link: '/deploy/production' },
         ],
       },
@@ -128,6 +129,7 @@ export default defineConfig({
         items: [
           { text: 'Apple', link: '/providers/apple' },
           { text: 'Atlassian', link: '/providers/atlassian' },
+          { text: 'Cloudflare', link: '/providers/cloudflare' },
           { text: 'Amazon Cognito', link: '/providers/cognito' },
           { text: 'Discord', link: '/providers/discord' },
           { text: 'Dropbox', link: '/providers/dropbox' },

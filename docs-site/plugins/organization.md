@@ -51,7 +51,7 @@ auth = BetterAuth(
 
 ## Endpoints
 
-20 core routes under `/organization/`:
+21 core routes under `/organization/`:
 
 | Method | Path |
 | --- | --- |
@@ -59,6 +59,7 @@ auth = BetterAuth(
 | POST | `/organization/update` |
 | POST | `/organization/delete` |
 | POST | `/organization/set-active` |
+| GET | `/organization/get-organization` |
 | GET | `/organization/get-full-organization` |
 | GET | `/organization/list` |
 | POST | `/organization/check-slug` |
@@ -90,6 +91,14 @@ With `teams={"enabled": True}`, 9 more:
 | POST | `/organization/add-team-member` |
 | POST | `/organization/remove-team-member` |
 
+`GET /organization/get-organization` returns the organization row only, without
+members or invitations. It takes `organizationId` or `organizationSlug` and
+falls back to the active organization (a `null` body when there is none).
+
+`GET /organization/list-user-teams` accepts `userId` and `organizationId`. A
+caller with the `member:update` permission in that organization can list
+another member's teams. Without parameters it lists the caller's own teams.
+
 ## Schema
 
 | Table | Columns |
@@ -100,7 +109,15 @@ With `teams={"enabled": True}`, 9 more:
 | `session` | adds `activeOrganizationId` |
 
 With teams enabled: `team`, `teamMember` tables, `invitation.teamId` and
-`session.activeTeamId`.
+`session.activeTeamId`. `team.memberCount` and `teamMember.membershipKey` back
+atomic team capacity checks. Both are internal: never accepted as input and
+never returned.
+
+::: warning Changed in 1.1
+`team.memberCount` and `teamMember.membershipKey` are new columns. Run your
+migrations. Existing teams resync their count on the next join. See
+[Upgrade from 1.0](/migrate/from-1-0).
+:::
 
 ## Notes
 
@@ -109,6 +126,11 @@ With teams enabled: `team`, `teamMember` tables, `invitation.teamId` and
 - Deleting an organization cascades to members, invitations and teams; the
   cascade is not wrapped in a transaction here (a deliberate simplification:
   the MemoryAdapter has no transactions; TS wraps it in one).
-- Team creation caps are checked with count-then-create, which races under
-  heavy concurrency, the same known FIXME as TS.
+- Accepting an invitation is a guarded compare-and-set on its `pending`
+  status: of two concurrent accepts, the loser gets `INVITATION_NOT_FOUND`
+  instead of a success. A failed accept rolls the status back the same way.
+- Team member limits reserve a seat on `team.memberCount` before adding the
+  member, so a full team refuses the request. The limit on the number of
+  teams is still checked with count-then-create, which races under heavy
+  concurrency, the same known FIXME as TS.
 - For instance-wide (non-organization) roles, see [Admin](./admin).

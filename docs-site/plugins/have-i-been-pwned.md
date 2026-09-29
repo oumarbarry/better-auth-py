@@ -34,10 +34,30 @@ auth = BetterAuth(
 None. The plugin registers a password check run by `hash_password_checked`
 before every password hash on the configured paths.
 
+## Check a password yourself
+
+`is_password_compromised` runs the same lookup outside the configured paths,
+for example in a custom password form:
+
+```python
+from better_auth.plugins_ext.haveibeenpwned import is_password_compromised
+
+if await is_password_compromised(password, http=auth.http):
+    ...  # ask for another password
+```
+
+It returns `True` when the password appears in the corpus. `http` is
+optional: without it a one-off `httpx.AsyncClient` is used. When the lookup
+cannot complete it raises a 500 `APIError`; if the range API answered with an
+error, the message includes its HTTP status.
+
 ## Notes
 
 - Only the first five characters of the SHA-1 hash are sent to the HIBP range
   API; the match is done locally.
+- Every password on a configured path is checked, including an empty one.
+- Padding entries in the range response (a count of `0`) never flag a
+  password.
 - Plugin-owned paths in the default list only take effect when the matching
   plugin (e.g. [Admin](./admin), [Email OTP](./email-otp),
   [Phone Number](./phone-number)) is installed: the check is keyed on the
