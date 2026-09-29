@@ -346,3 +346,12 @@ async def test_enabled_false_allows_compromised_password_e2e():
 
     assert res.status_code == 200
     assert res.json()["user"] is not None
+
+
+def test_is_password_compromised_is_publicly_exported():
+    """Must be importable next to ``HaveIBeenPwnedPlugin`` from the ``plugins_ext`` package,
+    not only from the ``haveibeenpwned`` submodule."""
+    from better_auth.plugins_ext import is_password_compromised as from_package
+    from better_auth.plugins_ext.haveibeenpwned import is_password_compromised as from_module
+
+    assert from_package is from_module

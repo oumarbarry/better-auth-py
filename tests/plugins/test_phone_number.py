@@ -11,6 +11,8 @@ import asyncio
 from datetime import timedelta
 from typing import Any
 
+import pytest
+
 from better_auth import Field
 from better_auth.adapters.base import Where
 from better_auth.config import EmailAndPassword, UserOptions
@@ -800,6 +802,15 @@ async def test_consume_phone_number_otp_uses_custom_verifier():
         assert getattr(exc, "code", None) == "INVALID_OTP"
     else:
         raise AssertionError("expected INVALID_OTP")
+
+
+async def test_consume_phone_number_otp_before_init_raises_runtime_error():
+    """The init guard must raise unconditionally, not rely on ``assert`` (stripped under
+    ``python -O``): a plugin instance that never went through ``auth.init()`` must still
+    fail with a clear error instead of an AttributeError on a None ``_auth``."""
+    plugin = phone_plugin({})
+    with pytest.raises(RuntimeError, match=r"plugin\.init\(\) has not run yet"):
+        await plugin.consume_phone_number_otp("+251900000081", "000000")
 
 
 async def test_validate_user_info_rejects_phone_sign_up():

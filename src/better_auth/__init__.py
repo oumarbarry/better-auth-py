@@ -25,6 +25,7 @@ from .oauth import (
     OAuthTokens,
     OAuthUserInfo,
     ProviderConfig,
+    TokenEndpointAuth,
 )
 from .plugins import Plugin
 from .schema import CORE_SCHEMA, Field, Reference, Schema, rate_limit_model
@@ -73,6 +74,7 @@ __all__ = [
     "Schema",
     "SecondaryStorage",
     "SessionOptions",
+    "TokenEndpointAuth",
     "VerificationOptions",
     "Where",
     "__version__",

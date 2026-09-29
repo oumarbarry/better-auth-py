@@ -148,6 +148,16 @@ async def test_api_error_headers_reach_the_response():
     assert response.headers["cache-control"] == "no-store"
 
 
+async def test_require_session_message_matches_ts_session_middleware():
+    """``Ctx.require_session()`` is the port's ``sessionMiddleware``; TS throws
+    ``{code: "UNAUTHORIZED", message: "Unauthorized"}`` (session.ts:543-549), not
+    "Not authenticated"."""
+    async with make_client(make_auth()) as client:
+        response = await client.get("/api/auth/list-sessions")
+    assert response.status_code == 401
+    assert response.json() == {"code": "UNAUTHORIZED", "message": "Unauthorized"}
+
+
 def test_api_error_positional_constructor_is_unchanged():
     error = APIError(400, "BAD", "Bad thing", {"field": "x"})
     assert (error.status, error.code, error.message, error.extra) == (

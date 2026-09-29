@@ -233,14 +233,17 @@ class OAuthDeviceAuthorizationPlugin(DeviceAuthorizationPlugin):
         super().__init__(**options, grant=grant)
 
     def init(self, auth: BetterAuth) -> None:
+        # TS device-code.test.ts:53, 72 pin these messages against the TS factory names
+        # (oauthDeviceAuthorization(), oauthProvider()); this port is a plain error, not
+        # part of the OAuth wire envelope, so it names the Python plugin classes instead.
         if sum(1 for p in auth.plugins if p.id == "device-authorization") > 1:
             raise ValueError(
-                "oauthDeviceAuthorization() cannot be combined with another Device "
+                "OAuthDeviceAuthorizationPlugin cannot be combined with another Device "
                 "Authorization plugin."
             )
         provider = _provider(auth)
         if provider is None:
-            raise ValueError("oauthDeviceAuthorization() requires oauthProvider() or mcp().")
+            raise ValueError("OAuthDeviceAuthorizationPlugin requires OAuthProviderPlugin.")
         provider.extension_grants[DEVICE_CODE_GRANT_TYPE] = exchange_device_code
         if self._metadata not in provider.extension_metadata:
             provider.extension_metadata.append(self._metadata)

@@ -28,8 +28,8 @@ DEFAULT_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 def _default_resolve_method(path: str, params: dict[str, str]) -> str | None:
     """TS ``defaultResolveMethod`` (v1.7.6 index.ts:74-94)."""
     # ponytail: TS 1.7.6 dropped the /oauth2/callback branch because generic-oauth now
-    # calls back on /callback/:id; this port's generic-oauth still uses /oauth2/callback
-    # until its rewrite lands, so the branch stays until then.
+    # calls back on /callback/:id by default; this port's generic-oauth matches that but
+    # keeps /oauth2/callback/:id as a route under legacy_routes=True, so both are matched.
     if path.startswith("/callback/") or path.startswith("/oauth2/callback/"):
         return (
             params.get("id")

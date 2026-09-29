@@ -254,7 +254,8 @@ class PhoneNumberPlugin(Plugin):
         """TS server-only ``consumePhoneNumberOTP`` (v1.7.6 routes.ts:343-363): verify and
         burn an OTP without updating a user or creating a session. Not mounted on the
         HTTP router."""
-        assert self._auth is not None, "plugin.init() has not run yet"
+        if self._auth is None:
+            raise RuntimeError("plugin.init() has not run yet")
         await self._verify_and_consume(self._auth.internal, phone_number, code, ctx)
         return {"status": True}
 

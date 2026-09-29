@@ -1,12 +1,14 @@
 """OAuth2/OIDC Provider plugin (``@better-auth/oauth-provider``).
 
-Full authorization-server implementation: client registration/CRUD/DCR, the
-``clientPrivileges`` gate, discovery documents, jwt-plugin wiring, the
-``/oauth2/authorize`` flow (with signed-query consent resume), ``/oauth2/token``,
-``/oauth2/introspect``, ``/oauth2/revoke``, ``/oauth2/userinfo``, and RP-initiated
-logout. Ports TS ``packages/oauth-provider/src/``
+Full authorization-server implementation: client registration/CRUD/DCR, OAuth protected
+resources, the ``clientPrivileges``/``resourcePrivileges`` gates, discovery documents,
+jwt-plugin wiring, the ``/oauth2/authorize`` flow (with signed-query consent resume and
+``max_age`` enforcement), ``/oauth2/token`` (authorization_code, client_credentials,
+refresh_token, RFC 7523 ``private_key_jwt`` client assertions, RFC 8707 resource
+indicators), ``/oauth2/introspect``, ``/oauth2/revoke``, ``/oauth2/userinfo``, and
+RP-initiated logout. Ports TS ``packages/oauth-provider/src/``
 (``oauth.ts`` factory/init/onRequest, ``register.ts``, ``oauthClient/``, ``metadata.ts``,
-``signed-query.ts``, ``utils/index.ts``, ``schema.ts``) at v1.6.23.
+``signed-query.ts``, ``utils/index.ts``, ``schema.ts``) at v1.7.6.
 
 Two signing modes: the default JWT-enabled path signs id/access tokens with the ``jwt`` plugin's
 keys, on whatever alg it is configured with; ``disable_jwt_plugin=True`` installs no jwt plugin

@@ -145,7 +145,9 @@ class Ctx:
         return self._session
 
     async def require_session(self) -> dict[str, Any]:
+        """The port's ``sessionMiddleware`` (TS session.ts:543-549): 401 ``UNAUTHORIZED``,
+        message "Unauthorized" (the default derived from the code)."""
         result = await self.get_session()
         if result is None:
-            raise APIError(401, "UNAUTHORIZED", "Not authenticated")
+            raise APIError(401, "UNAUTHORIZED")
         return result

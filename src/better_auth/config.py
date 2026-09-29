@@ -58,13 +58,14 @@ class EmailVerification:
 class CookieCache:
     """``session.cookieCache`` — cache the ``{session, user}`` payload in a signed,
     short-TTL ``session_data`` cookie so ``/get-session`` can skip the DB (mirrors
-    better-auth). Only the ``compact`` strategy is implemented (base64url + a
-    ``base64urlnopad`` HMAC-SHA256 signature), which is the TS default.
+    better-auth). Two strategies are implemented: ``compact`` (base64url + a
+    ``base64urlnopad`` HMAC-SHA256 signature), the TS default, and ``jwt`` (an HS256 or
+    JWKS-signed JWT; see :mod:`better_auth.cookie_cache`).
     """
 
     enabled: bool = False
     max_age: int = 300  # seconds
-    #: "compact" only for now (jwt/jwe are TS strategies not yet ported)
+    #: "compact" (default) or "jwt"; "jwe" is a TS strategy not yet ported
     strategy: str = "compact"
     version: str = "1"
 

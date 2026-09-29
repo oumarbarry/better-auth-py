@@ -111,7 +111,7 @@ def test_oauth_fields_join_the_device_code_model_only_when_composed():
 
 
 def test_composition_requires_the_provider_and_a_single_device_plugin():
-    with pytest.raises(ValueError, match="requires oauthProvider"):
+    with pytest.raises(ValueError, match="requires OAuthProviderPlugin"):
         make_auth(plugins=[OAuthDeviceAuthorizationPlugin()])
     with pytest.raises(ValueError, match="cannot be combined"):
         make_auth(

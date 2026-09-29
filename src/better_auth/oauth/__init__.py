@@ -19,7 +19,7 @@ from .flow import (
     refresh_token,
     sign_in_social,
 )
-from .machinery import OAuthFetchError, oauth_fetch
+from .machinery import OAuthFetchError, TokenEndpointAuth, oauth_fetch
 from .models import OAuthTokens, OAuthUserInfo
 from .providers import Discord, GitHub, Google, OAuthProvider, ProviderConfig
 from .providers_ext import PROVIDER_REGISTRY
@@ -35,6 +35,7 @@ __all__ = [
     "OAuthTokens",
     "OAuthUserInfo",
     "ProviderConfig",
+    "TokenEndpointAuth",
     "get_access_token",
     "handle_oauth_user_info",
     "link_social",

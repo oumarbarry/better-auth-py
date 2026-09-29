@@ -3,7 +3,7 @@
 Ports the small shared pieces the provider needs on top of existing port seams
 (``packages/oauth-provider/src/utils/index.ts``, ``signed-query.ts``, ``authorize.ts``
 formatErrorURL/handleRedirect, and ``@better-auth/core/utils/redirect-uri`` SafeUrlSchema)
-at v1.6.23. Everything crypto-shaped delegates to :mod:`better_auth.crypto`.
+at v1.7.6. Everything crypto-shaped delegates to :mod:`better_auth.crypto`.
 """
 
 from __future__ import annotations

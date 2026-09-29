@@ -818,6 +818,32 @@ async def test_botid_skips_unprotected_routes():
     assert calls == []
 
 
+async def test_botid_accepts_sync_check_bot_id_and_rejects_bots():
+    """``check_bot_id`` may be a plain sync callable (not only ``async def``), like
+    ``validate_request`` already can be; a sync one must not 500."""
+    calls: list[int] = []
+
+    def check_bot_id_sync() -> dict[str, Any]:
+        calls.append(1)
+        return {"isBot": True}
+
+    plugin = CaptchaPlugin(provider="vercel-botid", check_bot_id=check_bot_id_sync)
+    auth = make_auth(plugins=[plugin])
+    result = await plugin.on_request(ctx_for(auth, "/sign-in/email"))
+    assert result is not None
+    assert result.status == 403
+    assert calls == [1]
+
+
+async def test_botid_accepts_sync_check_bot_id_and_allows_humans():
+    def check_bot_id_sync() -> dict[str, Any]:
+        return {"isBot": False}
+
+    plugin = CaptchaPlugin(provider="vercel-botid", check_bot_id=check_bot_id_sync)
+    auth = make_auth(plugins=[plugin])
+    assert await plugin.on_request(ctx_for(auth, "/sign-in/email")) is None
+
+
 async def test_botid_fails_closed_on_timeout(monkeypatch):
     import asyncio
 

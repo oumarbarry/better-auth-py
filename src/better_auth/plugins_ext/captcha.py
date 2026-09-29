@@ -132,7 +132,7 @@ class CaptchaPlugin(Plugin):
         expected_action: str | None = None,
         allowed_hostnames: list[str] | None = None,
         site_key: str | None = None,
-        check_bot_id: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+        check_bot_id: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]] | None = None,
         validate_request: Callable[[dict[str, Any]], bool | Awaitable[bool]] | None = None,
     ) -> None:
         self.provider = provider
@@ -207,7 +207,7 @@ class CaptchaPlugin(Plugin):
             raise RuntimeError("vercel-botid requires check_bot_id")
 
         async def decide() -> bool:
-            verification = await check_bot_id()
+            verification = await _maybe_await(check_bot_id())
             if self.validate_request is not None:
                 return bool(
                     await _maybe_await(

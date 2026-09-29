@@ -966,3 +966,14 @@ async def test_legacy_provider_selection_refused_by_default():
         await _make_account(auth, signup["user"]["id"])
         r = await client.post("/api/auth/get-access-token", json={"providerId": "github"})
     assert r.status_code == 400 and r.json()["code"] == "INVALID_BODY"
+
+
+def test_token_endpoint_auth_is_publicly_exported():
+    """``TokenEndpointAuth`` (used by provider ``token_endpoint_auth`` fields) must be
+    importable alongside the other public OAuth types, not only from ``oauth.machinery``."""
+    from better_auth import TokenEndpointAuth as top_level
+    from better_auth.oauth import TokenEndpointAuth as from_oauth
+    from better_auth.oauth.machinery import TokenEndpointAuth as machinery
+
+    assert top_level is machinery
+    assert from_oauth is machinery

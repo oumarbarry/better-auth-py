@@ -16,7 +16,7 @@ from .custom_session import CustomSessionPlugin
 from .device_authorization import DeviceAuthorizationPlugin
 from .email_otp import EmailOTPPlugin
 from .generic_oauth import GenericOAuthPlugin
-from .haveibeenpwned import HaveIBeenPwnedPlugin
+from .haveibeenpwned import HaveIBeenPwnedPlugin, is_password_compromised
 from .jwt import JWTPlugin
 from .last_login_method import LastLoginMethodPlugin
 from .magic_link import MagicLinkPlugin
@@ -76,4 +76,5 @@ __all__ = [
     "SiwePlugin",
     "TwoFactorPlugin",
     "UsernamePlugin",
+    "is_password_compromised",
 ]
