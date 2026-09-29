@@ -30,6 +30,8 @@ migration, and the options that keep 1.0 behavior.
   selection bodies (see Changed). The option is deprecated.
 - `APIError` accepts an optional `headers` keyword, sent with the error
   response.
+- `TokenEndpointAuth` is exported from `better_auth` and `better_auth.oauth`,
+  and `is_password_compromised` from `better_auth.plugins_ext`.
 
 #### Sessions and cookies
 
@@ -447,6 +449,8 @@ migration, and the options that keep 1.0 behavior.
   verifies a previously unverified address.
 - `scopes` in `/list-accounts` and `/get-access-token` are trimmed and empty
   entries dropped.
+- The session guard answers a missing session with the message
+  `Unauthorized`, as better-auth does (was `Not authenticated`).
 
 #### Sessions and cookies
 
@@ -537,6 +541,7 @@ migration, and the options that keep 1.0 behavior.
   the permission check, so an unauthorized caller cannot probe role names.
 - Passkey: registration and authentication challenges require an exact
   ceremony type match.
+- Captcha: `check_bot_id` accepts a synchronous function.
 
 #### Database
 
