@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-30
+
 This release follows better-auth v1.7.6. Some defaults change and some
 plugins need new tables or columns. Read
 [Upgrade from 1.0 to 1.1](https://better-auth-py.oumarbarry.dev/migrate/from-1-0)
