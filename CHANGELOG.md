@@ -63,6 +63,8 @@ migration, and the options that keep 1.0 behavior.
   on profile override and when a link updates user info. A required
   additional field with no default and no value now stops an OAuth sign-up
   with `MISSING_FIELD`, as in better-auth.
+- `ProviderConfig` gains `id_token_algorithms`, `id_token_max_age`,
+  `callback_path` and `create_end_session_url` for custom providers.
 
 #### Generic OAuth
 
@@ -125,6 +127,12 @@ migration, and the options that keep 1.0 behavior.
 - Admin client create and update accept `client_credentials_scopes`.
 - `OAuthDeviceAuthorizationPlugin`: the RFC 8628 device grant for OAuth
   clients, exchanged at `/oauth2/token` and advertised in discovery.
+- OAuth provider: `POST /oauth2/end-session/confirm` and the options
+  `resources`, `resource_seed_mode`, `cached_resources`,
+  `enforce_per_client_resources`, `identifier_validator`,
+  `resource_privileges`, `dpop`, `refresh_token_reuse_interval` and
+  `assertion_max_lifetime`. Without `resource_privileges`, any signed-in user
+  may call the server-side resource admin methods, as in better-auth.
 
 #### Plugins
 
@@ -300,6 +308,9 @@ migration, and the options that keep 1.0 behavior.
 - GitHub sign-in uses PKCE and sends the `better-auth` User-Agent.
 - Only the providers that forward `loginHint` upstream in better-auth still
   send `login_hint`.
+- PayPal uses PKCE and client_secret_basic, and no longer sends
+  `accept-language`. Paybin and GitLab check the `iss` callback parameter.
+  Kakao refuses a profile without an id.
 
 #### Generic OAuth
 

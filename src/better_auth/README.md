@@ -8,7 +8,7 @@ This is `better-auth-server`, the server package (import name `better_auth`). Do
 
 Your users, sessions and accounts live in your own database. There is no hosted service to depend on and no per-user pricing. The API surface is the one the TypeScript original has proven in production.
 
-Full parity with better-auth (TypeScript) **v1.6.29**: same routes, JSON shapes and error codes, 35 social providers, 26 built-in plugins.
+Full parity with better-auth (TypeScript) **v1.7.6**: same routes, JSON shapes and error codes, 36 social providers, 27 built-in plugins.
 
 ```python
 from better_auth import BetterAuth, EmailAndPassword
@@ -35,10 +35,10 @@ These twenty lines are a working auth server. Sign-up, sign-in, sessions, sign-o
 ## Features
 
 - Email and password: sign-up, sign-in, change/set/verify password, reset flow, email verification.
-- Social sign-in (OAuth2/OIDC): 35 built-in providers (GitHub, Google, Discord, Apple, GitLab, Microsoft Entra ID, Slack, Spotify, Twitch, Zoom, ...), custom providers in a few lines. PKCE, single-use database-backed state, token refresh, JWKS/id-token verification, and account linking guarded by provider email verification.
+- Social sign-in (OAuth2/OIDC): 36 built-in providers (GitHub, Google, Discord, Apple, GitLab, Microsoft Entra ID, Slack, Spotify, Twitch, Zoom, ...), custom providers in a few lines. PKCE, single-use database-backed state, token refresh, JWKS/id-token verification, and account linking guarded by provider email verification.
 - Sessions in your database: HMAC-signed cookies, sliding expiry (`expires_in`/`update_age`), `rememberMe`, list and revoke endpoints, bearer tokens for API clients, an optional signed cookie cache to skip the DB read on `/get-session`.
 - Two adapters out of the box: in-memory for dev and tests, SQLAlchemy 2 async for SQLite, PostgreSQL and MySQL (SQLModel engines work as-is). A custom adapter implements nine async CRUD methods over dict rows.
-- 26 built-in plugins covering two-factor auth, admin, organization (teams + dynamic access control), API keys, passkeys (WebAuthn), JWT, an OAuth 2.1 authorization-server (`oauth-provider`), SSO (OIDC), generic OAuth, device authorization, SIWE (Sign-In with Ethereum), magic link, email OTP, username, anonymous sessions, multi-session and more. Plugins add routes, extend the database schema, and hook before/after every request.
+- 27 built-in plugins covering two-factor auth, admin, organization (teams + dynamic access control), API keys, passkeys (WebAuthn), JWT, an OAuth 2.1 authorization-server (`oauth-provider`), SSO (OIDC), generic OAuth, device authorization, SIWE (Sign-In with Ethereum), magic link, email OTP, username, anonymous sessions, multi-session and more. Plugins add routes, extend the database schema, and hook before/after every request.
 - Pluggable secondary storage (Redis-shaped protocol), configurable rate limiting with better-auth's per-path rules, trusted-proxy client-IP resolution, and secrets rotation via versioned `SecretConfig`.
 - Secure defaults: scrypt password hashing, CSRF origin checks, open-redirect protection on every `callbackURL`, timing-equalized sign-in, XChaCha20-Poly1305 cross-runtime encryption for stored secrets.
 - The core is framework-agnostic. The FastAPI layer is about 80 lines over plain request/response dataclasses, and the Litestar (`BetterAuthLitestar`), Flask (`BetterAuthFlask`) and Django (`BetterAuthDjango`) layers follow the same pattern, WSGI included.
@@ -152,7 +152,7 @@ A custom adapter implements nine async methods over dict rows. See `better_auth.
 
 ## Social providers
 
-35 providers are built in: GitHub, Google, Discord, Apple, Atlassian, AWS Cognito, Dropbox, Facebook, Figma, GitLab, Hugging Face, Kakao, Kick, LINE, Linear, LinkedIn, Microsoft Entra ID, Naver, Notion, Paybin, PayPal, Polar, Railway, Reddit, Roblox, Salesforce, Slack, Spotify, TikTok, Twitch, Twitter/X, Vercel, VK, WeChat and Zoom (see `better_auth.oauth.PROVIDER_REGISTRY` for the full name-to-class map). Configure by instance or by name:
+36 providers are built in: GitHub, Google, Discord, Apple, Atlassian, AWS Cognito, Cloudflare, Dropbox, Facebook, Figma, GitLab, Hugging Face, Kakao, Kick, LINE, Linear, LinkedIn, Microsoft Entra ID, Naver, Notion, Paybin, PayPal, Polar, Railway, Reddit, Roblox, Salesforce, Slack, Spotify, TikTok, Twitch, Twitter/X, Vercel, VK, WeChat and Zoom (see `better_auth.oauth.PROVIDER_REGISTRY` for the full name-to-class map). Configure by instance or by name:
 
 ```python
 from better_auth import GitHub
@@ -182,7 +182,7 @@ Override `fetch_user()` for providers whose user payload is not OIDC-shaped (see
 
 ## Plugins
 
-26 plugins ship with the package under `better_auth.plugins_ext` (two-factor, admin,
+27 plugins ship with the package under `better_auth.plugins_ext` (two-factor, admin,
 organization, api-key, passkey, jwt, oauth-provider, sso, generic-oauth,
 device-authorization, siwe, magic-link, and more; see `plugins_ext.__all__` for the
 full list). Pass instances via `plugins=[...]` on `BetterAuth`. Writing your own is a
@@ -217,7 +217,7 @@ class ApiKeys(Plugin):
 
 ## Roadmap
 
-The parity campaign against the TypeScript library is complete; the
+Better Auth for Python follows the TypeScript library release by release; the
 [changelog](https://github.com/oumarbarry/better-auth-py/blob/main/CHANGELOG.md) tracks each catch-up against upstream releases. Still
 open: CLI schema migrations. Deliberately out of scope: `open-api`,
 telemetry/logger config groups, SAML, `scim`, `stripe`, and the TypeScript

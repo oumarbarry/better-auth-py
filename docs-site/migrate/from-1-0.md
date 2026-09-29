@@ -42,9 +42,9 @@ did in 1.0 stops happening or starts failing later.
    longer covers `/sign-up/email`, so that route stops asking for a captcha.
    Write the full path or a wildcard: `/sign-up/email` or `/sign-up/**`. The
    default rules are not affected.
-2. **The database schema is checked on startup.** With the SQLAlchemy adapter,
-   a missing table or column now fails every auth request, including routes
-   that never touch the database. Apply the [database
+2. **The database schema is checked on the first request.** With the
+   SQLAlchemy adapter, a missing table or column now fails every auth request,
+   including routes that never touch the database. Apply the [database
    migrations](#database-migrations) before you deploy.
 3. **Forwarded headers are no longer trusted by default.**
    `trusted_proxy_headers` is now `False`. If your proxy sends the public host
@@ -98,6 +98,22 @@ For SQLite they work as written. For MySQL, quote names with backticks and use
 
 Use the column types of your existing tables if they differ: the SQLAlchemy
 adapter stores lists and JSON values as text.
+
+### Plugin tables created before 1.0.4 {#plugin-tables-before-1-0-4}
+
+Up to 1.0.3, `create_tables()` created plugin tables (two-factor, API keys,
+passkeys, device authorization, Sign-In with Ethereum wallets, SSO, OAuth
+Provider) without their `id` column, so they could never hold rows. If you
+created them that way, drop the empty tables and run `create_tables()` again,
+or add the column:
+
+```sql
+ALTER TABLE "twoFactor" ADD COLUMN "id" TEXT PRIMARY KEY;
+```
+
+SQLite cannot add a primary key with `ALTER TABLE`: drop and recreate the
+table there. 1.0.4 already fixed this. Tables created by your own migrations
+or by the TypeScript library have the column.
 
 ### Duplicate account keys {#duplicate-account-keys}
 
@@ -268,15 +284,8 @@ is no backfill to run.
 
 ### SSO {#sso-tables}
 
-The `ssoProvider` table now declares its `id` column. A table created by the
-TypeScript library or by your own migration already has it. A table created by
-`create_tables()` on 1.0 does not, and 1.0 could not store providers in it
-with the SQLAlchemy adapter, so it is empty. Drop it and let
-`create_tables()` recreate it, or add the column:
-
-```sql
-ALTER TABLE "ssoProvider" ADD COLUMN "id" TEXT PRIMARY KEY;
-```
+The `ssoProvider` table needs its `id` column, like every plugin table: see
+[Plugin tables created before 1.0.4](#plugin-tables-before-1-0-4).
 
 ## Microsoft Entra ID account ids {#microsoft-account-ids}
 
@@ -506,6 +515,18 @@ cookie yourself.
 - **Reserved parameters.** Extra authorization or refresh parameters can no
   longer override reserved OAuth parameters such as `client_id` or
   `redirect_uri`.
+- **Required additional user fields.** Mapped provider profile fields (Generic
+  OAuth `map_profile_to_user`, SSO `mapping.extraFields`) now fill your
+  configured additional user fields. A required additional field with no
+  default and no value stops an OAuth sign-up with `MISSING_FIELD`; 1.0
+  created the user without it. Give such fields a default, or map them.
+- **Empty names.** A user created through OAuth without a provider name gets
+  an empty `name`, not the email.
+- **GitHub** sign-in sends PKCE, and only the providers that forward
+  `login_hint` in better-auth still send it.
+- **`get_oauth_state(ctx)`** returns the `additionalData` keys at the top
+  level, as stored by better-auth. Read `state["myKey"]`, not
+  `state["additionalData"]["myKey"]`.
 - **`validate_user_info`.** If you set `UserOptions(validate_user_info=...)`,
   it now also runs for users created by email sign-up, admin, anonymous, email
   OTP, magic link, phone number and SIWE. The hook receives the method in
