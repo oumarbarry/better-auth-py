@@ -45,5 +45,17 @@ Only when `store_in_database=True`:
 
 ## Notes
 
-- The default resolver derives the method from the sign-in path (e.g.
-  `email`, a social provider id, `siwe`); `custom_resolve_method` replaces it.
+- The default resolver derives the method from the sign-in path:
+
+  | Sign-in | Recorded method |
+  | --- | --- |
+  | `/sign-in/email`, `/sign-up/email` | `"email"` |
+  | OAuth callback (`/callback/{provider}`, including proxied sign-ins) | the provider id, e.g. `"github"` |
+  | Sign-In with Ethereum | `"siwe"` |
+  | `/passkey/verify-authentication` | `"passkey"` |
+  | `/magic-link/verify` | `"magic-link"` |
+  | `/sign-in/email-otp` | `"email-otp"` |
+
+  `custom_resolve_method` replaces it.
+- Email OTP sign-ins are recorded as `"email-otp"` since 1.1. Before, no
+  method was recorded for them.

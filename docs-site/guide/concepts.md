@@ -39,8 +39,11 @@ Sensitive endpoints (deleting the account, changing the email) require it.
 
 **Skipping the read.** `CookieCache(enabled=True, max_age=300)` puts a signed,
 short-lived copy of the session in a second cookie so `/get-session` answers
-without touching the database. The signature is compared in constant time and
-the cache is ignored the moment it expires.
+without touching the database. The signature is compared in constant time,
+the cache is ignored the moment it expires, and it is only used with the
+session cookie it was issued for. It can also be a JWT
+(`CookieCache(strategy="jwt")`), which another service can verify: see
+[Configuration](/guide/configuration#sessions).
 
 **Bearer tokens.** `/sign-in/email` and `/sign-up/email` return a `token`, and
 the core session layer reads `Authorization: Bearer <token>` on every request.
@@ -74,8 +77,13 @@ over plain dict rows:
 
 `consume_one` and `increment_one` (the atomic single-use-token and
 attempt-counter primitives the plugins rely on) come for free: the base
-class builds them as guarded updates on top of the methods above, and an
-adapter can override them with a native single statement.
+class builds them as guarded updates on top of the methods above, retried on
+conflict, and an adapter can override them with a native single statement.
+`SQLAlchemyAdapter` does so on PostgreSQL and SQLite.
+
+`SQLAlchemyAdapter` also checks on first use that the database holds every
+table and column Better Auth writes. See
+[Schema check](/guide/configuration#schema-check).
 
 Filters arrive as a list of `Where` objects rather than raw SQL, and the
 adapter is also what generates ids, which is why
@@ -93,8 +101,15 @@ Four core tables, with Better Auth's exact camelCase columns:
 | `verification` | `id`, `identifier`, `value`, `expiresAt`, `createdAt`, `updatedAt` |
 
 Credentials are accounts too: an email/password user gets an `account` row with
-`providerId` = `credential` and the scrypt hash in `password`. That is why
-linking a social account to a password user is just another row.
+`providerId` = `credential`, the user id in `accountId` and the scrypt hash in
+`password`. That is why linking a social account to a password user is just
+another row.
+
+An account is identified by its `(providerId, accountId)` pair, where
+`accountId` is the provider's id for the user. Routes that act on one account
+(`/unlink-account`, `/get-access-token`, `/refresh-token`, `/account-info`)
+take the row's own `id` instead, as listed by `/list-accounts`. `scope` holds
+the granted scopes as a comma-separated list.
 
 You can add columns without forking anything: `UserOptions(additional_fields=...)`
 and `SessionOptions(additional_fields=...)` merge into the schema, the input
@@ -134,7 +149,7 @@ once at startup), `middlewares()` (path-scoped, `/prefix/**` matching),
 `hooks()` (matcher-gated before/after pairs), `rate_limit()` (per-path rules),
 and `on_request` / `on_response` for the outermost phases.
 
-The [26 built-in plugins](/plugins/) use exactly this surface: there is no
+The [27 built-in plugins](/plugins/) use exactly this surface: there is no
 private API they reach for that yours cannot.
 
 ## What parity means
@@ -160,6 +175,7 @@ runtimes can serve the same database at the same time.
 **Known divergences**, all deliberate and none visible on the wire:
 reset-password tokens are stored in the database (email-verification tokens
 stay stateless HS256 JWTs, as in TypeScript); bearer reading is core rather
-than a plugin. SAML (part of `sso`), `scim`, `stripe` and the JavaScript
-client/expo/electron/cli packages are out of scope. This is a server-side
-port.
+than a plugin. The account cookie (`useAccountCookie`) and the `jwe` cookie
+cache strategy are not ported. SAML (part of `sso`), `scim`, `stripe` and the
+JavaScript client/expo/electron/cli packages are out of scope. This is a
+server-side port.

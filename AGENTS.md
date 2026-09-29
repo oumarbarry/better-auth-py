@@ -4,7 +4,7 @@ Python port of [better-auth](https://github.com/better-auth/better-auth)
 (TypeScript). One uv workspace, two published packages:
 
 - repo root: `better-auth-server` (import name `better_auth`), at full
-  parity with better-auth **v1.6.29**;
+  parity with better-auth **v1.7.6**;
 - `packages/better-auth-client`: the Python HTTP client, with its own
   version, changelog and release tags.
 
@@ -14,7 +14,7 @@ validates internal anchors and regenerates `llms.txt`/`llms-full.txt`.
 ## Prime directive: wire & storage parity
 
 The TS repo is canonical (local reference: `../better-auth`, pinned to tag
-v1.6.29). Any behavior touching the wire or storage must match it exactly:
+v1.7.6). Any behavior touching the wire or storage must match it exactly:
 same routes, JSON shapes, error-code strings, camelCase DB columns, and
 crypto/token encodings. A TS server and this port must stay interchangeable
 on the same database. When in doubt, read the TS source and anchor your

@@ -19,7 +19,7 @@ The installer lists the skills in the repository; pick `better-auth-py` (a
 harness that reads the agent skills format (the CLI lists the supported
 ones). The skill teaches an agent to
 stand up a working server (FastAPI, Litestar, Flask or Django), protect routes,
-configure any of the 26 plugins and 35 social providers, migrate a Node
+configure any of the 27 plugins and 36 social providers, migrate a Node
 Better Auth server onto the same database, and avoid the classic mistakes
 (short secrets, the in-memory default adapter, missing `trusted_origins`).
 Every code snippet in the skill has been executed and verified against the

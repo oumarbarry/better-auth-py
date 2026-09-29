@@ -52,6 +52,7 @@ auth = BetterAuth(
 | `user_pool_id` | `str` | required | Missing raises `ValueError` at construction. |
 | `require_client_secret` | `bool` | `False` | Parity field from the TS options surface; not read by the flow. |
 | `disable_id_token_sign_in` | `bool` | `False` | Refuse direct id-token sign-in. |
+| `identity_provider` | `str \| None` | `None` | Sent as the `identity_provider` authorize param to skip the hosted UI and go straight to a federated provider (for example `"Google"` or a SAML provider name). A request `additionalParams` value wins. |
 
 All shared [`ProviderConfig` options](/providers/#per-provider-options) apply.
 

@@ -128,6 +128,25 @@ Plus `passkey`, `one_tap`, and the rest. The
 [README on PyPI](https://pypi.org/project/better-auth-client/) lists the full
 catalog.
 
+## Linked accounts
+
+Routes that act on one linked account take the account's Better Auth `id`,
+read from `list_accounts()`, as `accountId`. They do not take a `providerId`:
+
+```python
+accounts = client.list_accounts()
+github = next(a for a in accounts if a["providerId"] == "github")
+
+token = client.get_access_token(accountId=github["id"])
+info = client.account_info(accountId=github["id"])  # GET: sent as a query param
+client.unlink_account(accountId=github["id"])       # needs a fresh session
+```
+
+Providers configured with the [Generic OAuth plugin](/plugins/generic-oauth)
+use the same methods as built-in ones: `sign_in.social(provider="my-idp")` and
+`link_social(provider="my-idp")`. Servers upgraded from 1.0 may need changes on
+the client side too: see [Upgrade from 1.0](/migrate/from-1-0#python-client).
+
 ## Device flow
 
 For CLIs and other input-constrained programs, `device.flow()` runs the whole

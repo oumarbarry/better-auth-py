@@ -71,6 +71,37 @@ exposed as plain async methods on the plugin instance:
 - Cross-runtime storage parity: `secret` and `backupCodes` are
   XChaCha20-Poly1305 encrypted exactly like TS; a row written by the TS library
   verifies here and vice versa.
+- `/two-factor/enable` takes `password` and an optional `method`: `"totp"`
+  (the default) or `"otp"`. With `"totp"` the response is
+
+  ```json
+  {
+    "method": "totp",
+    "totpURI": "otpauth://...",
+    "backupCodes": ["..."]
+  }
+  ```
+
+  and 2FA turns on once the first code is verified (or right away with
+  `skip_verification_on_enable=True`). With `"otp"` 2FA turns on at once for
+  email or SMS codes, no authenticator app and no `twoFactor` row are needed,
+  and the response is `{"method": "otp"}`. `"otp"` needs
+  `otp_options["send_otp"]` (else a 400 `OTP_NOT_CONFIGURED`); `"totp"` fails
+  with a 400 `TOTP_NOT_CONFIGURED` when `totp_options["disable"]` is set.
+- Calling `/two-factor/enable` with `"totp"` after TOTP is verified returns a
+  400 `TOTP_ALREADY_ENABLED`. An unfinished enrollment is restarted in place
+  with a new secret and new backup codes.
+- An OTP-only account (no `twoFactor` row) can sign in with an OTP. The
+  account lockout only applies to accounts that have a `twoFactor` row.
+- When a challenge runs out of attempts it is cancelled. If the cancel fails,
+  the request fails with a 500 `FAILED_TO_INVALIDATE_TWO_FACTOR_CHALLENGE`
+  instead of letting the challenge stay usable.
 - Sign-in with 2FA enabled returns
   `{"twoFactorRedirect": true, "twoFactorMethods": [...]}` and sets the signed
   `two_factor` challenge cookie instead of a session.
+
+::: warning Changed in 1.1
+In 1.0, calling `/two-factor/enable` again replaced a verified TOTP secret.
+It now returns `TOTP_ALREADY_ENABLED`: disable 2FA first to enroll a new
+authenticator. See [Upgrade from 1.0](/migrate/from-1-0).
+:::

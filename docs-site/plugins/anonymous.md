@@ -24,7 +24,7 @@ auth = BetterAuth(
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `email_domain_name` | `str \| None` | `None` | Domain for the generated placeholder address (`temp-<id>@<domain>`); without it, `temp@<id>.com`. |
+| `email_domain_name` | `str \| None` | `None` | Domain for the generated placeholder address (`temp-<id>@<domain>`); without it, `<id>@anonymous.placeholder.invalid`. |
 | `on_link_account` | `callable \| None` | `None` | `({"anonymousUser": ..., "newUser": ...}) -> None`, called when the visitor signs up for real. |
 | `disable_delete_anonymous_user` | `bool` | `False` | Keep the anonymous user row after linking. |
 | `generate_name` | `callable \| None` | `None` | Custom display-name generator, `(ctx) -> str`. |
@@ -47,5 +47,15 @@ auth = BetterAuth(
 
 - An anonymous user cannot sign in anonymously again
   (`ANONYMOUS_USERS_CANNOT_SIGN_IN_AGAIN_ANONYMOUSLY`).
+- When `user.validate_user_info` is set, it runs before the anonymous user is
+  created, with `source` set to `{"action": "create-user", "method": "anonymous"}`.
 - Deliberate simplification: the TS per-instance `schema` field-name override
   is not exposed.
+
+::: warning Changed in 1.1
+Without `email_domain_name`, new anonymous users get
+`<id>@anonymous.placeholder.invalid` instead of `temp@<id>.com`. Existing users
+keep their email. Code that detects anonymous users by the old email pattern
+should check the `isAnonymous` column instead. See
+[Upgrade from 1.0](/migrate/from-1-0).
+:::

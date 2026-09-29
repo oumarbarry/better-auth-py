@@ -17,12 +17,12 @@ hero:
       link: https://github.com/oumarbarry/better-auth-py
 
 features:
-  - title: Full parity with Better Auth v1.6.29
+  - title: Full parity with Better Auth v1.7.6
     details: Identical paths, success and error bodies, error-code strings, camelCase columns, scrypt hash format and cookie signing scheme. A password created by the TypeScript library verifies in Python, and the reverse.
     link: /migrate/from-node
     linkText: What parity means
-  - title: 35 providers, 26 plugins
-    details: GitHub, Google, Apple, Microsoft Entra ID, Slack and 30 more built in, plus two-factor, admin, organization, passkeys, JWT, an OAuth 2.1 authorization server, SSO and API keys as first-party plugins.
+  - title: 36 providers, 27 plugins
+    details: GitHub, Google, Apple, Microsoft Entra ID, Slack and 31 more built in, plus two-factor, admin, organization, passkeys, JWT, an OAuth 2.1 authorization server, SSO and API keys as first-party plugins.
     link: /plugins/
     linkText: Browse the plugins
   - title: Your database, no service

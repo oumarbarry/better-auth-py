@@ -45,4 +45,9 @@ All shared [`ProviderConfig` options](/providers/#per-provider-options) apply.
 - Default scopes: `users.read tweet.read offline.access users.email`.
 - Register `{base_url}{base_path}/callback/twitter` as the callback URI in the X developer portal.
 - Token-endpoint client auth is **basic** (standard RFC 7617 base64, X rejects base64url).
-- The profile takes **two** calls to `/2/users/me`: one with `user.fields=profile_image_url`, one with `user.fields=confirmed_email` (X only returns email under that separate field query). A confirmed email sets `email_verified=True`; otherwise `email` falls back to the username, unverified.
+- The profile takes **two** calls to `/2/users/me`: one with `user.fields=profile_image_url`, one with `user.fields=confirmed_email` (X only returns email under that separate field query). A confirmed email sets `email_verified=True`. Without an email, new users get the placeholder `{id}@twitter.placeholder.invalid`, unverified.
+
+::: warning Changed in 1.1
+Without an email, a new user's email was the X username and is now the placeholder `{id}@twitter.placeholder.invalid`. Existing users keep the address stored at sign-up.
+See [Upgrade from 1.0](/migrate/from-1-0).
+:::

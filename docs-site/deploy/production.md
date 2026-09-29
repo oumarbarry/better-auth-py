@@ -54,6 +54,11 @@ Use real migrations. `await adapter.create_tables()` is a development
 convenience. In production, let Alembic own the schema so plugin tables and
 `additional_fields` are versioned with your code.
 
+The adapter checks the schema on first use. If a table or column Better Auth
+writes is missing, it logs a `Database schema mismatch` report and every auth
+request fails until the migration is applied. Run your migrations before the
+new code takes traffic. See [Schema check](/guide/configuration#schema-check).
+
 ## `base_url` and HTTPS
 
 ```python
@@ -110,6 +115,42 @@ List the CIDR ranges of your own proxies in `trusted_proxies`. The chain is
 walked from the right, and the first address outside the trusted set is the
 client. Set `disable_ip_tracking=True` if you would rather not store IPs at
 all.
+
+### Forwarded host and protocol {#forwarded-host-and-protocol}
+
+`X-Forwarded-Host` and `X-Forwarded-Proto` are ignored by default
+(`trusted_proxy_headers=False`, as in better-auth 1.7). The host then comes
+from the `Host` header and the protocol from the request URL. That is enough
+when:
+
+- `base_url` is a fixed string, or a `DynamicBaseURL` with `protocol="https"`;
+- the proxy passes the original `Host` header through (nginx:
+  `proxy_set_header Host $host;`);
+- uvicorn runs with `--proxy-headers`, so the request URL already says
+  `https` (see [Running it](#running-it)).
+
+Turn it on only when the proxy replaces `Host` with an internal name and sends
+the public host in `X-Forwarded-Host` instead:
+
+```python
+auth = BetterAuth(
+    secret=...,
+    base_url=DynamicBaseURL(allowed_hosts=["example.com"], protocol="https"),
+    trusted_proxy_headers=True,
+)
+```
+
+Then make sure the proxy overwrites both headers on every request, so a
+client cannot choose them. With nginx:
+
+```nginx
+proxy_set_header X-Forwarded-Host $host;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+A proxy that appends to a client's header, or passes it through unchanged,
+lets that client pick the host Better Auth builds URLs and origin checks
+from. Keep the app port closed to everything except the proxy.
 
 ## Rate limiting across workers
 
@@ -198,6 +239,8 @@ rejected, the answer is an entry in `trusted_origins`.
 - [ ] A real adapter, with schema managed by migrations
 - [ ] `base_url` on `https`, real frontend origins in `trusted_origins`
 - [ ] `trusted_proxies` set if you are behind a load balancer
+- [ ] `trusted_proxy_headers=True` only if the proxy overwrites `X-Forwarded-Host` and `X-Forwarded-Proto`
+- [ ] Migrations applied before deploy (the schema check fails requests otherwise)
 - [ ] `rate_limit.storage` not `"memory"` when running more than one worker
 - [ ] `--proxy-headers` (and `--forwarded-allow-ips`) on uvicorn
 - [ ] Mailer callbacks wired: `send_reset_password`, `send_verification_email`

@@ -4,7 +4,7 @@ title: Plugins
 
 # Plugins
 
-26 plugins ship with the package under `better_auth.plugins_ext`. Each one is a
+27 plugins ship with the package under `better_auth.plugins_ext`. Each one is a
 class; pass instances to `BetterAuth(plugins=[...])`.
 
 ```python
@@ -51,6 +51,7 @@ authoritative list. Each plugin has its own page:
 
 - [OAuth Provider](./oauth-provider): a full OAuth 2.1 / OIDC authorization server
 - [Device Authorization](./device-authorization): the RFC 8628 device flow
+- [OAuth Device Authorization](./oauth-provider#device-authorization-grant): the device grant for OAuth clients (`OAuthDeviceAuthorizationPlugin`)
 
 ## Federating outward
 

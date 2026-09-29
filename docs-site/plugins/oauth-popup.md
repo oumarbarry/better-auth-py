@@ -38,6 +38,8 @@ None. The plugin takes no options (same as TS).
   is pinned in the response CSP.
 - Implementation note: state is stored as a verification row plus a signed
   CSRF cookie
-  (this port's OAuth-state convention), so the normal `/callback` and
-  `/oauth2/callback` routes consume it unchanged; `additionalData` is nested
+  (this port's OAuth-state convention), so the normal `/callback/{provider}`
+  route consumes it unchanged (also `/oauth2/callback/{provider}` when
+  [Generic OAuth](./generic-oauth) runs with `legacy_routes=True`);
+  `additionalData` is nested
   under its own key with internal state keys stripped.

@@ -76,6 +76,24 @@ The base URL is then derived per request from the `Host` header, restricted to
 `allowed_hosts` can never resolve, so it raises at construction rather than on
 the first request.
 
+### `trusted_proxy_headers`
+
+```python
+auth = BetterAuth(
+    secret=...,
+    base_url=DynamicBaseURL(allowed_hosts=["example.com"], protocol="https"),
+    trusted_proxy_headers=True,  # default False
+)
+```
+
+When `True`, the host and protocol of a request come from `X-Forwarded-Host`
+and `X-Forwarded-Proto` when present. This is used to resolve a
+`DynamicBaseURL` and to infer the origin of a form posted with
+`Origin: null`. It is off by default, as in better-auth 1.7, because a client
+can send those headers itself. Turn it on only behind a proxy that overwrites
+both headers on every request: see
+[Production deploy](/deploy/production#forwarded-host-and-protocol).
+
 ## Storage
 
 ```python
@@ -89,6 +107,33 @@ auth = BetterAuth(secret=..., adapter=SQLAlchemyAdapter(engine))
 Omitting `adapter` gives you `MemoryAdapter()`: fine for a quickstart, wrong
 for anything that must survive a restart. See
 [Core concepts](/guide/concepts#adapters) for the custom-adapter contract.
+
+### Schema check
+
+On first use, `SQLAlchemyAdapter` checks that every table and column Better
+Auth writes exists, and that no required column is one Better Auth never
+fills. On a mismatch it logs one report and every auth request fails with
+`SchemaMismatchError`, including routes that never touch the database:
+
+```
+Database schema mismatch
+
+  Missing columns
+    team.memberCount
+```
+
+Apply your migrations, or run `await adapter.create_tables()` on a
+development database. The check runs again after `create_tables()`. To turn it
+off:
+
+```python
+from better_auth.config import AdvancedDatabase
+
+adapter = SQLAlchemyAdapter(engine, advanced=AdvancedDatabase(validate_schema=False))
+```
+
+Other adapters cannot validate the schema. The server logs that at startup:
+a warning if you set `validate_schema=True`, a debug message otherwise.
 
 ## Email and password
 
@@ -146,7 +191,20 @@ SessionOptions(
 
 `CookieCache` trades a database read on `/get-session` for a signed cookie
 valid for `max_age` seconds. Revocation is not instant while a cache is live,
-so keep `max_age` small.
+so keep `max_age` small. The cache cookie is only used together with the
+session cookie it was issued for.
+
+`strategy` picks the cookie format:
+
+| Strategy | Format |
+| --- | --- |
+| `"compact"` (default) | base64url payload with an HMAC-SHA256 signature |
+| `"jwt"` | an HS256 JWT signed with `secret` |
+
+With `strategy="jwt"` and `JWTPlugin(session_cookie_cache=True)`, the cookie is
+signed with the plugin's JWKS keys instead, so another service can verify it
+with `better_auth.cookie_cache.verify_session_cookie_jwt_with_jwks`. See
+[JWT](/plugins/jwt). The `jwe` strategy of better-auth is not ported.
 
 ## Users and accounts
 
@@ -185,6 +243,41 @@ package root.
 `additional_fields` extends the schema, the migration and the input allowlist
 together: `/update-user` will not accept a field you have not declared.
 
+### `validate_user_info`
+
+A hook that runs before Better Auth creates a user, links a provider account,
+or signs a returning OAuth user in. Return `None` to allow, or an error to
+refuse:
+
+```python
+async def validate_user_info(data, ctx):
+    user, source = data["user"], data["source"]
+    if source["method"] == "oauth" and not user["email"].endswith("@example.com"):
+        return {
+            "error": "domain_not_allowed",
+            "errorDescription": "Use your example.com account",
+        }
+    return None
+
+UserOptions(validate_user_info=validate_user_info)
+```
+
+`source["method"]` names how the user arrived: `"email-password"`, `"oauth"`,
+`"sso-oidc"`, `"admin"`, `"anonymous"`, `"email-otp"`, `"magic-link"`,
+`"phone-number"` or `"siwe"`. For OAuth, `source["oauth"]` holds the
+`providerId` and the provider `profile`. A refusal is a `403` whose code is
+your `error`; redirect flows pass it on as `?error=`. A hook that raises
+refuses too. The hook may be sync or async.
+
+### `legacy_account_selection`
+
+`/unlink-account`, `/get-access-token`, `/refresh-token` and `/account-info`
+select the account by its Better Auth `id` (`accountId` in the body, from
+`/list-accounts`). `AccountOptions(legacy_account_selection=True)` also accepts
+the 1.0 bodies (`providerId` with an optional provider `accountId`) while
+clients migrate. It is deprecated and will be removed. See
+[Upgrade from 1.0](/migrate/from-1-0#accounts).
+
 ## Social providers
 
 ```python
@@ -199,7 +292,7 @@ auth = BetterAuth(
 )
 ```
 
-Both forms work for all 35 built-ins. See [Social providers](/providers/).
+Both forms work for all 36 built-ins. See [Social providers](/providers/).
 
 ## Rate limiting
 
@@ -219,6 +312,10 @@ Better Auth's per-path rules are built in; `custom_rules` overrides them.
 `storage="memory"` counts per process: behind more than one worker, use
 `"database"` or `"secondary-storage"`.
 
+Each request is decided in one atomic step. A custom rate-limit storage can
+implement `consume(key, rule)` to do that itself; one with only `get` and `set`
+keeps working through a non-atomic path and logs a warning once.
+
 ## Secondary storage
 
 ```python
@@ -228,9 +325,14 @@ auth = BetterAuth(secret=..., secondary_storage=MemorySecondaryStorage())
 ```
 
 A Redis-shaped protocol (`get` / `set` / `delete`) used for rate-limit counters
-and, when configured, verification values. Any object implementing the
-`SecondaryStorage` protocol works: the in-memory one ships so tests do not
-need Redis.
+and, when configured, verification values and OAuth state. Any object
+implementing the `SecondaryStorage` protocol works: the in-memory one ships so
+tests do not need Redis.
+
+Also implement `increment(key, ttl)` (an atomic counter whose ttl is set when
+the key is created) and `get_and_delete(key)` (an atomic read and delete, for
+single-use values). better-auth 1.7 requires both. Without them the server
+falls back to a non-atomic read then write and logs a warning once.
 
 ## Client IP behind a proxy
 
@@ -298,7 +400,7 @@ auth = BetterAuth(
 )
 ```
 
-See the [plugin reference](/plugins/) for all 26.
+See the [plugin reference](/plugins/) for all 27.
 
 ## Escape hatches
 
@@ -312,6 +414,7 @@ See the [plugin reference](/plugins/) for all 26.
 | `skip_trailing_slashes` | `False` | Matches `/sign-in/email/` as `/sign-in/email` |
 | `on_api_error` | `None` | `OnAPIError(throw=..., on_error=..., error_url=...)` |
 | `http_client` | `None` | Bring your own `httpx.AsyncClient` for outbound OAuth calls |
+| `trusted_proxy_headers` | `False` | Reads host and protocol from `X-Forwarded-*` headers ([above](#trusted-proxy-headers)) |
 | `verification` | `None` | `VerificationOptions(store_identifier=..., store_in_database=...)` |
 
 ## A realistic production configuration

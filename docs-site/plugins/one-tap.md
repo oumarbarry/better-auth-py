@@ -35,7 +35,13 @@ auth = BetterAuth(
 
 ## Notes
 
-- The id token is verified against Google's JWKS (RS256/ES256) with the same
+- The id token is verified against Google's JWKS (RS256 only) with the same
   machinery as the core Google provider.
+- A token without an email is refused with a 400 (`Email not available in
+  token`). In 1.0 the endpoint answered 200 with an error body.
 - Also honors the registered [Google provider](/providers/)'s
-  `disable_sign_up` and its `authorize_params["hd"]` hosted-domain restriction.
+  `disable_sign_up` and its `hd` hosted-domain restriction
+  (`authorize_params["hd"]` still works).
+- When `user.validate_user_info` is set, it runs for One Tap sign-ins with
+  `source["method"]` set to `"oauth"` and `source["oauth"]["providerId"]` set
+  to `"google"`.

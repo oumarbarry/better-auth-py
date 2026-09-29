@@ -44,6 +44,6 @@ All shared [`ProviderConfig` options](/providers/#per-provider-options) apply.
 
 - Default scopes: none (Notion's permission model is the integration's capabilities, not OAuth scopes).
 - Register `{base_url}{base_path}/callback/notion` as the redirect URI on the public integration.
-- `owner=user` is always sent on the authorize URL (default `authorize_params`).
+- `owner=user` is always sent on the authorize URL. It wins over `authorize_params` and a request's `additionalParams`.
 - Token-endpoint client auth is **basic** (RFC 7617). Notion rejects the body-post form.
 - Userinfo is `GET /v1/users/me` with a `Notion-Version: 2022-06-28` header; the actual user profile is nested at `bot.owner.user`. `email` can be absent, and `email_verified` is always `False`.
