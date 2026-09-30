@@ -177,6 +177,16 @@ def assert_no_store(res: httpx.Response) -> None:
 # --- RP-Initiated Logout: confirmation flow (logout.ts:788-872) ------------------------
 
 
+def _replace_cookie(client, value: str, path: str) -> None:
+    """Swap the confirmation cookie the server set for ``value``. Adding a second cookie
+    with the same name instead leaves the one sent first up to the stdlib cookie jar,
+    which differs between Python versions."""
+    for cookie in list(client.cookies.jar):
+        if cookie.name == CONFIRM_COOKIE:
+            client.cookies.jar.clear(cookie.domain, cookie.path, cookie.name)
+    client.cookies.set(CONFIRM_COOKIE, value, path=path)
+
+
 async def test_requires_confirmation_before_deleting_the_session_without_a_hint():
     auth = provider_auth()
     async with make_client(auth) as c:
@@ -279,12 +289,12 @@ async def test_does_not_delete_when_the_confirmation_state_is_missing_or_tampere
         }
 
         await c.get(END_SESSION, headers=HTML)
-        c.cookies.set(CONFIRM_COOKIE, "tampered", path=CONFIRM)
+        _replace_cookie(c, "tampered", path=CONFIRM)
         tampered = await c.post(CONFIRM, data={"action": "confirm"}, headers=HTML)
         assert tampered.status_code == 400
         # logout.ts:827-834: an expired state is rejected the same way.
         expired = json.dumps({"sessionId": sid, "expiresAt": 0})
-        c.cookies.set(CONFIRM_COOKIE, sign_value(auth.secret, expired), path=CONFIRM)
+        _replace_cookie(c, sign_value(auth.secret, expired), path=CONFIRM)
         stale = await c.post(CONFIRM, data={"action": "confirm"}, headers=HTML)
         assert stale.status_code == 400
         assert await session_exists(auth, sid)
